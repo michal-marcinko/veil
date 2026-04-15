@@ -32,6 +32,50 @@ pub mod invoice_registry {
         invoice.bump = ctx.bumps.invoice;
         Ok(())
     }
+
+    pub fn create_invoice_restricted(
+        ctx: Context<CreateInvoice>,
+        nonce: [u8; 8],
+        metadata_hash: [u8; 32],
+        metadata_uri: String,
+        mint: Pubkey,
+        expires_at: Option<i64>,
+        payer: Pubkey,
+    ) -> Result<()> {
+        require!(metadata_uri.len() <= Invoice::MAX_URI_LEN, InvoiceError::UriTooLong);
+
+        let invoice = &mut ctx.accounts.invoice;
+        invoice.version = 1;
+        invoice.creator = ctx.accounts.creator.key();
+        invoice.payer = Some(payer);
+        invoice.mint = mint;
+        invoice.metadata_hash = metadata_hash;
+        invoice.metadata_uri = metadata_uri;
+        invoice.utxo_commitment = None;
+        invoice.status = InvoiceStatus::Pending;
+        invoice.created_at = Clock::get()?.unix_timestamp;
+        invoice.paid_at = None;
+        invoice.expires_at = expires_at;
+        invoice.nonce = nonce;
+        invoice.bump = ctx.bumps.invoice;
+        Ok(())
+    }
+
+    pub fn mark_paid(ctx: Context<MarkPaid>, utxo_commitment: [u8; 32]) -> Result<()> {
+        let invoice = &mut ctx.accounts.invoice;
+        require!(invoice.status == InvoiceStatus::Pending, InvoiceError::InvalidStatus);
+        if let Some(expected_payer) = invoice.payer {
+            require_keys_eq!(
+                ctx.accounts.payer.key(),
+                expected_payer,
+                InvoiceError::NotPayer
+            );
+        }
+        invoice.status = InvoiceStatus::Paid;
+        invoice.paid_at = Some(Clock::get()?.unix_timestamp);
+        invoice.utxo_commitment = Some(utxo_commitment);
+        Ok(())
+    }
 }
 
 #[account]
@@ -91,6 +135,13 @@ pub struct CreateInvoice<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct MarkPaid<'info> {
+    #[account(mut)]
+    pub invoice: Account<'info, Invoice>,
+    pub payer: Signer<'info>,
 }
 
 #[error_code]

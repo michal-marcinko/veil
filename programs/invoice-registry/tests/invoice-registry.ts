@@ -43,4 +43,70 @@ describe("invoice-registry", () => {
     expect(invoice.status).to.deep.equal({ pending: {} });
     expect(invoice.paidAt).to.be.null;
   });
+
+  it("marks an invoice as paid when the payer signs", async () => {
+    const creator = provider.wallet.publicKey;
+    const nonce = randomBytes(8);
+    const [pda] = invoicePda(creator, nonce);
+
+    const metadataHash = Array.from(randomBytes(32));
+    const utxoCommitment = Array.from(randomBytes(32));
+
+    // Create pending invoice with no restricted payer
+    await program.methods
+      .createInvoice(Array.from(nonce), metadataHash, "https://arweave.net/x", USDC_MINT, null)
+      .accounts({ invoice: pda, creator, systemProgram: SystemProgram.programId })
+      .rpc();
+
+    // Any signer can mark paid when payer is None
+    const randomPayer = Keypair.generate();
+    const airdropSig = await provider.connection.requestAirdrop(randomPayer.publicKey, 1e9);
+    await provider.connection.confirmTransaction(airdropSig);
+
+    await program.methods
+      .markPaid(utxoCommitment)
+      .accounts({ invoice: pda, payer: randomPayer.publicKey })
+      .signers([randomPayer])
+      .rpc();
+
+    const invoice = await program.account.invoice.fetch(pda);
+    expect(invoice.status).to.deep.equal({ paid: {} });
+    expect(invoice.paidAt).to.not.be.null;
+    expect(Array.from(invoice.utxoCommitment as Uint8Array)).to.deep.equal(utxoCommitment);
+  });
+
+  it("rejects mark_paid when payer is restricted and signer does not match", async () => {
+    const creator = provider.wallet.publicKey;
+    const nonce = randomBytes(8);
+    const [pda] = invoicePda(creator, nonce);
+
+    const designatedPayer = Keypair.generate();
+    const randomSigner = Keypair.generate();
+    const ad1 = await provider.connection.requestAirdrop(randomSigner.publicKey, 1e9);
+    await provider.connection.confirmTransaction(ad1);
+
+    // Create with restricted payer
+    await program.methods
+      .createInvoiceRestricted(
+        Array.from(nonce),
+        Array.from(randomBytes(32)),
+        "https://arweave.net/x",
+        USDC_MINT,
+        null,
+        designatedPayer.publicKey,
+      )
+      .accounts({ invoice: pda, creator, systemProgram: SystemProgram.programId })
+      .rpc();
+
+    try {
+      await program.methods
+        .markPaid(Array.from(randomBytes(32)))
+        .accounts({ invoice: pda, payer: randomSigner.publicKey })
+        .signers([randomSigner])
+        .rpc();
+      expect.fail("should have thrown");
+    } catch (err: any) {
+      expect(err.toString()).to.match(/NotPayer/);
+    }
+  });
 });
