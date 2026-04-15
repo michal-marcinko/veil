@@ -12,6 +12,14 @@
 
 **Scope note:** This plan covers MUST-HAVE features only. SHOULD-HAVE stretches (SNS pay-by-name, email notifications, multi-currency UI polish, privacy explainer page, mobile responsive) and COULD-HAVE stretches (Jupiter DX, Dune analytics, wallet-gated encryption, background sweeper worker) will be generated as a second plan after this one is executed end-to-end.
 
+## Design updates 2026-04-16 (from Day 1 findings)
+
+**1. Drop UTXO `optionalData` linkage.** Day 1 investigation confirmed `optionalData` is NOT exposed on `getPublicBalanceToReceiverClaimableUtxoCreatorFunction` — the `CreateUtxoArgs` is exactly `{ destinationAddress, mint, amount }`. There is no sender→receiver payload channel on UTXOs. **New linkage model:** Alice claims all UTXOs in `scan.publicReceived`. Invoice status is set by Bob's `mark_paid` call to our Anchor program (Bob signs for his own invoice payment, program trusts the signer). The `Invoice.utxo_commitment` field is retained as a write-once audit breadcrumb but is NOT used for matching. Affects Tasks 16, 17, 22, 23. Per-invoice "did Bob pay yet?" is answered by reading the Anchor PDA status, not by UTXO correlation.
+
+**2. Prover package function names.** `@umbra-privacy/web-zk-prover@2.0.1` exports the older `getCreateReceiverClaimableUtxoFromPublicBalanceProver` and `getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver` names (not the `...CreatorProver`/`...ClaimerProver` names I originally wrote). SDK+prover are pinned at 2.x (4.x is latest SDK but the prover lags). Affects Tasks 3, 16, 17.
+
+**3. Wallet adapter path.** Umbra docs recommend `@wallet-standard/react` + `createSignerFromWalletAccount`, not `@solana/wallet-adapter-react` directly. If Task 10's direct integration fails, switch to the wallet-standard path. Flag and fix in Task 10.
+
 ---
 
 ## Phase 0 — Workspace setup and Day 1 investigation
@@ -242,8 +250,8 @@ import {
   getEncryptedBalanceQuerierFunction,
 } from "@umbra-privacy/sdk";
 import {
-  getPublicBalanceToReceiverClaimableUtxoCreatorProver,
-  getReceiverClaimableUtxoToEncryptedBalanceClaimerProver,
+  getCreateReceiverClaimableUtxoFromPublicBalanceProver,
+  getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver,
 } from "@umbra-privacy/web-zk-prover";
 
 describe("Umbra SDK imports", () => {
@@ -260,8 +268,8 @@ describe("Umbra SDK imports", () => {
   });
 
   it("exports ZK provers we depend on", () => {
-    expect(getPublicBalanceToReceiverClaimableUtxoCreatorProver).toBeTypeOf("function");
-    expect(getReceiverClaimableUtxoToEncryptedBalanceClaimerProver).toBeTypeOf("function");
+    expect(getCreateReceiverClaimableUtxoFromPublicBalanceProver).toBeTypeOf("function");
+    expect(getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver).toBeTypeOf("function");
   });
 });
 ```
