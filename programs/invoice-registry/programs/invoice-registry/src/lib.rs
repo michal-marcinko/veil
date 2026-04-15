@@ -76,6 +76,13 @@ pub mod invoice_registry {
         invoice.utxo_commitment = Some(utxo_commitment);
         Ok(())
     }
+
+    pub fn cancel_invoice(ctx: Context<CancelInvoice>) -> Result<()> {
+        let invoice = &mut ctx.accounts.invoice;
+        require!(invoice.status == InvoiceStatus::Pending, InvoiceError::InvalidStatus);
+        invoice.status = InvoiceStatus::Cancelled;
+        Ok(())
+    }
 }
 
 #[account]
@@ -142,6 +149,16 @@ pub struct MarkPaid<'info> {
     #[account(mut)]
     pub invoice: Account<'info, Invoice>,
     pub payer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CancelInvoice<'info> {
+    #[account(
+        mut,
+        has_one = creator @ InvoiceError::NotCreator,
+    )]
+    pub invoice: Account<'info, Invoice>,
+    pub creator: Signer<'info>,
 }
 
 #[error_code]

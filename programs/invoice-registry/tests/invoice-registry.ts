@@ -109,4 +109,49 @@ describe("invoice-registry", () => {
       expect(err.toString()).to.match(/NotPayer/);
     }
   });
+
+  it("allows creator to cancel a pending invoice", async () => {
+    const creator = provider.wallet.publicKey;
+    const nonce = randomBytes(8);
+    const [pda] = invoicePda(creator, nonce);
+
+    await program.methods
+      .createInvoice(Array.from(nonce), Array.from(randomBytes(32)), "https://arweave.net/x", USDC_MINT, null)
+      .accounts({ invoice: pda, creator, systemProgram: SystemProgram.programId })
+      .rpc();
+
+    await program.methods
+      .cancelInvoice()
+      .accounts({ invoice: pda, creator })
+      .rpc();
+
+    const invoice = await program.account.invoice.fetch(pda);
+    expect(invoice.status).to.deep.equal({ cancelled: {} });
+  });
+
+  it("rejects cancel from non-creator", async () => {
+    const creator = provider.wallet.publicKey;
+    const nonce = randomBytes(8);
+    const [pda] = invoicePda(creator, nonce);
+
+    await program.methods
+      .createInvoice(Array.from(nonce), Array.from(randomBytes(32)), "https://arweave.net/x", USDC_MINT, null)
+      .accounts({ invoice: pda, creator, systemProgram: SystemProgram.programId })
+      .rpc();
+
+    const stranger = Keypair.generate();
+    const ad = await provider.connection.requestAirdrop(stranger.publicKey, 1e9);
+    await provider.connection.confirmTransaction(ad);
+
+    try {
+      await program.methods
+        .cancelInvoice()
+        .accounts({ invoice: pda, creator: stranger.publicKey })
+        .signers([stranger])
+        .rpc();
+      expect.fail("should have thrown");
+    } catch (err: any) {
+      expect(err.toString()).to.match(/NotCreator|ConstraintHasOne|ConstraintSeeds/);
+    }
+  });
 });
