@@ -1,0 +1,16 @@
+{
+  "name": "veil-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "app"
+  ],
+  "scripts": {
+    "dev": "npm --workspace app run dev",
+    "build": "npm --workspace app run build",
+    "test": "npm --workspace app run test",
+    "anchor:build": "cd programs/invoice-registry && anchor build",
+    "anchor:test": "cd programs/invoice-registry && anchor test",
+    "anchor:deploy:devnet": "cd programs/invoice-registry && anchor deploy --provider.cluster devnet"
+  }
+}
