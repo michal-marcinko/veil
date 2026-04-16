@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMetadata, validateMetadata, type InvoiceMetadata } from "../src/lib/types";
+import { buildMetadata, validateMetadata, type InvoiceMetadata } from "@/lib/types";
 
 describe("invoice metadata", () => {
   it("builds a well-formed metadata object", () => {

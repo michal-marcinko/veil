@@ -12,5 +12,9 @@
     "anchor:build": "cd programs/invoice-registry && anchor build",
     "anchor:test": "cd programs/invoice-registry && anchor test",
     "anchor:deploy:devnet": "cd programs/invoice-registry && anchor deploy --provider.cluster devnet"
+  },
+  "overrides": {
+    "react": "18.3.0",
+    "react-dom": "18.3.0"
   }
 }
