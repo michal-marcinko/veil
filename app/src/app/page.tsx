@@ -1,10 +1,14 @@
+"use client";
+
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+
 export default function LandingPage() {
   return (
     <main className="min-h-screen flex items-center justify-center p-8">
       <div className="max-w-2xl text-center">
         <h1 className="text-5xl font-bold mb-4">Veil</h1>
         <p className="text-xl text-gray-400 mb-8">Private invoicing on Solana</p>
-        <div className="flex gap-4 justify-center">
+        <div className="flex gap-4 justify-center mb-6">
           <a href="/create" className="px-6 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-700">
             Create Invoice
           </a>
@@ -12,6 +16,7 @@ export default function LandingPage() {
             Dashboard
           </a>
         </div>
+        <WalletMultiButton />
       </div>
     </main>
   );
