@@ -190,3 +190,41 @@ export async function getEncryptedBalance(
   }
   return 0n;
 }
+
+// ---------------------------------------------------------------------------
+// Task 18: Compliance grant issuance
+// ---------------------------------------------------------------------------
+
+import { getComplianceGrantIssuerFunction } from "@umbra-privacy/sdk";
+
+export interface ComplianceGrantArgs {
+  client: UmbraClient;
+  /** Auditor / receiver wallet address (base58). */
+  receiverAddress: string;
+  /** Granter's MVK X25519 public key (32 bytes). */
+  granterX25519PubKey: Uint8Array;
+  /** Receiver's X25519 public key (32 bytes). */
+  receiverX25519PubKey: Uint8Array;
+  /** Optional nonce — defaults to BigInt(Date.now()) per SDK example. */
+  nonce?: bigint;
+}
+
+/**
+ * Issue a compliance (viewing) grant to `receiver` so they can decrypt
+ * shared ciphertexts produced by this client. Real SDK signature (as of
+ * @umbra-privacy/sdk 2.0.3) is positional:
+ *   createGrant(receiver, granterX25519, receiverX25519, nonce, ...)
+ *   returns Promise<TransactionSignature>
+ * (NOT the object-param form drafted in the plan).
+ */
+export async function issueComplianceGrant(args: ComplianceGrantArgs): Promise<string> {
+  const createGrant = getComplianceGrantIssuerFunction({ client: args.client });
+  const nonce = args.nonce ?? BigInt(Date.now());
+  const signature = await createGrant(
+    args.receiverAddress as any,
+    args.granterX25519PubKey as any,
+    args.receiverX25519PubKey as any,
+    nonce as any,
+  );
+  return signature as unknown as string;
+}
