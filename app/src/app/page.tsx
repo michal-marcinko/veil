@@ -1,6 +1,6 @@
 "use client";
 
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 
 export default function LandingPage() {
   return (
@@ -16,7 +16,7 @@ export default function LandingPage() {
             Dashboard
           </a>
         </div>
-        <WalletMultiButton />
+        <ClientWalletMultiButton />
       </div>
     </main>
   );

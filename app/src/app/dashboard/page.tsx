@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { DashboardList } from "@/components/DashboardList";
 import { fetchInvoicesByCreator } from "@/lib/anchor";
 import {
@@ -61,7 +61,7 @@ export default function DashboardPage() {
       <main className="min-h-screen p-8 max-w-4xl mx-auto">
         <h1 className="text-3xl font-bold mb-6">Dashboard</h1>
         <p className="mb-4">Connect your wallet to see your invoices.</p>
-        <WalletMultiButton />
+        <ClientWalletMultiButton />
       </main>
     );
   }

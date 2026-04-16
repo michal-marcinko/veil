@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { PublicKey } from "@solana/web3.js";
 import { InvoiceForm, type InvoiceFormValues } from "@/components/InvoiceForm";
 import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/components/RegistrationModal";
@@ -110,7 +110,7 @@ export default function CreatePage() {
       <main className="min-h-screen p-8 max-w-2xl mx-auto">
         <h1 className="text-3xl font-bold mb-6">Create Invoice</h1>
         <p className="mb-4">Connect your wallet to continue.</p>
-        <WalletMultiButton />
+        <ClientWalletMultiButton />
       </main>
     );
   }

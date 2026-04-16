@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import bs58 from "bs58";
 // NOTE: The caller prompt referenced `getMasterViewingKeyX25519KeypairGenerator`,
 // but the actual SDK export (verified in node_modules/@umbra-privacy/sdk/dist/crypto/index.d.ts)
@@ -81,7 +81,7 @@ export default function CompliancePage() {
       <main className="min-h-screen p-8 max-w-2xl mx-auto">
         <h1 className="text-3xl font-bold mb-6">Compliance Grants</h1>
         <p className="mb-4">Connect wallet to manage grants.</p>
-        <WalletMultiButton />
+        <ClientWalletMultiButton />
       </main>
     );
   }
