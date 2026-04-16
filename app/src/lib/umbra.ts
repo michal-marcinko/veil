@@ -121,3 +121,72 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
     closeProofAccountSignature: result.closeProofAccountSignature as unknown as string | undefined,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Task 17: Scan + claim + encrypted-balance query (Alice receives)
+// ---------------------------------------------------------------------------
+
+import {
+  getClaimableUtxoScannerFunction,
+  getReceiverClaimableUtxoToEncryptedBalanceClaimerFunction,
+  getUmbraRelayer,
+  getEncryptedBalanceQuerierFunction,
+} from "@umbra-privacy/sdk";
+import {
+  getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver,
+} from "@umbra-privacy/web-zk-prover";
+import { UMBRA_RELAYER_API } from "./constants";
+
+/**
+ * Scan for claimable UTXOs sent to the current client's wallet.
+ *
+ * Per the Design 2026-04-16 addendum, callers should treat ALL returned
+ * UTXOs as claimable — there is no UTXO-to-invoice linkage via optionalData.
+ * Per-invoice "did Bob pay?" is answered by reading the Anchor PDA status,
+ * not by UTXO correlation.
+ */
+export async function scanClaimableUtxos(client: UmbraClient) {
+  const scan = getClaimableUtxoScannerFunction({ client });
+  // treeIndex 0, startInsertionIndex 0 — scan the full current tree.
+  const result = await scan(0 as any, 0 as any);
+  return {
+    received: result.received,
+    publicReceived: result.publicReceived,
+  };
+}
+
+export interface ClaimArgs {
+  client: UmbraClient;
+  utxos: any[]; // ScannedUtxoData[] — opaque to us
+}
+
+export async function claimUtxos(args: ClaimArgs) {
+  const zkProver = getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver();
+  const relayer = getUmbraRelayer({ apiEndpoint: UMBRA_RELAYER_API } as any);
+  const claim = getReceiverClaimableUtxoToEncryptedBalanceClaimerFunction(
+    { client: args.client },
+    { zkProver, relayer } as any,
+  );
+  return claim(args.utxos as any);
+}
+
+/**
+ * Query the encrypted balance for a specific mint on the current client.
+ *
+ * The SDK's querier takes an array of mints and returns a Map. We unpack
+ * the single-mint case here. Returns 0n when the account has no "shared"
+ * state (non_existent / uninitialized / mxe all surface as 0).
+ */
+export async function getEncryptedBalance(
+  client: UmbraClient,
+  mint: string,
+): Promise<bigint> {
+  const query = getEncryptedBalanceQuerierFunction({ client });
+  const results = await query([mint as any]);
+  for (const [, result] of results as any) {
+    if (result?.state === "shared") {
+      return BigInt(result.balance);
+    }
+  }
+  return 0n;
+}
