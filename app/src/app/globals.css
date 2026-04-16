@@ -2,7 +2,169 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #0b0f19;
-  color: #e5e7eb;
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    font-feature-settings: "kern", "ss01";
+  }
+
+  body {
+    background-color: #0a0a0a;
+    color: #f5f5f4;
+  }
+
+  /* Subtle SVG grain overlay — atmosphere without shadows */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.96 0 0 0 0 0.96 0 0 0 0 0.94 0 0 0 1 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
+    mix-blend-mode: overlay;
+  }
+
+  .font-serif {
+    letter-spacing: -0.01em;
+    font-feature-settings: "ss01", "kern", "liga";
+  }
+
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1) opacity(0.45);
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: #d4a64f;
+    color: #0a0a0a;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a28;
+    border-radius: 0;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a38;
+  }
+
+  /* Override wallet adapter button styling to match editorial palette */
+  .wallet-adapter-button-trigger {
+    background-color: transparent !important;
+    border: 1px solid #2a2a28 !important;
+    border-radius: 0 !important;
+    font-family: var(--font-sans), system-ui, sans-serif !important;
+    font-weight: 400 !important;
+    height: auto !important;
+    padding: 0.75rem 1.25rem !important;
+    color: #f5f5f4 !important;
+    transition: border-color 200ms ease, color 200ms ease !important;
+  }
+
+  .wallet-adapter-button-trigger:hover {
+    background-color: transparent !important;
+    border-color: #d4a64f !important;
+    color: #d4a64f !important;
+  }
+
+  .wallet-adapter-button:not([disabled]):focus-visible {
+    outline-color: #d4a64f !important;
+  }
+
+  .wallet-adapter-button-start-icon {
+    margin-right: 0.5rem !important;
+  }
+}
+
+@layer components {
+  /* Editorial link underline that wipes in on hover */
+  .link-under {
+    position: relative;
+    transition: color 150ms ease;
+  }
+
+  .link-under::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -3px;
+    height: 1px;
+    background: currentColor;
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .link-under:hover::after,
+  .link-under:focus-visible::after {
+    transform: scaleX(1);
+  }
+
+  /* Editorial underline-only input */
+  .input-editorial {
+    @apply w-full bg-transparent border-0 border-b border-line
+           py-2.5 px-0 text-cream placeholder:text-dim
+           focus:outline-none focus:border-gold
+           transition-colors duration-200 text-base;
+    caret-color: #d4a64f;
+  }
+
+  .input-editorial:focus {
+    caret-color: #d4a64f;
+  }
+
+  textarea.input-editorial {
+    line-height: 1.6;
+  }
+
+  /* Monospace metadata chip */
+  .mono-chip {
+    @apply font-mono text-[11px] tracking-[0.18em] uppercase text-muted;
+  }
+
+  .section-no {
+    @apply font-mono text-[11px] tracking-[0.2em] uppercase text-dim;
+  }
+
+  /* Primary button — fills with gold, inverts on hover. No rounding. */
+  .btn-primary {
+    @apply relative inline-flex items-center justify-center gap-3
+           bg-gold text-ink px-7 py-3.5 font-sans font-medium
+           tracking-tight text-[15px]
+           border border-gold transition-all duration-200
+           hover:bg-ink hover:text-gold
+           focus:outline-none focus-visible:ring-1 focus-visible:ring-gold focus-visible:ring-offset-2 focus-visible:ring-offset-ink
+           disabled:opacity-40 disabled:cursor-not-allowed
+           disabled:hover:bg-gold disabled:hover:text-ink;
+  }
+
+  /* Ghost button — outlined */
+  .btn-ghost {
+    @apply relative inline-flex items-center justify-center gap-3
+           bg-transparent text-cream px-7 py-3.5 font-sans
+           tracking-tight text-[15px]
+           border border-line transition-all duration-200
+           hover:border-cream hover:text-cream
+           focus:outline-none focus-visible:ring-1 focus-visible:ring-cream focus-visible:ring-offset-2 focus-visible:ring-offset-ink;
+  }
+
+  /* Small text button */
+  .btn-quiet {
+    @apply font-mono text-[12px] tracking-[0.14em] uppercase
+           text-gold hover:text-cream transition-colors duration-200;
+  }
 }
