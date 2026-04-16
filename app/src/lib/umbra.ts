@@ -71,3 +71,53 @@ export async function ensureRegistered(
       : undefined,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Task 16: Pay invoice (public-balance → receiver-claimable UTXO creation)
+// ---------------------------------------------------------------------------
+
+import {
+  getPublicBalanceToReceiverClaimableUtxoCreatorFunction,
+} from "@umbra-privacy/sdk";
+import {
+  getCreateReceiverClaimableUtxoFromPublicBalanceProver,
+} from "@umbra-privacy/web-zk-prover";
+
+export interface PayInvoiceArgs {
+  client: UmbraClient;
+  recipientAddress: string;   // Alice's wallet (payee)
+  mint: string;               // USDC mint
+  amount: bigint;             // in native units
+}
+
+export interface PayInvoiceResult {
+  createProofAccountSignature: string;
+  createUtxoSignature: string;
+  closeProofAccountSignature?: string;
+}
+
+/**
+ * Pay an invoice by creating a receiver-claimable UTXO funded from Bob's
+ * public ATA. Per the Design 2026-04-16 addendum, optionalData is NOT
+ * exposed on `CreateUtxoArgs` — the linkage between UTXO and invoice is
+ * established off-chain (Bob calls `markPaidOnChain` separately).
+ */
+export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
+  const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver();
+  const create = getPublicBalanceToReceiverClaimableUtxoCreatorFunction(
+    { client: args.client },
+    { zkProver } as any,
+  );
+
+  const result = await create({
+    destinationAddress: args.recipientAddress as any,
+    mint: args.mint as any,
+    amount: args.amount as any,
+  });
+
+  return {
+    createProofAccountSignature: result.createProofAccountSignature as unknown as string,
+    createUtxoSignature: result.createUtxoSignature as unknown as string,
+    closeProofAccountSignature: result.closeProofAccountSignature as unknown as string | undefined,
+  };
+}
