@@ -5,9 +5,12 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey } from "@solana/web3.js";
 import { InvoiceView } from "@/components/InvoiceView";
+import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/components/RegistrationModal";
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
-import { fetchInvoice } from "@/lib/anchor";
+import { fetchInvoice, markPaidOnChain } from "@/lib/anchor";
+import { getOrCreateClient, ensureRegistered, payInvoice } from "@/lib/umbra";
+import { USDC_MINT } from "@/lib/constants";
 import type { InvoiceMetadata } from "@/lib/types";
 
 export default function PayPage({ params }: { params: { id: string } }) {
@@ -15,6 +18,14 @@ export default function PayPage({ params }: { params: { id: string } }) {
   const [metadata, setMetadata] = useState<InvoiceMetadata | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [paying, setPaying] = useState(false);
+  const [regOpen, setRegOpen] = useState(false);
+  const [regSteps, setRegSteps] = useState<Record<RegistrationStep, StepStatus>>({
+    init: "pending",
+    x25519: "pending",
+    commitment: "pending",
+  });
+  const [paid, setPaid] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -63,6 +74,41 @@ export default function PayPage({ params }: { params: { id: string } }) {
     })();
   }, [params.id, wallet.publicKey]);
 
+  async function handlePay() {
+    if (!metadata || !wallet.publicKey) return;
+    setPaying(true);
+    setError(null);
+    try {
+      const client = await getOrCreateClient(wallet as any);
+      setRegOpen(true);
+      await ensureRegistered(client, (step, st) =>
+        setRegSteps((p) => ({ ...p, [step]: st === "pre" ? "in_progress" : "done" })),
+      );
+      setRegOpen(false);
+
+      const invoicePda = new PublicKey(params.id);
+      // Per the 2026-04-16 design addendum, utxo_commitment in mark_paid is an
+      // audit-only breadcrumb, not used for matching. The real PayInvoiceArgs
+      // interface does not accept invoicePda and does not return a commitment,
+      // so we pass 32 zero bytes as a placeholder.
+      const utxoCommitment = new Uint8Array(32);
+      await payInvoice({
+        client,
+        recipientAddress: metadata.creator.wallet,
+        mint: USDC_MINT.toBase58(),
+        amount: BigInt(metadata.total),
+      });
+
+      await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
+      setPaid(true);
+    } catch (err: any) {
+      setError(err.message ?? String(err));
+      setRegOpen(false);
+    } finally {
+      setPaying(false);
+    }
+  }
+
   if (error) {
     return (
       <main className="min-h-screen p-8 max-w-2xl mx-auto">
@@ -92,14 +138,22 @@ export default function PayPage({ params }: { params: { id: string } }) {
   return (
     <main className="min-h-screen p-8 max-w-2xl mx-auto">
       <InvoiceView metadata={metadata} />
-      <div className="mt-6">
-        <button
-          disabled
-          className="w-full px-6 py-3 bg-indigo-600 rounded-lg disabled:opacity-50"
-        >
-          Pay (enabled in Task 22)
-        </button>
-      </div>
+      {paid ? (
+        <div className="mt-6 bg-green-900/30 border border-green-700 p-4 rounded">
+          ✓ Payment sent. The recipient will receive this when they open their dashboard.
+        </div>
+      ) : (
+        <div className="mt-6">
+          <button
+            onClick={handlePay}
+            disabled={paying}
+            className="w-full px-6 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {paying ? "Processing..." : `Pay ${BigInt(metadata.total) / 1_000_000n} USDC`}
+          </button>
+        </div>
+      )}
+      <RegistrationModal open={regOpen} steps={regSteps} />
       {status && <div className="mt-4 text-gray-400">{status}</div>}
     </main>
   );
