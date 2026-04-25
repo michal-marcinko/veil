@@ -11,6 +11,7 @@ target/
 veil-bundlr.json
 *-keypair.json
 app/scripts/
+worktrees/
 .DS_Store
 test-ledger/
 .swarmhash
