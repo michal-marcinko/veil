@@ -39,8 +39,10 @@ export interface InvoiceMetadata {
   terms: string | null;
   notes: string | null;
   // Optional grouping key for batch/payroll invoices. Null for single invoices
-  // created pre-Feature-B or created through /create.
-  batch_id: string | null;
+  // created pre-Feature-B or created through /create. Optional in the type
+  // signature to preserve back-compat with object literals constructed before
+  // Feature B (e.g. existing tests).
+  batch_id?: string | null;
 }
 
 export interface BuildMetadataArgs {
