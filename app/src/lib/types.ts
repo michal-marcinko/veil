@@ -38,6 +38,11 @@ export interface InvoiceMetadata {
   due_date: string | null;
   terms: string | null;
   notes: string | null;
+  // Optional grouping key for batch/payroll invoices. Null for single invoices
+  // created pre-Feature-B or created through /create. Optional in the type
+  // signature to preserve back-compat with object literals constructed before
+  // Feature B (e.g. existing tests).
+  batch_id?: string | null;
 }
 
 export interface BuildMetadataArgs {
@@ -59,6 +64,7 @@ export interface BuildMetadataArgs {
   dueDate: string | null;
   terms: string | null;
   notes: string | null;
+  batchId?: string | null;
 }
 
 export function buildMetadata(args: BuildMetadataArgs): InvoiceMetadata {
@@ -90,6 +96,7 @@ export function buildMetadata(args: BuildMetadataArgs): InvoiceMetadata {
     due_date: args.dueDate,
     terms: args.terms,
     notes: args.notes,
+    batch_id: args.batchId ?? null,
   };
 }
 
@@ -102,5 +109,15 @@ export function validateMetadata(md: InvoiceMetadata): void {
   const expectedTotal = BigInt(md.subtotal) + BigInt(md.tax);
   if (BigInt(md.total) !== expectedTotal) {
     throw new Error(`total ${md.total} does not match subtotal + tax ${expectedTotal}`);
+  }
+  // batch_id: absent (undefined), null, or a non-empty string. Empty string and
+  // non-string types are rejected so downstream filters can trust the value.
+  if (md.batch_id !== null && md.batch_id !== undefined) {
+    if (typeof md.batch_id !== "string") {
+      throw new Error(`batch_id must be a string or null, got ${typeof md.batch_id}`);
+    }
+    if (md.batch_id.length === 0) {
+      throw new Error("batch_id must be a non-empty string when present");
+    }
   }
 }
