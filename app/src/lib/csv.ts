@@ -108,3 +108,27 @@ export function generateBatchId(now: Date = new Date()): string {
   const rand = Math.random().toString(36).slice(2, 8);
   return `batch_${ts}_${rand}`;
 }
+
+/**
+ * Convert a decimal string like "100.50" to base units (e.g. microUSDC when
+ * decimals=6). Returns null for any invalid input including over-precision
+ * (more fractional digits than `decimals`). Identical semantics to the helper
+ * inlined in app/src/app/create/page.tsx; exported here so the payroll flow
+ * imports it directly instead of re-implementing.
+ */
+export function parseAmountToBaseUnits(value: string, decimals: number): bigint | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(new RegExp(`^(\\d+)(?:\\.(\\d{0,${decimals}}))?$`));
+  if (!match) return null;
+  // Reject over-precision: if the user typed more fractional digits than
+  // decimals allows, the regex above will not match (the inner group is
+  // constrained to {0,decimals}) — but only when the first group still consumes
+  // the leading digits and there's no trailing content. Validate by reassembly:
+  const whole = match[1];
+  const frac = match[2] ?? "";
+  if (frac.length > decimals) return null;
+  const wholeN = BigInt(whole);
+  const fracPadded = frac.padEnd(decimals, "0").slice(0, decimals);
+  return wholeN * 10n ** BigInt(decimals) + BigInt(fracPadded);
+}

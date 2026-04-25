@@ -89,3 +89,39 @@ describe("parsePayrollCsv", () => {
     expect(errors.some((e) => /50/.test(e))).toBe(true);
   });
 });
+
+import { parseAmountToBaseUnits } from "@/lib/csv";
+
+describe("parseAmountToBaseUnits", () => {
+  it("converts whole amounts", () => {
+    expect(parseAmountToBaseUnits("100", 6)).toBe(100_000_000n);
+  });
+
+  it("converts amounts with fractional part", () => {
+    expect(parseAmountToBaseUnits("1.5", 6)).toBe(1_500_000n);
+  });
+
+  it("pads short fractions", () => {
+    expect(parseAmountToBaseUnits("0.1", 6)).toBe(100_000n);
+  });
+
+  it("accepts max-precision fractions", () => {
+    expect(parseAmountToBaseUnits("0.123456", 6)).toBe(123_456n);
+  });
+
+  it("returns null for over-precision", () => {
+    expect(parseAmountToBaseUnits("0.1234567", 6)).toBeNull();
+  });
+
+  it("returns null for non-numeric", () => {
+    expect(parseAmountToBaseUnits("abc", 6)).toBeNull();
+  });
+
+  it("returns null for empty", () => {
+    expect(parseAmountToBaseUnits("", 6)).toBeNull();
+  });
+
+  it("respects decimals=9 for wSOL", () => {
+    expect(parseAmountToBaseUnits("1", 9)).toBe(1_000_000_000n);
+  });
+});
