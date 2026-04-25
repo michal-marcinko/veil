@@ -76,3 +76,52 @@ describe("persisted grant registry", () => {
     expect(remaining[0].signature).toBe("s2");
   });
 });
+
+import bs58 from "bs58";
+import { issueComplianceGrant } from "@/lib/umbra";
+
+describe("issueComplianceGrant persistence", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+      clear: () => { store.clear(); },
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+  });
+
+  it("persists a PersistedGrant after successful issuance", async () => {
+    const granterAddress = "Alice1111111111111111111111111111111111111";
+    const fakeSig = "signature-abc-123";
+    const granterX25519 = new Uint8Array(32).fill(7);
+    const receiverX25519 = new Uint8Array(32).fill(9);
+    const nonce = 1745251200000n;
+
+    // Fake client: we only need { signer.address } and the SDK factory to be
+    // replaceable. issueComplianceGrant delegates to getComplianceGrantIssuerFunction,
+    // which we stub via dependency injection — see Step 2 implementation.
+    const fakeClient = { signer: { address: granterAddress } } as any;
+
+    await issueComplianceGrant({
+      client: fakeClient,
+      receiverAddress: "Bob222222222222222222222222222222222222222",
+      granterX25519PubKey: granterX25519,
+      receiverX25519PubKey: receiverX25519,
+      nonce,
+      __issuerOverride: async () => fakeSig,
+    });
+
+    const persisted = readPersistedGrants(granterAddress);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].granterAddress).toBe(granterAddress);
+    expect(persisted[0].receiverAddress).toBe("Bob222222222222222222222222222222222222222");
+    expect(persisted[0].granterX25519Base58).toBe(bs58.encode(granterX25519));
+    expect(persisted[0].receiverX25519Base58).toBe(bs58.encode(receiverX25519));
+    expect(persisted[0].nonce).toBe("1745251200000");
+    expect(persisted[0].signature).toBe(fakeSig);
+    expect(persisted[0].issuedAt).toBeGreaterThan(0);
+  });
+});

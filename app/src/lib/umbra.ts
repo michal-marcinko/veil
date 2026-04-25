@@ -445,6 +445,7 @@ export async function getEncryptedBalance(
 // Task 18: Compliance grant issuance
 // ---------------------------------------------------------------------------
 
+import bs58 from "bs58";
 import { getComplianceGrantIssuerFunction } from "@umbra-privacy/sdk";
 
 export interface ComplianceGrantArgs {
@@ -457,6 +458,13 @@ export interface ComplianceGrantArgs {
   receiverX25519PubKey: Uint8Array;
   /** Optional nonce — defaults to BigInt(Date.now()) per SDK example. */
   nonce?: bigint;
+  /** Test-only: replace the real SDK issuer with a stub returning a signature. */
+  __issuerOverride?: (
+    receiver: string,
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    nonce: bigint,
+  ) => Promise<string>;
 }
 
 /**
@@ -466,17 +474,35 @@ export interface ComplianceGrantArgs {
  *   createGrant(receiver, granterX25519, receiverX25519, nonce, ...)
  *   returns Promise<TransactionSignature>
  * (NOT the object-param form drafted in the plan).
+ *
+ * Side-effect: persists the grant to localStorage for later listing/revoke
+ * (see PersistedGrant + listComplianceGrants).
  */
 export async function issueComplianceGrant(args: ComplianceGrantArgs): Promise<string> {
-  const createGrant = getComplianceGrantIssuerFunction({ client: args.client });
   const nonce = args.nonce ?? BigInt(Date.now());
-  const signature = await createGrant(
-    args.receiverAddress as any,
-    args.granterX25519PubKey as any,
-    args.receiverX25519PubKey as any,
-    nonce as any,
+  const issuer = args.__issuerOverride
+    ?? ((r, g, rx, n) => {
+      const createGrant = getComplianceGrantIssuerFunction({ client: args.client });
+      return createGrant(r as any, g as any, rx as any, n as any) as unknown as Promise<string>;
+    });
+  const signature = await issuer(
+    args.receiverAddress,
+    args.granterX25519PubKey,
+    args.receiverX25519PubKey,
+    nonce,
   );
-  return signature as unknown as string;
+
+  persistIssuedGrant({
+    granterAddress: args.client.signer.address as unknown as string,
+    receiverAddress: args.receiverAddress,
+    granterX25519Base58: bs58.encode(args.granterX25519PubKey),
+    receiverX25519Base58: bs58.encode(args.receiverX25519PubKey),
+    nonce: nonce.toString(),
+    issuedAt: Date.now(),
+    signature,
+  });
+
+  return signature;
 }
 
 // ---------------------------------------------------------------------------
