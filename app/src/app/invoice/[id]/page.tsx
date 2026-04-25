@@ -35,16 +35,7 @@ export default function InvoiceCreatorPage({ params }: { params: { id: string } 
         }
 
         setStatus("Awaiting wallet signature to derive decryption key…");
-        const key = await deriveKeyFromWalletSignature(wallet as any, invoice.metadataUri);
-        // Note: we re-derive using metadataUri as a deterministic per-invoice
-        // id-surrogate that's visible on-chain. This is equivalent to using
-        // the Anchor `invoice_id` field (kept inside the encrypted metadata)
-        // because metadataUri uniquely identifies this invoice PDA.
-        //
-        // BUT: the create flow signs over `"Veil invoice <invoiceId>"` where
-        // `invoiceId` is the metadata's `invoice_id` — we must match that.
-        // So: fetch ciphertext first, decrypt, then re-derive using the true
-        // invoiceId and re-check.
+        const key = await deriveKeyFromWalletSignature(wallet as any, invoicePda.toBase58());
 
         setStatus("Fetching encrypted metadata…");
         const ciphertext = await fetchCiphertext(invoice.metadataUri);
