@@ -7,6 +7,53 @@ import idl from "./invoice_registry.json";
 import type { InvoiceRegistry } from "./invoice_registry";
 import { INVOICE_REGISTRY_PROGRAM_ID, RPC_URL } from "./constants";
 
+/**
+ * Anchor returns i64 fields as BN. Coerce to a plain JS number (safe for
+ * unix-seconds timestamps through 2038) so downstream code can use Number
+ * arithmetic without risking a BigInt-vs-Number mix.
+ */
+function bnToNumber(val: any): number {
+  if (val == null) return 0;
+  if (typeof val === "number") return val;
+  if (typeof val === "bigint") return Number(val);
+  if (typeof val.toNumber === "function") return val.toNumber();
+  return Number(val);
+}
+
+export interface NormalizedInvoice {
+  version: number;
+  creator: PublicKey;
+  payer: PublicKey | null;
+  mint: PublicKey;
+  metadataHash: Uint8Array;
+  metadataUri: string;
+  utxoCommitment: Uint8Array | null;
+  status: Record<string, unknown>;
+  createdAt: number;
+  paidAt: number | null;
+  expiresAt: number | null;
+  nonce: Uint8Array;
+  bump: number;
+}
+
+function normalizeInvoice(raw: any): NormalizedInvoice {
+  return {
+    version: Number(raw.version ?? 0),
+    creator: raw.creator,
+    payer: raw.payer ?? null,
+    mint: raw.mint,
+    metadataHash: new Uint8Array(raw.metadataHash ?? []),
+    metadataUri: String(raw.metadataUri ?? ""),
+    utxoCommitment: raw.utxoCommitment ? new Uint8Array(raw.utxoCommitment) : null,
+    status: raw.status ?? {},
+    createdAt: bnToNumber(raw.createdAt),
+    paidAt: raw.paidAt == null ? null : bnToNumber(raw.paidAt),
+    expiresAt: raw.expiresAt == null ? null : bnToNumber(raw.expiresAt),
+    nonce: new Uint8Array(raw.nonce ?? []),
+    bump: Number(raw.bump ?? 0),
+  };
+}
+
 // Phantom's Wallet Standard signer auto-submits signed transactions. Anchor's
 // .rpc() then sends again and preflight rejects with "already processed".
 // Build + sign + submit manually so we can swallow the duplicate-send error.
@@ -110,16 +157,22 @@ export async function markPaidOnChain(
   return signAndSubmit(wallet, program.provider.connection as any, tx);
 }
 
-export async function fetchInvoice(wallet: any, pda: PublicKey) {
+export async function fetchInvoice(wallet: any, pda: PublicKey): Promise<NormalizedInvoice> {
   const program = getProgram(wallet);
-  return (program.account as any).invoice.fetch(pda);
+  const raw = await (program.account as any).invoice.fetch(pda);
+  return normalizeInvoice(raw);
 }
 
-export async function fetchInvoicesByCreator(wallet: any, creator: PublicKey) {
+export async function fetchInvoicesByCreator(
+  wallet: any,
+  creator: PublicKey,
+): Promise<Array<{ publicKey: PublicKey; account: NormalizedInvoice }>> {
   const program = getProgram(wallet);
-  // Invoice layout: discriminator(8) + version(1) + creator(32) + ...
-  // Creator field starts at offset 8 + 1 = 9.
-  return (program.account as any).invoice.all([
+  const all = await (program.account as any).invoice.all([
     { memcmp: { offset: 8 + 1, bytes: creator.toBase58() } },
   ]);
+  return all.map((entry: any) => ({
+    publicKey: entry.publicKey,
+    account: normalizeInvoice(entry.account),
+  }));
 }
