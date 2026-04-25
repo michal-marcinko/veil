@@ -13,6 +13,7 @@ import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
 import type { InvoiceMetadata } from "@/lib/types";
+import bs58 from "bs58";
 
 export default function PayPage({ params }: { params: { id: string } }) {
   const wallet = useWallet();
@@ -107,7 +108,6 @@ export default function PayPage({ params }: { params: { id: string } }) {
       setRegOpen(false);
 
       const invoicePda = new PublicKey(params.id);
-      const utxoCommitment = new Uint8Array(32);
 
       const payArgs = {
         client,
@@ -119,11 +119,15 @@ export default function PayPage({ params }: { params: { id: string } }) {
       const shouldUseShielded =
         useShielded && shielded?.kind === "available";
 
-      if (shouldUseShielded) {
-        await payInvoiceFromShielded(payArgs);
-      } else {
-        await payInvoice(payArgs);
-      }
+      const payResult = shouldUseShielded
+        ? await payInvoiceFromShielded(payArgs)
+        : await payInvoice(payArgs);
+
+      // Derive a real 32-byte utxo_commitment from the actual Umbra UTXO signature.
+      // This is non-forgeable (only the signer of the real tx can produce it) and
+      // guarantees the receipt verifier's "non-zero commitment" check passes.
+      const sigBytes = bs58.decode(payResult.createUtxoSignature);
+      const utxoCommitment = await sha256(sigBytes);
 
       await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
       setPaid(true);
