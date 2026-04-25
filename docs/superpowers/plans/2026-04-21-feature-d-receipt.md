@@ -554,6 +554,81 @@ git commit -m "feat(anchor): unauthenticated fetchInvoicePublic + fetchTxBlockTi
 
 ---
 
+## Task 3b: Replace placeholder utxo_commitment with sha256(Umbra signature)
+
+**Why this task exists:** The current `pay/[id]/page.tsx` writes `new Uint8Array(32)` (all zeros) as `utxo_commitment` to `mark_paid`. Task 5's receipt verifier rejects all-zero commitments as evidence that `mark_paid` was called without a real Umbra UTXO. Without this task, every legitimate receipt would fail verification with reason "Invoice is marked paid but utxo_commitment is empty."
+
+**Approach:** After Wave 1 lands, both `payInvoice` (public-balance) and `payInvoiceFromShielded` (shielded) return objects exposing `createUtxoSignature: string` (base58-encoded 64-byte ed25519 signature). Hashing those raw bytes with SHA-256 produces a 32-byte commitment that is deterministically tied to the actual Umbra UTXO — non-forgeable, non-zero, and self-documenting via the signature.
+
+**Files:**
+- Modify: `app/src/app/pay/[id]/page.tsx`
+
+- [ ] **Step 1: Verify bs58 import exists**
+
+Open `app/src/app/pay/[id]/page.tsx`. If `import bs58 from "bs58";` is not already at the top, add it. (It will be added by Task 4 Step 1 anyway — confirm the line is present before continuing this task. If absent, add it now.)
+
+The `sha256` helper is already exported from `app/src/lib/encryption.ts`. Verify the file has `import { ..., sha256, ... } from "@/lib/encryption";` near the top — it already does as of the wave-1 baseline.
+
+- [ ] **Step 2: Read the current pay flow**
+
+Read the `handlePay` function in `app/src/app/pay/[id]/page.tsx`. After Wave 1, it should look approximately like (exact branching may differ — read the actual file):
+
+```typescript
+const utxoCommitment = new Uint8Array(32);
+const payResult = useShielded
+  ? await payInvoiceFromShielded({ client, recipientAddress: metadata.creator.wallet, mint: USDC_MINT.toBase58(), amount: BigInt(metadata.total) })
+  : await payInvoice({ client, recipientAddress: metadata.creator.wallet, mint: USDC_MINT.toBase58(), amount: BigInt(metadata.total) });
+
+await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
+```
+
+If the structure differs (e.g. no `useShielded` toggle yet, or different variable name), adapt Step 3 accordingly.
+
+- [ ] **Step 3: Replace the placeholder with a derived commitment**
+
+Replace the `const utxoCommitment = new Uint8Array(32);` line and the `await markPaidOnChain(...)` line. The new shape:
+
+```typescript
+const payResult = useShielded
+  ? await payInvoiceFromShielded({ client, recipientAddress: metadata.creator.wallet, mint: USDC_MINT.toBase58(), amount: BigInt(metadata.total) })
+  : await payInvoice({ client, recipientAddress: metadata.creator.wallet, mint: USDC_MINT.toBase58(), amount: BigInt(metadata.total) });
+
+// Derive a real 32-byte utxo_commitment from the actual Umbra UTXO signature.
+// This is non-forgeable (only the signer of the real tx can produce it) and
+// guarantees the receipt verifier's "non-zero commitment" check passes.
+const sigBytes = bs58.decode(payResult.createUtxoSignature);
+const utxoCommitment = await sha256(sigBytes);
+
+await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
+```
+
+Keep the previous separate `await payInvoice(...)` line removed — its result is now captured in `payResult`.
+
+- [ ] **Step 4: Run the existing test suite to confirm nothing regressed**
+
+```bash
+cd app && npm test
+```
+
+Expected: all previously-passing tests still pass. (No new tests in this task — the change is exercised end-to-end by Task 6's devnet smoke + Task 5's verifier tests.)
+
+- [ ] **Step 5: TypeScript check**
+
+```bash
+cd app && npx tsc --noEmit
+```
+
+Expected: zero new errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add app/src/app/pay/[id]/page.tsx
+git commit -m "fix(pay): derive utxo_commitment from real Umbra UTXO signature"
+```
+
+---
+
 ## Task 4: Wire receipt generation into `/pay/[id]` after successful pay
 
 **Files:**
