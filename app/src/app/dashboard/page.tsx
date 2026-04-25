@@ -98,8 +98,27 @@ export default function DashboardPage() {
     creator: i.account.creator.toBase58(),
     metadataUri: i.account.metadataUri,
     status: Object.keys(i.account.status)[0] as any,
-    createdAt: i.account.createdAt, // already a number after normalizeInvoice in Task 3
+    createdAt: Number(i.account.createdAt),
   }));
+
+  // Group by batch_id (carried on the URI as a ?batch= query param, stamped
+  // there by /payroll/new). Invoices without batch=... are single invoices
+  // from /create and are skipped here.
+  const batches = new Map<string, { count: number; earliest: number }>();
+  for (const inv of incoming) {
+    const batchId = extractBatchIdFromUri(inv.metadataUri);
+    if (!batchId) continue;
+    const prev = batches.get(batchId);
+    if (prev) {
+      prev.count += 1;
+      prev.earliest = Math.min(prev.earliest, inv.createdAt);
+    } else {
+      batches.set(batchId, { count: 1, earliest: inv.createdAt });
+    }
+  }
+  const batchList = Array.from(batches.entries())
+    .map(([batchId, info]) => ({ batchId, ...info }))
+    .sort((a, b) => b.earliest - a.earliest);
 
   return (
     <Shell>
@@ -150,6 +169,35 @@ export default function DashboardPage() {
 
       <DashboardList title="Invoices you created" invoices={incoming} />
 
+      {batchList.length > 0 && (
+        <div className="mt-14">
+          <div className="flex items-baseline justify-between mb-6 border-b border-line pb-3">
+            <span className="eyebrow">Payrolls</span>
+            <a href="/payroll/new" className="btn-quiet text-[12px]">
+              + New batch
+            </a>
+          </div>
+          <ul className="divide-y divide-line/60">
+            {batchList.map((b) => (
+              <li key={b.batchId} className="py-4 grid grid-cols-[1fr_auto_auto] gap-4 items-baseline">
+                <a
+                  href={`/payroll/${b.batchId}`}
+                  className="font-mono text-[13px] text-ink hover:text-gold transition-colors truncate"
+                >
+                  {b.batchId}
+                </a>
+                <span className="font-mono text-[12px] text-dim tabular-nums">
+                  {b.count} invoice{b.count === 1 ? "" : "s"}
+                </span>
+                <a href={`/payroll/${b.batchId}`} className="btn-quiet text-[12px]">
+                  Open →
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="mt-10 pt-8 border-t border-line">
         <a href="/dashboard/compliance" className="btn-quiet">
           Manage auditor grants →
@@ -157,6 +205,13 @@ export default function DashboardPage() {
       </div>
     </Shell>
   );
+}
+
+function extractBatchIdFromUri(uri: string): string | null {
+  const q = uri.indexOf("?");
+  if (q === -1) return null;
+  const search = new URLSearchParams(uri.slice(q + 1));
+  return search.get("batch");
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
