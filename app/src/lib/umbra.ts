@@ -445,6 +445,7 @@ export async function getEncryptedBalance(
 // Task 18: Compliance grant issuance
 // ---------------------------------------------------------------------------
 
+import bs58 from "bs58";
 import { getComplianceGrantIssuerFunction } from "@umbra-privacy/sdk";
 
 export interface ComplianceGrantArgs {
@@ -457,6 +458,13 @@ export interface ComplianceGrantArgs {
   receiverX25519PubKey: Uint8Array;
   /** Optional nonce — defaults to BigInt(Date.now()) per SDK example. */
   nonce?: bigint;
+  /** Test-only: replace the real SDK issuer with a stub returning a signature. */
+  __issuerOverride?: (
+    receiver: string,
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    nonce: bigint,
+  ) => Promise<string>;
 }
 
 /**
@@ -466,15 +474,267 @@ export interface ComplianceGrantArgs {
  *   createGrant(receiver, granterX25519, receiverX25519, nonce, ...)
  *   returns Promise<TransactionSignature>
  * (NOT the object-param form drafted in the plan).
+ *
+ * Side-effect: persists the grant to localStorage for later listing/revoke
+ * (see PersistedGrant + listComplianceGrants).
  */
 export async function issueComplianceGrant(args: ComplianceGrantArgs): Promise<string> {
-  const createGrant = getComplianceGrantIssuerFunction({ client: args.client });
   const nonce = args.nonce ?? BigInt(Date.now());
-  const signature = await createGrant(
-    args.receiverAddress as any,
-    args.granterX25519PubKey as any,
-    args.receiverX25519PubKey as any,
-    nonce as any,
+  const issuer = args.__issuerOverride
+    ?? ((r, g, rx, n) => {
+      const createGrant = getComplianceGrantIssuerFunction({ client: args.client });
+      return createGrant(r as any, g as any, rx as any, n as any) as unknown as Promise<string>;
+    });
+  const signature = await issuer(
+    args.receiverAddress,
+    args.granterX25519PubKey,
+    args.receiverX25519PubKey,
+    nonce,
   );
-  return signature as unknown as string;
+
+  persistIssuedGrant({
+    granterAddress: args.client.signer.address as unknown as string,
+    receiverAddress: args.receiverAddress,
+    granterX25519Base58: bs58.encode(args.granterX25519PubKey),
+    receiverX25519Base58: bs58.encode(args.receiverX25519PubKey),
+    nonce: nonce.toString(),
+    issuedAt: Date.now(),
+    signature,
+  });
+
+  return signature;
+}
+
+// ---------------------------------------------------------------------------
+// listComplianceGrants — read persisted + probe on-chain status
+// ---------------------------------------------------------------------------
+
+import { getUserComplianceGrantQuerierFunction } from "@umbra-privacy/sdk";
+
+export type GrantStatus = "active" | "revoked" | "unknown";
+
+export interface GrantWithStatus extends PersistedGrant {
+  status: GrantStatus;
+}
+
+export interface ListComplianceGrantsArgs {
+  client: UmbraClient;
+  /** Test-only override for the SDK querier factory result. */
+  __querierOverride?: (
+    granterX25519: Uint8Array,
+    nonce: bigint,
+    receiverX25519: Uint8Array,
+  ) => Promise<{ state: "exists" | "non_existent" }>;
+}
+
+export async function listComplianceGrants(
+  args: ListComplianceGrantsArgs,
+): Promise<GrantWithStatus[]> {
+  const granterAddress = args.client.signer.address as unknown as string;
+  const persisted = readPersistedGrants(granterAddress);
+  if (persisted.length === 0) return [];
+
+  const querier = args.__querierOverride
+    ?? (() => {
+      const fn = getUserComplianceGrantQuerierFunction({ client: args.client });
+      return (
+        granterX25519: Uint8Array,
+        nonce: bigint,
+        receiverX25519: Uint8Array,
+      ) => fn(granterX25519 as any, nonce as any, receiverX25519 as any) as unknown as Promise<{ state: "exists" | "non_existent" }>;
+    })();
+
+  const annotated = await Promise.all(
+    persisted.map(async (g): Promise<GrantWithStatus> => {
+      try {
+        const result = await querier(
+          bs58.decode(g.granterX25519Base58),
+          BigInt(g.nonce),
+          bs58.decode(g.receiverX25519Base58),
+        );
+        return { ...g, status: result.state === "exists" ? "active" : "revoked" };
+      } catch {
+        return { ...g, status: "unknown" };
+      }
+    }),
+  );
+  return annotated;
+}
+
+// ---------------------------------------------------------------------------
+// revokeComplianceGrant — wrapper around getComplianceGrantRevokerFunction
+// ---------------------------------------------------------------------------
+
+import { getComplianceGrantRevokerFunction } from "@umbra-privacy/sdk";
+
+export interface RevokeComplianceGrantArgs {
+  client: UmbraClient;
+  grant: PersistedGrant;
+  __revokerOverride?: (
+    receiver: string,
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    nonce: bigint,
+  ) => Promise<string>;
+}
+
+export async function revokeComplianceGrant(
+  args: RevokeComplianceGrantArgs,
+): Promise<string> {
+  const revoker = args.__revokerOverride
+    ?? ((r, g, rx, n) => {
+      const deleteGrant = getComplianceGrantRevokerFunction({ client: args.client });
+      return deleteGrant(r as any, g as any, rx as any, n as any) as unknown as Promise<string>;
+    });
+
+  const signature = await revoker(
+    args.grant.receiverAddress,
+    bs58.decode(args.grant.granterX25519Base58),
+    bs58.decode(args.grant.receiverX25519Base58),
+    BigInt(args.grant.nonce),
+  );
+
+  removePersistedGrant(
+    args.grant.granterAddress,
+    args.grant.receiverX25519Base58,
+    args.grant.nonce,
+  );
+  return signature;
+}
+
+// ---------------------------------------------------------------------------
+// readScopedInvoice — auditor-side re-encryption wrapper
+//
+// Per @umbra-privacy/sdk 2.1.1, getSharedCiphertextReencryptorForUserGrantFunction
+// returns a fire-and-forget handler signature; the actual MPC callback that
+// surfaces plaintext lands later via the Arcium queue. End-to-end plaintext
+// retrieval is a deliberate follow-up — this wrapper returns
+// `{ handlerSignature, pending: true }` and the UI displays a pending state.
+// ---------------------------------------------------------------------------
+
+import { getSharedCiphertextReencryptorForUserGrantFunction } from "@umbra-privacy/sdk";
+
+export interface ReadScopedInvoiceArgs {
+  client: UmbraClient;
+  /** Granter's MVK X25519 public key (32 bytes). */
+  granterX25519PubKey: Uint8Array;
+  /** Receiver (auditor) X25519 public key (32 bytes). */
+  receiverX25519PubKey: Uint8Array;
+  /** Grant nonce — must match the nonce used when the grant was created. */
+  grantNonce: bigint;
+  /** Input nonce — the nonce under which the invoice ciphertexts were encrypted. */
+  inputNonce: bigint;
+  /** 1–6 shared-mode ciphertexts (32 bytes each) to re-encrypt. */
+  ciphertexts: Uint8Array[];
+  __reencryptorOverride?: (
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    grantNonce: bigint,
+    inputNonce: bigint,
+    ciphertexts: Uint8Array[],
+  ) => Promise<string>;
+}
+
+export interface ReadScopedInvoiceResult {
+  /** Handler transaction signature — the MPC callback is still pending. */
+  handlerSignature: string;
+  /** Always true in this SDK version — plaintext retrieval is a follow-up. */
+  pending: true;
+}
+
+export async function readScopedInvoice(
+  args: ReadScopedInvoiceArgs,
+): Promise<ReadScopedInvoiceResult> {
+  if (args.ciphertexts.length === 0) {
+    throw new Error("readScopedInvoice: need at least one ciphertext");
+  }
+  if (args.ciphertexts.length > 6) {
+    throw new Error(
+      `readScopedInvoice: SDK accepts at most 6 ciphertexts per call (got ${args.ciphertexts.length})`,
+    );
+  }
+  const reencrypt = args.__reencryptorOverride
+    ?? ((g, r, gn, inN, cts) => {
+      const fn = getSharedCiphertextReencryptorForUserGrantFunction({ client: args.client });
+      return fn(g as any, r as any, gn as any, inN as any, cts as any) as unknown as Promise<string>;
+    });
+
+  const handlerSignature = await reencrypt(
+    args.granterX25519PubKey,
+    args.receiverX25519PubKey,
+    args.grantNonce,
+    args.inputNonce,
+    args.ciphertexts,
+  );
+
+  return { handlerSignature, pending: true };
+}
+
+// ---------------------------------------------------------------------------
+// Feature A: Compliance grant registry (localStorage-backed)
+//
+// The Umbra SDK does NOT expose a "list my grants as granter" function. Grant
+// PDAs are marker accounts (seeds: granterX25519 || nonce || receiverX25519)
+// and the indexer API does not document a grants-by-granter endpoint as of
+// 2026-04-21 (probed: HTTP 404). We therefore persist issued grants client-side
+// keyed by the granter's wallet address; on page load we refresh status by
+// probing the on-chain PDA via getUserComplianceGrantQuerierFunction.
+// ---------------------------------------------------------------------------
+
+const GRANT_STORAGE_KEY_PREFIX = "veil.grants.v1.";
+
+export interface PersistedGrant {
+  /** Granter Solana wallet (base58). */
+  granterAddress: string;
+  /** Receiver/auditor Solana wallet (base58). */
+  receiverAddress: string;
+  /** Granter's MVK X25519 public key, base58. */
+  granterX25519Base58: string;
+  /** Receiver's X25519 public key, base58. */
+  receiverX25519Base58: string;
+  /** Grant nonce, decimal string (BigInt.toString()). */
+  nonce: string;
+  /** Unix millis when issuance tx was confirmed. */
+  issuedAt: number;
+  /** Issuance transaction signature. */
+  signature: string;
+}
+
+function storageKey(granterAddress: string): string {
+  return `${GRANT_STORAGE_KEY_PREFIX}${granterAddress}`;
+}
+
+export function persistIssuedGrant(grant: PersistedGrant): void {
+  if (typeof localStorage === "undefined") return;
+  const key = storageKey(grant.granterAddress);
+  const raw = localStorage.getItem(key);
+  const list: PersistedGrant[] = raw ? JSON.parse(raw) : [];
+  list.push(grant);
+  localStorage.setItem(key, JSON.stringify(list));
+}
+
+export function readPersistedGrants(granterAddress: string): PersistedGrant[] {
+  if (typeof localStorage === "undefined") return [];
+  const raw = localStorage.getItem(storageKey(granterAddress));
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function removePersistedGrant(
+  granterAddress: string,
+  receiverX25519Base58: string,
+  nonce: string,
+): void {
+  if (typeof localStorage === "undefined") return;
+  const key = storageKey(granterAddress);
+  const list = readPersistedGrants(granterAddress);
+  const next = list.filter(
+    (g) => !(g.receiverX25519Base58 === receiverX25519Base58 && g.nonce === nonce),
+  );
+  localStorage.setItem(key, JSON.stringify(next));
 }
