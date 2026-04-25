@@ -271,3 +271,83 @@ describe("revokeComplianceGrant", () => {
     expect(readPersistedGrants(granterAddress)).toHaveLength(1);
   });
 });
+
+import { readScopedInvoice } from "@/lib/umbra";
+
+describe("readScopedInvoice", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+      clear: () => { store.clear(); },
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+  });
+
+  it("calls reencryptor with (granterX25519, receiverX25519, grantNonce, inputNonce, ciphertexts)", async () => {
+    const granterX25519 = new Uint8Array(32).fill(1);
+    const receiverX25519 = new Uint8Array(32).fill(2);
+    const ciphertexts: Uint8Array[] = [new Uint8Array(32).fill(3)];
+
+    let captured: any = null;
+
+    const result = await readScopedInvoice({
+      client: { signer: { address: "R" } } as any,
+      granterX25519PubKey: granterX25519,
+      receiverX25519PubKey: receiverX25519,
+      grantNonce: 42n,
+      inputNonce: 7n,
+      ciphertexts,
+      __reencryptorOverride: async (g, r, gn, inNonce, cts) => {
+        captured = {
+          g: Array.from(g),
+          r: Array.from(r),
+          gn,
+          inNonce,
+          cts: cts.map((c) => Array.from(c)),
+        };
+        return "handler-sig";
+      },
+    });
+
+    expect(result.handlerSignature).toBe("handler-sig");
+    expect(result.pending).toBe(true);
+    expect(captured.g).toEqual(Array.from(granterX25519));
+    expect(captured.r).toEqual(Array.from(receiverX25519));
+    expect(captured.gn).toBe(42n);
+    expect(captured.inNonce).toBe(7n);
+    expect(captured.cts[0]).toEqual(Array.from(ciphertexts[0]));
+  });
+
+  it("rejects when ciphertexts array is empty", async () => {
+    await expect(
+      readScopedInvoice({
+        client: { signer: { address: "R" } } as any,
+        granterX25519PubKey: new Uint8Array(32),
+        receiverX25519PubKey: new Uint8Array(32),
+        grantNonce: 1n,
+        inputNonce: 1n,
+        ciphertexts: [],
+        __reencryptorOverride: async () => "x",
+      }),
+    ).rejects.toThrow(/at least one ciphertext/i);
+  });
+
+  it("rejects when ciphertexts array exceeds 6 (SDK hard limit)", async () => {
+    const cts = Array.from({ length: 7 }, () => new Uint8Array(32));
+    await expect(
+      readScopedInvoice({
+        client: { signer: { address: "R" } } as any,
+        granterX25519PubKey: new Uint8Array(32),
+        receiverX25519PubKey: new Uint8Array(32),
+        grantNonce: 1n,
+        inputNonce: 1n,
+        ciphertexts: cts,
+        __reencryptorOverride: async () => "x",
+      }),
+    ).rejects.toThrow(/at most 6 ciphertexts/i);
+  });
+});

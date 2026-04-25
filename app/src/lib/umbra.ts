@@ -603,6 +603,74 @@ export async function revokeComplianceGrant(
 }
 
 // ---------------------------------------------------------------------------
+// readScopedInvoice — auditor-side re-encryption wrapper
+//
+// Per @umbra-privacy/sdk 2.1.1, getSharedCiphertextReencryptorForUserGrantFunction
+// returns a fire-and-forget handler signature; the actual MPC callback that
+// surfaces plaintext lands later via the Arcium queue. End-to-end plaintext
+// retrieval is a deliberate follow-up — this wrapper returns
+// `{ handlerSignature, pending: true }` and the UI displays a pending state.
+// ---------------------------------------------------------------------------
+
+import { getSharedCiphertextReencryptorForUserGrantFunction } from "@umbra-privacy/sdk";
+
+export interface ReadScopedInvoiceArgs {
+  client: UmbraClient;
+  /** Granter's MVK X25519 public key (32 bytes). */
+  granterX25519PubKey: Uint8Array;
+  /** Receiver (auditor) X25519 public key (32 bytes). */
+  receiverX25519PubKey: Uint8Array;
+  /** Grant nonce — must match the nonce used when the grant was created. */
+  grantNonce: bigint;
+  /** Input nonce — the nonce under which the invoice ciphertexts were encrypted. */
+  inputNonce: bigint;
+  /** 1–6 shared-mode ciphertexts (32 bytes each) to re-encrypt. */
+  ciphertexts: Uint8Array[];
+  __reencryptorOverride?: (
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    grantNonce: bigint,
+    inputNonce: bigint,
+    ciphertexts: Uint8Array[],
+  ) => Promise<string>;
+}
+
+export interface ReadScopedInvoiceResult {
+  /** Handler transaction signature — the MPC callback is still pending. */
+  handlerSignature: string;
+  /** Always true in this SDK version — plaintext retrieval is a follow-up. */
+  pending: true;
+}
+
+export async function readScopedInvoice(
+  args: ReadScopedInvoiceArgs,
+): Promise<ReadScopedInvoiceResult> {
+  if (args.ciphertexts.length === 0) {
+    throw new Error("readScopedInvoice: need at least one ciphertext");
+  }
+  if (args.ciphertexts.length > 6) {
+    throw new Error(
+      `readScopedInvoice: SDK accepts at most 6 ciphertexts per call (got ${args.ciphertexts.length})`,
+    );
+  }
+  const reencrypt = args.__reencryptorOverride
+    ?? ((g, r, gn, inN, cts) => {
+      const fn = getSharedCiphertextReencryptorForUserGrantFunction({ client: args.client });
+      return fn(g as any, r as any, gn as any, inN as any, cts as any) as unknown as Promise<string>;
+    });
+
+  const handlerSignature = await reencrypt(
+    args.granterX25519PubKey,
+    args.receiverX25519PubKey,
+    args.grantNonce,
+    args.inputNonce,
+    args.ciphertexts,
+  );
+
+  return { handlerSignature, pending: true };
+}
+
+// ---------------------------------------------------------------------------
 // Feature A: Compliance grant registry (localStorage-backed)
 //
 // The Umbra SDK does NOT expose a "list my grants as granter" function. Grant
