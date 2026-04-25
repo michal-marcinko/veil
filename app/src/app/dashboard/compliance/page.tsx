@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import bs58 from "bs58";
@@ -9,10 +9,14 @@ import {
   ComplianceGrantForm,
   type ComplianceGrantFormValues,
 } from "@/components/ComplianceGrantForm";
+import { GrantList } from "@/components/GrantList";
 import {
   getOrCreateClient,
   ensureRegistered,
   issueComplianceGrant,
+  listComplianceGrants,
+  revokeComplianceGrant,
+  type GrantWithStatus,
 } from "@/lib/umbra";
 
 interface GrantResult {
@@ -26,6 +30,30 @@ export default function CompliancePage() {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<GrantResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [grants, setGrants] = useState<GrantWithStatus[]>([]);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [revokingKey, setRevokingKey] = useState<string | null>(null);
+
+  const refreshGrants = useCallback(async () => {
+    if (!wallet.connected) {
+      setGrants([]);
+      return;
+    }
+    setGrantsLoading(true);
+    try {
+      const client = await getOrCreateClient(wallet as any);
+      const list = await listComplianceGrants({ client });
+      setGrants(list);
+    } catch (err: any) {
+      setError(`Failed to load grants: ${err.message ?? String(err)}`);
+    } finally {
+      setGrantsLoading(false);
+    }
+  }, [wallet]);
+
+  useEffect(() => {
+    void refreshGrants();
+  }, [refreshGrants]);
 
   async function handleGrant(values: ComplianceGrantFormValues) {
     setSubmitting(true);
@@ -56,15 +84,27 @@ export default function CompliancePage() {
         nonce,
       });
 
-      setResult({
-        receiverAddress: values.receiverAddress,
-        nonce,
-        signature,
-      });
+      setResult({ receiverAddress: values.receiverAddress, nonce, signature });
+      await refreshGrants();
     } catch (err: any) {
       setError(err.message ?? String(err));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleRevoke(grant: GrantWithStatus) {
+    const key = `${grant.receiverX25519Base58}:${grant.nonce}`;
+    setRevokingKey(key);
+    setError(null);
+    try {
+      const client = await getOrCreateClient(wallet as any);
+      await revokeComplianceGrant({ client, grant });
+      await refreshGrants();
+    } catch (err: any) {
+      setError(`Revoke failed: ${err.message ?? String(err)}`);
+    } finally {
+      setRevokingKey(null);
     }
   }
 
@@ -117,12 +157,28 @@ export default function CompliancePage() {
               <ResultRow label="Wallet" value={result.receiverAddress} />
               <ResultRow label="Nonce" value={result.nonce.toString()} />
               <ResultRow label="Signature" value={result.signature} />
+              <ResultRow
+                label="Audit URL"
+                value={`${typeof window !== "undefined" ? window.location.origin : ""}/audit/${wallet.publicKey?.toBase58()}`}
+              />
             </dl>
           </div>
         )}
 
         <div className="mt-10 pt-8 border-t border-line">
           <ComplianceGrantForm onSubmit={handleGrant} submitting={submitting} />
+        </div>
+
+        <div className="mt-12 pt-8 border-t border-line">
+          {grantsLoading ? (
+            <div className="text-[13px] text-dim">Loading grants…</div>
+          ) : (
+            <GrantList
+              grants={grants}
+              onRevoke={handleRevoke}
+              revokingKey={revokingKey}
+            />
+          )}
         </div>
       </div>
     </Shell>
