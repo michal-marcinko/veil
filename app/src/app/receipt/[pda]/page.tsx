@@ -8,6 +8,7 @@ import {
   type SignedReceipt,
 } from "@/lib/receipt";
 import { fetchInvoicePublic } from "@/lib/anchor";
+import { VeilLogo } from "@/components/VeilLogo";
 
 type VerifyState =
   | { kind: "loading" }
@@ -120,14 +121,7 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
     <main className="min-h-screen relative pb-32">
       <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
         <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
-          <a href="/" className="flex items-baseline gap-3">
-            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
-              Veil
-            </span>
-            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
-              — payment receipt verifier
-            </span>
-          </a>
+          <VeilLogo tagline="payment receipt verifier" />
         </div>
       </nav>
 

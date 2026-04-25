@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
+import { VeilLogo } from "@/components/VeilLogo";
 import { PublicKey } from "@solana/web3.js";
 import { PayrollCsvUploader, type PayrollFormValues } from "@/components/PayrollCsvUploader";
 import { BatchProgress, type BatchStep } from "@/components/BatchProgress";
@@ -284,14 +285,7 @@ function Frame({ heading, children }: { heading: string; children: React.ReactNo
     <main className="min-h-screen relative pb-32">
       <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
         <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
-          <a href="/" className="flex items-baseline gap-3">
-            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
-              Veil
-            </span>
-            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
-              — private invoicing
-            </span>
-          </a>
+          <VeilLogo />
           <div className="flex items-center gap-1 md:gap-2">
             <a href="/create" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
               Create

@@ -1,6 +1,7 @@
 "use client";
 
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
+import { VeilLogo } from "@/components/VeilLogo";
 import { CipherAmount } from "@/components/CipherAmount";
 
 const STEPS = [
@@ -26,14 +27,7 @@ export default function LandingPage() {
     <main className="relative min-h-screen">
       {/* Nav */}
       <nav className="relative z-20 max-w-[1200px] mx-auto px-6 md:px-8 pt-6 flex items-center justify-between">
-        <a href="/" className="flex items-baseline gap-3">
-          <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
-            Veil
-          </span>
-          <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
-            — private invoicing
-          </span>
-        </a>
+        <VeilLogo />
         <div className="flex items-center gap-1 md:gap-2">
           <a
             href="/create"
