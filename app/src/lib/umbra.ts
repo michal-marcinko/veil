@@ -240,9 +240,11 @@ export async function ensureRegistered(
 
 import {
   getPublicBalanceToReceiverClaimableUtxoCreatorFunction,
+  getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction,
 } from "@umbra-privacy/sdk";
 import {
   getCreateReceiverClaimableUtxoFromPublicBalanceProver,
+  getCreateReceiverClaimableUtxoFromEncryptedBalanceProver,
 } from "@umbra-privacy/web-zk-prover";
 
 export interface PayInvoiceArgs {
@@ -283,6 +285,55 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
     createProofAccountSignature: result.createProofAccountSignature as unknown as string,
     createUtxoSignature: result.createUtxoSignature as unknown as string,
     closeProofAccountSignature: result.closeProofAccountSignature as unknown as string | undefined,
+  };
+}
+
+/**
+ * Pay an invoice by creating a receiver-claimable UTXO funded from Bob's
+ * ENCRYPTED (shielded) balance — Feature C, full shielding.
+ *
+ * Contrast with `payInvoice` above which funds the UTXO from Bob's PUBLIC
+ * ATA. A public-balance pay leaks a deposit tx a block explorer can correlate
+ * with the invoice; an encrypted-balance pay happens entirely inside the
+ * mixer and emits no plaintext amount.
+ *
+ * The returned shape is the SAME as `PayInvoiceResult` so callers can branch
+ * on availability without restructuring their result handling. Both SDK
+ * creators return objects, but the encrypted variant uses `queueSignature`
+ * (queue-based MPC flow) where the public variant has `createUtxoSignature`
+ * — we map `queueSignature` → `createUtxoSignature` to keep `PayInvoiceResult`
+ * a single shape across both pay paths.
+ *
+ * Preconditions:
+ *   - Bob is a fully-registered Umbra user (same as public-balance pay).
+ *   - Bob's encrypted balance for `mint` is >= `amount`. The caller must
+ *     verify this BEFORE invoking — prefer `loadShieldedAvailability` from
+ *     `./shielded-pay` for the check. If the balance is insufficient the SDK
+ *     will throw inside proof generation.
+ *
+ * Post-call the caller MUST still invoke `markPaidOnChain(wallet, pda, utxoCommitment)`
+ * exactly as in the public-balance path — `utxo_commitment` remains an
+ * all-zeros audit breadcrumb per the 2026-04-16 design addendum.
+ */
+export async function payInvoiceFromShielded(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
+  const zkProver = getCreateReceiverClaimableUtxoFromEncryptedBalanceProver({
+    assetProvider: proxiedAssetProvider(),
+  });
+  const create = getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction(
+    { client: args.client },
+    { zkProver } as any,
+  );
+
+  const result = await create({
+    destinationAddress: args.recipientAddress as any,
+    mint: args.mint as any,
+    amount: args.amount as any,
+  });
+
+  return {
+    createProofAccountSignature: (result as any).createProofAccountSignature as unknown as string,
+    createUtxoSignature: (result as any).queueSignature as unknown as string,
+    closeProofAccountSignature: (result as any).closeProofAccountSignature as unknown as string | undefined,
   };
 }
 

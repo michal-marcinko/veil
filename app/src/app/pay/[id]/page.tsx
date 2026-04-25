@@ -9,7 +9,8 @@ import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/com
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice, markPaidOnChain } from "@/lib/anchor";
-import { getOrCreateClient, ensureRegistered, payInvoice } from "@/lib/umbra";
+import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded } from "@/lib/umbra";
+import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
 import type { InvoiceMetadata } from "@/lib/types";
 
@@ -26,6 +27,8 @@ export default function PayPage({ params }: { params: { id: string } }) {
     commitment: "pending",
   });
   const [paid, setPaid] = useState(false);
+  const [shielded, setShielded] = useState<ShieldedAvailability | null>(null);
+  const [useShielded, setUseShielded] = useState(true); // default ON when available
 
   useEffect(() => {
     (async () => {
@@ -72,6 +75,25 @@ export default function PayPage({ params }: { params: { id: string } }) {
     })();
   }, [params.id, wallet.publicKey]);
 
+  useEffect(() => {
+    (async () => {
+      if (!metadata || !wallet.publicKey) return;
+      try {
+        const client = await getOrCreateClient(wallet as any);
+        const result = await loadShieldedAvailability({
+          client,
+          mint: metadata.currency.mint,
+          total: BigInt(metadata.total),
+        });
+        setShielded(result);
+      } catch {
+        // loadShieldedAvailability swallows its own errors, but
+        // getOrCreateClient can throw (e.g. wallet disconnected mid-flow).
+        setShielded({ kind: "errored", message: "client unavailable" });
+      }
+    })();
+  }, [metadata, wallet.publicKey]);
+
   async function handlePay() {
     if (!metadata || !wallet.publicKey) return;
     setPaying(true);
@@ -86,12 +108,22 @@ export default function PayPage({ params }: { params: { id: string } }) {
 
       const invoicePda = new PublicKey(params.id);
       const utxoCommitment = new Uint8Array(32);
-      await payInvoice({
+
+      const payArgs = {
         client,
         recipientAddress: metadata.creator.wallet,
         mint: USDC_MINT.toBase58(),
         amount: BigInt(metadata.total),
-      });
+      };
+
+      const shouldUseShielded =
+        useShielded && shielded?.kind === "available";
+
+      if (shouldUseShielded) {
+        await payInvoiceFromShielded(payArgs);
+      } else {
+        await payInvoice(payArgs);
+      }
 
       await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
       setPaid(true);
@@ -166,6 +198,24 @@ export default function PayPage({ params }: { params: { id: string } }) {
           </div>
         ) : (
           <div className="mt-8">
+            {shielded?.kind === "available" && (
+              <label className="flex items-start gap-3 mb-5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={useShielded}
+                  onChange={(e) => setUseShielded(e.target.checked)}
+                  disabled={paying}
+                  className="mt-1 accent-sage"
+                />
+                <span className="text-[13.5px] leading-relaxed">
+                  <span className="text-ink">Pay from shielded balance</span>
+                  <span className="ml-2 mono-chip text-sage">Recommended</span>
+                  <span className="block text-[12px] text-muted mt-0.5">
+                    No public deposit. Amount never appears on a block explorer.
+                  </span>
+                </span>
+              </label>
+            )}
             <button
               onClick={handlePay}
               disabled={paying}
@@ -183,7 +233,9 @@ export default function PayPage({ params }: { params: { id: string } }) {
               )}
             </button>
             <p className="mt-4 max-w-xl text-[12px] font-mono tracking-[0.12em] uppercase text-dim">
-              Settles via Umbra UTXO · amount never broadcast onchain
+              {shielded?.kind === "available" && useShielded
+                ? "From shielded balance · no public deposit"
+                : "From public balance · one deposit tx"}
             </p>
           </div>
         )}
