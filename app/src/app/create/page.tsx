@@ -15,7 +15,7 @@ import { createInvoiceOnChain } from "@/lib/anchor";
 import { buildMetadata, validateMetadata } from "@/lib/types";
 import { encryptJson, generateKey, keyToBase58, sha256 } from "@/lib/encryption";
 import { uploadCiphertext } from "@/lib/arweave";
-import { USDC_MINT } from "@/lib/constants";
+import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
 export default function CreatePage() {
   const wallet = useWallet();
@@ -39,6 +39,23 @@ export default function CreatePage() {
     setError(null);
 
     try {
+      const parsedItems = values.lineItems.map((li, i) => {
+        const unitPriceMicros = parseAmountToBaseUnits(li.unitPrice, PAYMENT_DECIMALS);
+        if (unitPriceMicros == null) {
+          throw new Error(`Line ${i + 1}: enter a valid ${PAYMENT_SYMBOL} amount (e.g. 100.00).`);
+        }
+        const qty = Number.parseInt(li.quantity, 10);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new Error(`Line ${i + 1}: quantity must be a whole number ≥ 1.`);
+        }
+        return {
+          description: li.description,
+          quantity: qty.toString(),
+          unitPriceMicros,
+          totalMicros: unitPriceMicros * BigInt(qty),
+        };
+      });
+
       const client = await getOrCreateClient(wallet as any);
       setRegOpen(true);
       await ensureRegistered(client, (step, status) => {
@@ -50,10 +67,7 @@ export default function CreatePage() {
       setRegOpen(false);
 
       const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const subtotal = values.lineItems.reduce(
-        (sum, li) => sum + BigInt(li.unitPrice) * BigInt(li.quantity),
-        0n,
-      );
+      const subtotal = parsedItems.reduce((sum, li) => sum + li.totalMicros, 0n);
 
       const md = buildMetadata({
         invoiceId,
@@ -62,13 +76,13 @@ export default function CreatePage() {
         payerDisplayName: values.payerDisplayName,
         payerWallet: values.payerWallet || null,
         mint: USDC_MINT.toBase58(),
-        symbol: "USDC",
-        decimals: 6,
-        lineItems: values.lineItems.map((li) => ({
+        symbol: PAYMENT_SYMBOL,
+        decimals: PAYMENT_DECIMALS,
+        lineItems: parsedItems.map((li) => ({
           description: li.description,
           quantity: li.quantity,
-          unitPrice: li.unitPrice,
-          total: (BigInt(li.unitPrice) * BigInt(li.quantity)).toString(),
+          unitPrice: li.unitPriceMicros.toString(),
+          total: li.totalMicros.toString(),
         })),
         subtotal: subtotal.toString(),
         tax: "0",
@@ -114,10 +128,10 @@ export default function CreatePage() {
 
   if (!wallet.connected) {
     return (
-      <Frame heading="Create invoice" number="02">
-        <div className="max-w-lg mt-16 animate-fade-up">
-          <p className="font-serif italic text-2xl md:text-3xl text-muted leading-[1.3] mb-10">
-            To publish a private invoice, first connect the wallet you&apos;ll receive payment to.
+      <Frame heading="Create invoice">
+        <div className="max-w-lg reveal">
+          <p className="text-[17px] md:text-[19px] text-ink/80 leading-[1.5] mb-8">
+            To publish a private invoice, connect the wallet you&apos;ll receive payment to.
           </p>
           <ClientWalletMultiButton />
         </div>
@@ -127,13 +141,13 @@ export default function CreatePage() {
 
   if (result) {
     return (
-      <Frame heading="Invoice published" number="02">
-        <div className="max-w-2xl mt-14 animate-fade-up">
-          <div className="mono-chip mb-3">Shareable link</div>
-          <div className="border border-line p-5 mb-8 font-mono text-sm text-cream break-all bg-paper">
+      <Frame heading="Invoice published">
+        <div className="max-w-2xl reveal">
+          <span className="eyebrow">Shareable link</span>
+          <div className="mt-3 border border-line bg-paper-3 rounded-[3px] p-5 mb-8 font-mono text-[13px] text-ink break-all">
             {result.url}
           </div>
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button onClick={handleCopy} className="btn-primary">
               {copied ? (
                 <span>Copied ✓</span>
@@ -151,27 +165,27 @@ export default function CreatePage() {
                 setResult(null);
                 setCopied(false);
               }}
-              className="btn-quiet self-center"
+              className="btn-quiet"
             >
               + Another invoice
             </button>
           </div>
 
-          <ol className="mt-20 space-y-3.5 font-mono text-[12px] tracking-[0.1em] uppercase text-dim leading-relaxed">
+          <ol className="mt-16 space-y-3.5 font-mono text-[11.5px] tracking-[0.1em] uppercase text-dim leading-relaxed">
             <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0">01</span>
+              <span className="text-gold w-6 shrink-0 tnum">01</span>
               <span>Metadata encrypted client-side (AES-256-GCM).</span>
             </li>
             <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0">02</span>
+              <span className="text-gold w-6 shrink-0 tnum">02</span>
               <span>Ciphertext anchored to Arweave · hash on Solana.</span>
             </li>
             <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0">03</span>
+              <span className="text-gold w-6 shrink-0 tnum">03</span>
               <span>Decryption key in URL fragment — never sent to a server.</span>
             </li>
             <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0">04</span>
+              <span className="text-gold w-6 shrink-0 tnum">04</span>
               <span>Payment settles via Umbra UTXO · amount hidden onchain.</span>
             </li>
           </ol>
@@ -181,59 +195,75 @@ export default function CreatePage() {
   }
 
   return (
-    <Frame heading="Create invoice" number="02">
-      {error && (
-        <div className="mb-12 border-l-2 border-brick pl-5 py-3 flex items-baseline gap-4 animate-fade-up">
-          <span className="mono-chip text-brick">Error</span>
-          <span className="text-sm text-cream leading-relaxed">{error}</span>
-        </div>
-      )}
-      <InvoiceForm onSubmit={handleSubmit} submitting={submitting} />
+    <Frame heading="Create invoice">
+      <InvoiceForm
+        onSubmit={handleSubmit}
+        submitting={submitting}
+        errorMessage={error}
+        onDismissError={() => setError(null)}
+      />
       <RegistrationModal open={regOpen} steps={regSteps} />
     </Frame>
   );
 }
 
+function parseAmountToBaseUnits(value: string, decimals: number): bigint | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(new RegExp(`^(\\d+)(?:\\.(\\d{0,${decimals}}))?$`));
+  if (!match) return null;
+  const whole = BigInt(match[1]);
+  const fraction = (match[2] ?? "").padEnd(decimals, "0").slice(0, decimals);
+  return whole * (10n ** BigInt(decimals)) + BigInt(fraction);
+}
+
 function Frame({
   heading,
-  number,
   children,
 }: {
   heading: string;
-  number: string;
   children: React.ReactNode;
 }) {
   return (
     <main className="min-h-screen relative pb-32">
-      {/* Top nav */}
-      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-ink/70 border-b border-line/60">
-        <div className="flex items-center justify-between px-6 md:px-12 py-5">
-          <a href="/" className="font-serif text-xl tracking-[0.22em] link-under">
-            VEIL
+      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+          <a href="/" className="flex items-baseline gap-3">
+            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
+              Veil
+            </span>
+            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
+              — private invoicing
+            </span>
           </a>
-          <div className="flex items-center gap-6">
-            <span className="mono-chip hidden md:inline">№ {number}</span>
-            <a href="/dashboard" className="mono-chip link-under hidden md:inline">
-              Dashboard ↗
+          <div className="flex items-center gap-1 md:gap-2">
+            <a
+              href="/create"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-ink"
+            >
+              Create
             </a>
-            <ClientWalletMultiButton />
+            <a
+              href="/dashboard"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            >
+              Dashboard
+            </a>
+            <div className="ml-2">
+              <ClientWalletMultiButton />
+            </div>
           </div>
         </div>
       </nav>
 
-      {/* Title */}
-      <header className="pt-24 md:pt-32 px-6 md:px-12 max-w-5xl">
-        <div className="flex items-baseline gap-5 mb-5">
-          <span className="section-no">Specimen {number}</span>
-          <span className="h-px w-20 bg-line" />
-        </div>
-        <h1 className="font-serif text-5xl md:text-7xl tracking-tightest animate-fade-up">
+      <header className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20 pb-10 md:pb-12">
+        <span className="eyebrow">New invoice</span>
+        <h1 className="mt-3 font-sans font-medium text-ink text-[40px] md:text-[52px] leading-[1.03] tracking-[-0.03em] reveal">
           {heading}
         </h1>
       </header>
 
-      {/* Body */}
-      <section className="mt-16 md:mt-20 px-6 md:px-12 max-w-3xl">{children}</section>
+      <section className="max-w-[1100px] mx-auto px-6 md:px-8 max-w-3xl">{children}</section>
     </main>
   );
 }

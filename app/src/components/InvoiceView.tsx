@@ -10,7 +10,7 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
   const hasTax = BigInt(metadata.tax) > 0n;
 
   return (
-    <article className="relative border border-line bg-paper p-8 md:p-12 lg:p-14 font-sans animate-fade-up">
+    <article className="relative border border-line bg-paper-3 rounded-[4px] p-8 md:p-12 lg:p-14 font-sans animate-fade-up shadow-[0_1px_0_rgba(0,0,0,0.02),0_20px_60px_-30px_rgba(26,24,20,0.25)]">
       {/* Corner marker */}
       <div className="absolute top-4 right-4 md:top-6 md:right-6 text-right">
         <div className="mono-chip mb-1">Invoice</div>
@@ -22,7 +22,7 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
       {/* Header: from */}
       <header className="pb-8 md:pb-10 border-b border-line">
         <div className="mono-chip mb-2">From</div>
-        <h1 className="font-serif text-3xl md:text-5xl tracking-tight leading-[1.05]">
+        <h1 className="font-sans font-medium text-ink text-[28px] md:text-[40px] tracking-[-0.025em] leading-[1.05]">
           {metadata.creator.display_name}
         </h1>
         {metadata.creator.contact && (
@@ -34,17 +34,17 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 py-8 md:py-10 border-b border-line">
         <div>
           <div className="mono-chip mb-2">Bill to</div>
-          <div className="font-serif italic text-xl md:text-2xl leading-tight">
+          <div className="font-sans text-ink text-[17px] md:text-[19px] leading-tight tracking-[-0.01em]">
             {metadata.payer.display_name}
           </div>
         </div>
         <div>
           <div className="mono-chip mb-2">Issued</div>
-          <div className="font-mono text-cream text-sm tabular-nums">{issued}</div>
+          <div className="font-mono text-ink text-sm tabular-nums">{issued}</div>
         </div>
         <div className="sm:text-right">
           <div className="mono-chip mb-2">Settlement</div>
-          <div className="font-mono text-cream text-sm">{metadata.currency.symbol}</div>
+          <div className="font-mono text-ink text-sm">{metadata.currency.symbol}</div>
         </div>
       </div>
 
@@ -60,14 +60,14 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
         <div className="divide-y divide-line/60">
           {metadata.line_items.map((li, i) => (
             <div key={i} className="grid grid-cols-12 gap-4 py-4 items-baseline">
-              <div className="col-span-6 font-sans text-cream">{li.description}</div>
+              <div className="col-span-6 font-sans text-ink">{li.description}</div>
               <div className="col-span-2 text-right font-mono text-muted tabular-nums">
                 {li.quantity}
               </div>
               <div className="col-span-2 text-right font-mono text-muted tabular-nums">
                 {formatAmount(li.unit_price, metadata.currency.decimals)}
               </div>
-              <div className="col-span-2 text-right font-mono text-cream tabular-nums">
+              <div className="col-span-2 text-right font-mono text-ink tabular-nums">
                 {formatAmount(li.total, metadata.currency.decimals)}
               </div>
             </div>
@@ -81,9 +81,9 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
         {hasTax && <TotalRow label="Tax" value={tax} />}
         <div className="flex justify-between items-baseline pt-4 mt-2 border-t border-line-2">
           <span className="mono-chip">Total</span>
-          <span className="font-serif text-3xl md:text-4xl tracking-tight text-gold tabular-nums">
+          <span className="font-sans font-medium text-ink text-[28px] md:text-[34px] tracking-[-0.02em] tabular-nums leading-none">
             {total}
-            <span className="ml-2 font-sans text-sm text-muted uppercase tracking-[0.18em]">
+            <span className="ml-2 font-mono text-[11px] text-muted uppercase tracking-[0.14em] font-normal">
               {metadata.currency.symbol}
             </span>
           </span>
@@ -94,8 +94,8 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
       {metadata.notes && (
         <div className="mt-14 pt-8 border-t border-line max-w-xl">
           <div className="mono-chip mb-3">Note</div>
-          <p className="font-serif italic text-muted leading-[1.55] text-lg md:text-xl">
-            &ldquo;{metadata.notes}&rdquo;
+          <p className="font-sans text-ink/80 leading-[1.6] text-[14.5px] md:text-[15px]">
+            {metadata.notes}
           </p>
         </div>
       )}
@@ -103,7 +103,7 @@ export function InvoiceView({ metadata }: { metadata: InvoiceMetadata }) {
       {/* Due */}
       {metadata.due_date && (
         <div className="mt-8 mono-chip">
-          Due <span className="text-cream ml-2 font-mono tabular-nums">{metadata.due_date}</span>
+          Due <span className="text-ink ml-2 font-mono tabular-nums">{metadata.due_date}</span>
         </div>
       )}
 
@@ -120,7 +120,7 @@ function TotalRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between items-baseline">
       <span className="text-muted text-sm">{label}</span>
-      <span className="font-mono text-cream tabular-nums">{value}</span>
+      <span className="font-mono text-ink tabular-nums">{value}</span>
     </div>
   );
 }
@@ -130,6 +130,9 @@ function formatAmount(units: string, decimals: number): string {
   const divisor = BigInt(10) ** BigInt(decimals);
   const whole = bn / divisor;
   const fraction = bn % divisor;
-  const fractionStr = fraction.toString().padStart(decimals, "0").slice(0, 2);
-  return `${whole.toLocaleString("en-US")}.${fractionStr}`;
+  // Show up to 4 significant fractional digits; trim trailing zeros beyond 2.
+  const display = Math.min(4, decimals);
+  const padded = fraction.toString().padStart(decimals, "0").slice(0, display);
+  const trimmed = padded.replace(/0+$/, "").padEnd(2, "0");
+  return `${whole.toLocaleString("en-US")}.${trimmed}`;
 }

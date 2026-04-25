@@ -4,11 +4,6 @@ import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import bs58 from "bs58";
-// NOTE: The caller prompt referenced `getMasterViewingKeyX25519KeypairGenerator`,
-// but the actual SDK export (verified in node_modules/@umbra-privacy/sdk/dist/crypto/index.d.ts)
-// is `getMasterViewingKeyX25519KeypairDeriver`. Same semantics: client-side derivation
-// that returns a zero-arg function producing a Curve25519KeypairResult with
-// { ed25519Keypair, x25519Keypair }.
 import { getMasterViewingKeyX25519KeypairDeriver } from "@umbra-privacy/sdk";
 import {
   ComplianceGrantForm,
@@ -40,7 +35,6 @@ export default function CompliancePage() {
       const client = await getOrCreateClient(wallet as any);
       await ensureRegistered(client);
 
-      // Decode + validate the auditor's X25519 pubkey.
       const receiverBytes = bs58.decode(values.receiverX25519PubKey);
       if (receiverBytes.length !== 32) {
         throw new Error(
@@ -48,12 +42,10 @@ export default function CompliancePage() {
         );
       }
 
-      // Derive the granter's own MVK X25519 pubkey client-side (cheap, no on-chain call).
       const deriveMvk = getMasterViewingKeyX25519KeypairDeriver({ client });
       const mvkResult = await deriveMvk();
       const granterX25519 = mvkResult.x25519Keypair.publicKey;
 
-      // Generate a nonce we can display back to the user to share with the auditor.
       const nonce = BigInt(Date.now());
 
       const signature = await issueComplianceGrant({
@@ -78,53 +70,110 @@ export default function CompliancePage() {
 
   if (!wallet.connected) {
     return (
-      <main className="min-h-screen p-8 max-w-2xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6">Compliance Grants</h1>
-        <p className="mb-4">Connect wallet to manage grants.</p>
-        <ClientWalletMultiButton />
-      </main>
+      <Shell>
+        <div className="max-w-lg reveal">
+          <span className="eyebrow">Auditor grants</span>
+          <h1 className="mt-4 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+            Connect to manage grants.
+          </h1>
+          <div className="mt-8">
+            <ClientWalletMultiButton />
+          </div>
+        </div>
+      </Shell>
     );
   }
 
   return (
-    <main className="min-h-screen p-8 max-w-2xl mx-auto">
-      <h1 className="text-3xl font-bold mb-6">Compliance Grants</h1>
-      <p className="text-gray-400 mb-6">
-        Grant read-only access to your encrypted transactions to an auditor or
-        accountant. You will be prompted to sign a transaction.
-      </p>
+    <Shell>
+      <div className="max-w-2xl reveal">
+        <span className="eyebrow">Auditor grants</span>
+        <h1 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+          Grant read-only access.
+        </h1>
+        <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-xl">
+          Give an auditor or accountant a scoped view of your encrypted transactions.
+          You&apos;ll sign one transaction. You can revoke — but prior disclosures are
+          permanent.
+        </p>
 
-      {error && (
-        <div className="bg-red-900/30 border border-red-700 p-3 rounded mb-4 text-red-200">
-          {error}
+        {error && (
+          <div className="mt-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-xl">
+            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+            <span className="text-[13.5px] text-ink leading-relaxed flex-1">{error}</span>
+          </div>
+        )}
+
+        {result && (
+          <div className="mt-8 border border-sage/40 bg-sage/5 rounded-[3px] p-5 md:p-6 max-w-xl">
+            <div className="flex items-baseline justify-between mb-4">
+              <span className="eyebrow text-sage">Grant created</span>
+            </div>
+            <p className="text-[13.5px] text-ink/80 leading-relaxed">
+              Share the following with your auditor so they can decrypt the scoped
+              ciphertexts.
+            </p>
+            <dl className="mt-5 space-y-3 text-[12.5px] font-mono border-t border-line pt-4">
+              <ResultRow label="Wallet" value={result.receiverAddress} />
+              <ResultRow label="Nonce" value={result.nonce.toString()} />
+              <ResultRow label="Signature" value={result.signature} />
+            </dl>
+          </div>
+        )}
+
+        <div className="mt-10 pt-8 border-t border-line">
+          <ComplianceGrantForm onSubmit={handleGrant} submitting={submitting} />
         </div>
-      )}
+      </div>
+    </Shell>
+  );
+}
 
-      {result && (
-        <div className="bg-green-900/30 border border-green-700 p-4 rounded mb-6 text-green-200 space-y-2">
-          <p className="font-medium">Grant created successfully.</p>
-          <p className="text-sm">
-            Share the following details with your auditor so they can decrypt
-            the scoped ciphertexts:
-          </p>
-          <dl className="text-xs font-mono bg-black/40 p-3 rounded space-y-1">
-            <div>
-              <dt className="inline text-gray-400">Auditor wallet: </dt>
-              <dd className="inline break-all">{result.receiverAddress}</dd>
+function ResultRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline gap-4">
+      <dt className="text-dim uppercase tracking-[0.12em] text-[10.5px] w-20 shrink-0">
+        {label}
+      </dt>
+      <dd className="text-ink break-all flex-1">{value}</dd>
+    </div>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-screen relative pb-32">
+      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+          <a href="/" className="flex items-baseline gap-3">
+            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
+              Veil
+            </span>
+            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
+              — private invoicing
+            </span>
+          </a>
+          <div className="flex items-center gap-1 md:gap-2">
+            <a
+              href="/create"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            >
+              Create
+            </a>
+            <a
+              href="/dashboard"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            >
+              Dashboard
+            </a>
+            <div className="ml-2">
+              <ClientWalletMultiButton />
             </div>
-            <div>
-              <dt className="inline text-gray-400">Grant nonce: </dt>
-              <dd className="inline break-all">{result.nonce.toString()}</dd>
-            </div>
-            <div>
-              <dt className="inline text-gray-400">Transaction: </dt>
-              <dd className="inline break-all">{result.signature}</dd>
-            </div>
-          </dl>
+          </div>
         </div>
-      )}
+      </nav>
 
-      <ComplianceGrantForm onSubmit={handleGrant} submitting={submitting} />
+      <section className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
     </main>
   );
 }

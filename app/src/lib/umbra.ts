@@ -4,27 +4,188 @@ import {
   getUmbraClient,
   getUserAccountQuerierFunction,
   getUserRegistrationFunction,
+  getWebsocketTransactionForwarder,
 } from "@umbra-privacy/sdk";
+import {
+  getUserRegistrationProver,
+  getCdnZkAssetProvider,
+} from "@umbra-privacy/web-zk-prover";
+import { getWallets } from "@wallet-standard/app";
+import {
+  getTransactionEncoder,
+  getTransactionDecoder,
+  getSignatureFromTransaction,
+} from "@solana/transactions";
 import { NETWORK, RPC_URL, RPC_WSS_URL, UMBRA_INDEXER_API } from "./constants";
 
 type UmbraClient = Awaited<ReturnType<typeof getUmbraClient>>;
 
+// Umbra's default CDN (CloudFront) serves no CORS headers. Route all
+// browser-side ZK-asset fetches through our same-origin Next.js rewrite
+// (`/umbra-cdn/*` → CloudFront) configured in next.config.mjs.
+function proxiedAssetProvider() {
+  return getCdnZkAssetProvider({ baseUrl: "/umbra-cdn" });
+}
+
 let cachedClient: UmbraClient | null = null;
 let cachedSignerAddress: string | null = null;
 
-export async function getOrCreateClient(signer: any): Promise<UmbraClient> {
-  if (cachedClient && cachedSignerAddress === signer.address?.toString()) {
-    return cachedClient;
+// Custom IUmbraSigner wrapper around a Wallet Standard account.
+//
+// Replaces the SDK's `createSignerFromWalletAccount` because of a bug in
+// @umbra-privacy/sdk 2.1.1 (chunk-HA5FLM63.js ~line 119): after the wallet
+// signs, the SDK returns the ORIGINAL `transaction.messageBytes` with only
+// the new signatures merged in. When Phantom modifies the tx (e.g. injects
+// a ComputeBudget / priority-fee instruction for larger txs, which it does
+// automatically for CreatePublicUtxoProofAccount), the signature is over
+// Phantom's modified messageBytes but the forwarded tx carries the old
+// messageBytes — validator rejects with "signature verification failed".
+//
+// Fix: return the fully-decoded transaction (Phantom's modified
+// messageBytes + its signatures) as-is. Preserves any extra props from the
+// original for SDK compatibility.
+function createFixedWalletStandardSigner(wallet: any, account: any) {
+  const feats = wallet.features as any;
+  const signTx = feats["solana:signTransaction"];
+  const signMsg = feats["solana:signMessage"];
+  if (!signTx) throw new Error(`Wallet "${wallet.name}" lacks solana:signTransaction`);
+  if (!signMsg) throw new Error(`Wallet "${wallet.name}" lacks solana:signMessage`);
+
+  const encoder = getTransactionEncoder();
+  const decoder = getTransactionDecoder();
+
+  return {
+    address: account.address,
+    async signTransaction(transaction: any) {
+      const wireBytes = encoder.encode(transaction);
+      const [output] = await signTx.signTransaction({ account, transaction: wireBytes });
+      const decoded: any = decoder.decode(output.signedTransaction);
+      return {
+        ...transaction,
+        messageBytes: decoded.messageBytes,
+        signatures: { ...transaction.signatures, ...decoded.signatures },
+      };
+    },
+    async signTransactions(transactions: any[]) {
+      const inputs = transactions.map((tx) => ({
+        account,
+        transaction: encoder.encode(tx),
+      }));
+      const outputs = await signTx.signTransaction(...inputs);
+      return transactions.map((tx, i) => {
+        const decoded: any = decoder.decode(outputs[i].signedTransaction);
+        return {
+          ...tx,
+          messageBytes: decoded.messageBytes,
+          signatures: { ...tx.signatures, ...decoded.signatures },
+        };
+      });
+    },
+    async signMessage(message: Uint8Array) {
+      const [output] = await signMsg.signMessage({ account, message });
+      return { message, signature: output.signature, signer: account.address };
+    },
+  };
+}
+
+// Resolve a Wallet Standard Wallet + WalletAccount for the currently
+// connected @solana/wallet-adapter-react wallet by matching publicKey.
+function resolveWalletStandardSigner(walletCtx: any) {
+  const connectedPubkey = walletCtx?.publicKey?.toBase58?.();
+  if (!connectedPubkey) {
+    throw new Error("Wallet not connected");
   }
-  const client = await getUmbraClient({
-    signer,
-    network: NETWORK,
+
+  const wallets = getWallets().get();
+  for (const w of wallets) {
+    const hasSign = (w.features as any)["solana:signTransaction"];
+    const hasMsg = (w.features as any)["solana:signMessage"];
+    if (!hasSign || !hasMsg) continue;
+
+    for (const account of w.accounts) {
+      if (!account.chains.some((c: string) => c.startsWith("solana:"))) continue;
+      if (account.address === connectedPubkey) {
+        return createFixedWalletStandardSigner(w, account) as any;
+      }
+    }
+  }
+
+  throw new Error(
+    `No Wallet Standard wallet exposes account ${connectedPubkey} with ` +
+      "solana:signTransaction and solana:signMessage features. " +
+      "Ensure Phantom/Solflare/Backpack is installed and connected.",
+  );
+}
+
+// Phantom's wallet-standard signTransaction auto-submits the signed tx to
+// the network for some transaction shapes (notably larger txs where it
+// injects a ComputeBudget priority-fee instruction). When the SDK then
+// calls its own sendTransaction via the transaction forwarder, the RPC
+// preflight simulator rejects the second submission with
+// "AlreadyProcessed". The tx is genuinely on-chain — treat that specific
+// error as success and return the sig from the signed transaction.
+function looksLikeAlreadyProcessed(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const causeMsg = (err as any)?.cause?.message ?? "";
+  const stack = (err as any)?.stack ?? "";
+  return (
+    /already\s+(been\s+)?processed/i.test(msg) ||
+    /already\s+(been\s+)?processed/i.test(causeMsg) ||
+    /already\s+(been\s+)?processed/i.test(stack)
+  );
+}
+
+function makeTolerantForwarder() {
+  const base = getWebsocketTransactionForwarder({
     rpcUrl: RPC_URL,
     rpcSubscriptionsUrl: RPC_WSS_URL,
-    indexerApiEndpoint: UMBRA_INDEXER_API,
   });
+
+  async function sendOne(tx: any, options: any) {
+    try {
+      const [sig] = await (base.forwardSequentially as any)([tx], options);
+      return sig;
+    } catch (err) {
+      if (looksLikeAlreadyProcessed(err)) {
+        return getSignatureFromTransaction(tx);
+      }
+      throw err;
+    }
+  }
+
+  return {
+    forwardSequentially: async (txs: readonly any[], options: any = {}) => {
+      const out: any[] = [];
+      for (const tx of txs) out.push(await sendOne(tx, options));
+      return out;
+    },
+    forwardInParallel: async (txs: readonly any[], options: any = {}) => {
+      return Promise.all(txs.map((tx) => sendOne(tx, options)));
+    },
+    fireAndForget: base.fireAndForget,
+  };
+}
+
+export async function getOrCreateClient(walletCtx: any): Promise<UmbraClient> {
+  const connectedAddress = walletCtx?.publicKey?.toBase58?.() ?? null;
+  if (cachedClient && cachedSignerAddress === connectedAddress) {
+    return cachedClient;
+  }
+
+  const signer = resolveWalletStandardSigner(walletCtx);
+
+  const client = await getUmbraClient(
+    {
+      signer,
+      network: NETWORK,
+      rpcUrl: RPC_URL,
+      rpcSubscriptionsUrl: RPC_WSS_URL,
+      indexerApiEndpoint: UMBRA_INDEXER_API,
+    },
+    { transactionForwarder: makeTolerantForwarder() as any },
+  );
   cachedClient = client;
-  cachedSignerAddress = signer.address?.toString() ?? null;
+  cachedSignerAddress = connectedAddress;
   return client;
 }
 
@@ -49,7 +210,8 @@ export async function ensureRegistered(
 ): Promise<void> {
   if (await isFullyRegistered(client)) return;
 
-  const register = getUserRegistrationFunction({ client });
+  const zkProver = getUserRegistrationProver({ assetProvider: proxiedAssetProvider() });
+  const register = getUserRegistrationFunction({ client }, { zkProver } as any);
   await register({
     confidential: true,
     anonymous: true,
@@ -103,7 +265,9 @@ export interface PayInvoiceResult {
  * established off-chain (Bob calls `markPaidOnChain` separately).
  */
 export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
-  const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver();
+  const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver({
+    assetProvider: proxiedAssetProvider(),
+  });
   const create = getPublicBalanceToReceiverClaimableUtxoCreatorFunction(
     { client: args.client },
     { zkProver } as any,
@@ -161,7 +325,9 @@ export interface ClaimArgs {
 }
 
 export async function claimUtxos(args: ClaimArgs) {
-  const zkProver = getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver();
+  const zkProver = getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver({
+    assetProvider: proxiedAssetProvider(),
+  });
   const relayer = getUmbraRelayer({ apiEndpoint: UMBRA_RELAYER_API } as any);
   const claim = getReceiverClaimableUtxoToEncryptedBalanceClaimerFunction(
     { client: args.client },

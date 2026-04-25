@@ -12,7 +12,7 @@ import {
   claimUtxos,
   getEncryptedBalance,
 } from "@/lib/umbra";
-import { USDC_MINT } from "@/lib/constants";
+import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
 export default function DashboardPage() {
   const wallet = useWallet();
@@ -26,25 +26,42 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      // Fetch all invoices where this wallet is the creator
       const all = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
       setInvoices(all.map((a: any) => ({ pda: a.publicKey, account: a.account })));
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error("[Veil dashboard] fetchInvoicesByCreator failed:", err);
+      setError(`Invoice list: ${err.message ?? String(err)}`);
+      setLoading(false);
+      return;
+    }
 
-      // If registered, scan and auto-claim ALL received UTXOs (no PDA filtering,
-      // per the 2026-04-16 design addendum — UTXO↔invoice linkage happens
-      // off-chain via markPaidOnChain, not via optionalData).
+    try {
       const client = await getOrCreateClient(wallet as any);
       if (await isFullyRegistered(client)) {
-        const scan = await scanClaimableUtxos(client);
-        if (scan.publicReceived.length > 0) {
-          await claimUtxos({ client, utxos: scan.publicReceived });
+        try {
+          const scan = await scanClaimableUtxos(client);
+          if (scan.publicReceived.length > 0) {
+            await claimUtxos({ client, utxos: scan.publicReceived });
+          }
+        } catch (err: any) {
+          // eslint-disable-next-line no-console
+          console.error("[Veil dashboard] scan/claim failed:", err);
         }
 
-        const bal = await getEncryptedBalance(client, USDC_MINT.toBase58());
-        setBalance(bal);
+        try {
+          const bal = await getEncryptedBalance(client, USDC_MINT.toBase58());
+          setBalance(bal);
+        } catch (err: any) {
+          // eslint-disable-next-line no-console
+          console.error("[Veil dashboard] getEncryptedBalance failed:", err);
+          setError(`Balance: ${err.message ?? String(err)}`);
+        }
       }
     } catch (err: any) {
-      setError(err.message ?? String(err));
+      // eslint-disable-next-line no-console
+      console.error("[Veil dashboard] umbra client init failed:", err);
+      setError(`Umbra: ${err.message ?? String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -58,11 +75,21 @@ export default function DashboardPage() {
 
   if (!wallet.connected) {
     return (
-      <main className="min-h-screen p-8 max-w-4xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6">Dashboard</h1>
-        <p className="mb-4">Connect your wallet to see your invoices.</p>
-        <ClientWalletMultiButton />
-      </main>
+      <Shell>
+        <div className="max-w-lg reveal">
+          <span className="eyebrow">Dashboard</span>
+          <h1 className="mt-4 font-sans font-medium text-ink text-[40px] md:text-[48px] leading-[1.05] tracking-[-0.03em]">
+            Connect to view your invoices.
+          </h1>
+          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
+            Your dashboard reads directly from Solana using the wallet you connect.
+            Nothing is synced to a server.
+          </p>
+          <div className="mt-8">
+            <ClientWalletMultiButton />
+          </div>
+        </div>
+      </Shell>
     );
   }
 
@@ -75,41 +102,97 @@ export default function DashboardPage() {
   }));
 
   return (
-    <main className="min-h-screen p-8 max-w-4xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold">Dashboard</h1>
+    <Shell>
+      <div className="flex items-baseline justify-between mb-10 reveal">
+        <div>
+          <span className="eyebrow">Dashboard</span>
+          <h1 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+            Your invoices.
+          </h1>
+        </div>
         <button
           onClick={refresh}
           disabled={loading}
-          className="px-4 py-2 bg-gray-800 rounded hover:bg-gray-700 disabled:opacity-50"
+          className="btn-ghost text-[13px] px-4 py-2"
         >
-          {loading ? "Refreshing..." : "Refresh"}
+          {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
 
       {balance !== null && (
-        <div className="mb-6 bg-gray-900 border border-gray-800 rounded p-4">
-          <div className="text-sm text-gray-500">Private USDC balance</div>
-          <div className="text-2xl font-mono">{(Number(balance) / 1e6).toFixed(2)} USDC</div>
+        <div className="mb-10 border border-line bg-paper-3 rounded-[4px] p-6 md:p-7 reveal">
+          <div className="flex items-baseline justify-between gap-6">
+            <div>
+              <span className="eyebrow">Private {PAYMENT_SYMBOL} balance</span>
+              <div className="mt-3 font-sans tnum text-ink text-[32px] md:text-[40px] font-medium tracking-[-0.02em] leading-none">
+                {(Number(balance) / 10 ** PAYMENT_DECIMALS).toFixed(Math.min(4, PAYMENT_DECIMALS))}
+                <span className="ml-3 font-mono text-[12px] text-muted tracking-[0.14em] uppercase">
+                  {PAYMENT_SYMBOL}
+                </span>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-2 text-[12px] text-sage">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                <path d="M2 6l3 3 5-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>Encrypted · readable only by you</span>
+            </span>
+          </div>
         </div>
       )}
 
       {error && (
-        <div className="bg-red-900/30 border border-red-700 p-3 rounded mb-4 text-red-200">
-          {error}
+        <div className="mb-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-2xl">
+          <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+          <span className="text-[13.5px] text-ink leading-relaxed flex-1">{error}</span>
         </div>
       )}
 
-      <DashboardList title="Invoices I created" invoices={incoming} />
+      <DashboardList title="Invoices you created" invoices={incoming} />
 
-      <div className="mt-6">
-        <a
-          href="/dashboard/compliance"
-          className="text-indigo-400 hover:text-indigo-300"
-        >
-          → Manage compliance grants
+      <div className="mt-10 pt-8 border-t border-line">
+        <a href="/dashboard/compliance" className="btn-quiet">
+          Manage auditor grants →
         </a>
       </div>
+    </Shell>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-screen relative pb-32">
+      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+          <a href="/" className="flex items-baseline gap-3">
+            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
+              Veil
+            </span>
+            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
+              — private invoicing
+            </span>
+          </a>
+          <div className="flex items-center gap-1 md:gap-2">
+            <a
+              href="/create"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            >
+              Create
+            </a>
+            <a
+              href="/dashboard"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-ink"
+            >
+              Dashboard
+            </a>
+            <div className="ml-2">
+              <ClientWalletMultiButton />
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <section className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
     </main>
   );
 }

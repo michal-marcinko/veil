@@ -17,7 +17,7 @@
     "@solana/wallet-adapter-react-ui": "0.9.35",
     "@solana/wallet-adapter-wallets": "0.19.32",
     "@solana/web3.js": "1.95.0",
-    "@umbra-privacy/sdk": "2.0.3",
+    "@umbra-privacy/sdk": "2.1.1",
     "@umbra-privacy/web-zk-prover": "2.0.1",
     "bs58": "^4.0.1",
     "next": "14.2.0",

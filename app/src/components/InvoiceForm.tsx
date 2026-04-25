@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
 export interface InvoiceFormValues {
   creatorDisplayName: string;
@@ -14,9 +15,11 @@ export interface InvoiceFormValues {
 interface Props {
   onSubmit: (values: InvoiceFormValues) => Promise<void>;
   submitting: boolean;
+  errorMessage?: string | null;
+  onDismissError?: () => void;
 }
 
-export function InvoiceForm({ onSubmit, submitting }: Props) {
+export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError }: Props) {
   const [values, setValues] = useState<InvoiceFormValues>({
     creatorDisplayName: "",
     payerDisplayName: "",
@@ -25,20 +28,25 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
     notes: "",
     dueDate: "",
   });
+  const [restrictPayer, setRestrictPayer] = useState(false);
 
-  const runningTotal = useMemo(() => {
-    try {
-      const sum = values.lineItems.reduce((acc, li) => {
-        if (!li.quantity || !li.unitPrice) return acc;
-        return acc + BigInt(li.quantity) * BigInt(li.unitPrice);
-      }, 0n);
-      return formatMicroUsdc(sum);
-    } catch {
-      return null;
-    }
-  }, [values.lineItems]);
+  const lineTotals = useMemo(
+    () => values.lineItems.map((li) => computeLineMicros(li.quantity, li.unitPrice)),
+    [values.lineItems],
+  );
+
+  const subtotalMicros = useMemo<bigint>(
+    () => lineTotals.reduce<bigint>((acc, m) => (m == null ? acc : acc + m), 0n),
+    [lineTotals],
+  );
+
+  function updateValues(update: Partial<InvoiceFormValues>) {
+    onDismissError?.();
+    setValues((v) => ({ ...v, ...update }));
+  }
 
   function addLineItem() {
+    onDismissError?.();
     setValues((v) => ({
       ...v,
       lineItems: [...v.lineItems, { description: "", quantity: "1", unitPrice: "" }],
@@ -50,6 +58,7 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
     field: "description" | "quantity" | "unitPrice",
     value: string,
   ) {
+    onDismissError?.();
     setValues((v) => ({
       ...v,
       lineItems: v.lineItems.map((li, i) => (i === idx ? { ...li, [field]: value } : li)),
@@ -57,66 +66,82 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
   }
 
   function removeLineItem(idx: number) {
+    onDismissError?.();
     setValues((v) => ({ ...v, lineItems: v.lineItems.filter((_, i) => i !== idx) }));
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await onSubmit(values);
+    const submitted = restrictPayer
+      ? values
+      : { ...values, payerWallet: "" };
+    await onSubmit(submitted);
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-20">
-      {/* §I Parties */}
-      <section className="space-y-10 animate-fade-up">
-        <SectionHeader number="I" title="Parties" />
+    <form onSubmit={handleSubmit} className="space-y-14">
+      {/* Parties */}
+      <section className="space-y-7 animate-fade-up">
+        <SectionHeader eyebrow="01" title="Parties" />
 
-        <div className="space-y-9">
-          <Field label="From" hint="Your name or business as it will appear on the invoice.">
+        <div className="space-y-7">
+          <Field label="From">
             <input
               value={values.creatorDisplayName}
-              onChange={(e) => setValues({ ...values, creatorDisplayName: e.target.value })}
+              onChange={(e) => updateValues({ creatorDisplayName: e.target.value })}
               className="input-editorial"
               placeholder="Acme Design Ltd."
               required
             />
+            <FieldHint>Your name or business as it will appear on the invoice.</FieldHint>
           </Field>
 
-          <Field label="Bill to" hint="How the payer should be identified on the invoice.">
+          <Field label="Bill to">
             <input
               value={values.payerDisplayName}
-              onChange={(e) => setValues({ ...values, payerDisplayName: e.target.value })}
+              onChange={(e) => updateValues({ payerDisplayName: e.target.value })}
               className="input-editorial"
               placeholder="Globex Corp."
               required
             />
+            <FieldHint>How the payer will be identified on the invoice.</FieldHint>
           </Field>
 
-          <Field
-            label="Payer wallet"
-            hint="Optional — restricts who can pay. Leave empty to share by link."
+          <OptionalToggle
+            label="Restrict who can pay"
+            hint="Only the wallet you enter will be able to settle this invoice."
+            open={restrictPayer}
+            onToggle={() => {
+              onDismissError?.();
+              setRestrictPayer((prev) => !prev);
+              if (restrictPayer) updateValues({ payerWallet: "" });
+            }}
           >
-            <input
-              value={values.payerWallet}
-              onChange={(e) => setValues({ ...values, payerWallet: e.target.value })}
-              className="input-editorial font-mono text-sm"
-              placeholder="4w85uvq3GeKRWKeeB2CyH4FeSYtWsvumHt3XB2TaZdFg"
-            />
-          </Field>
+            <Field label="Payer wallet">
+              <input
+                value={values.payerWallet}
+                onChange={(e) => updateValues({ payerWallet: e.target.value })}
+                className="input-editorial font-mono text-sm"
+                placeholder="4w85uvq3GeKRWKeeB2CyH4FeSYtWsvumHt3XB2TaZdFg"
+              />
+            </Field>
+          </OptionalToggle>
         </div>
       </section>
 
-      {/* §II Line items */}
-      <section className="space-y-10 animate-fade-up" style={{ animationDelay: "120ms" }}>
-        <SectionHeader number="II" title="Line items" />
+      {/* Items */}
+      <section className="space-y-7 animate-fade-up" style={{ animationDelay: "100ms" }}>
+        <SectionHeader eyebrow="02" title="Items" />
 
         <div>
-          <div className="grid grid-cols-12 gap-4 pb-3 border-b border-line">
-            <div className="col-span-1 mono-chip">№</div>
-            <div className="col-span-6 mono-chip">Description</div>
-            <div className="col-span-2 mono-chip text-right">Qty</div>
-            <div className="col-span-2 mono-chip text-right">Rate (µUSDC)</div>
-            <div className="col-span-1" />
+          {/* Column headers */}
+          <div className="hidden md:grid grid-cols-[1.75rem_1fr_4rem_9rem_8rem_1.5rem] gap-4 pb-3 border-b border-line items-baseline">
+            <div />
+            <div className="mono-chip">Description</div>
+            <div className="mono-chip text-right">Qty</div>
+            <div className="mono-chip text-right">Rate · {PAYMENT_SYMBOL}</div>
+            <div className="mono-chip text-right">Amount</div>
+            <div />
           </div>
 
           <div className="divide-y divide-line/60">
@@ -125,6 +150,7 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
                 key={idx}
                 index={idx}
                 item={li}
+                amountMicros={lineTotals[idx]}
                 canRemove={values.lineItems.length > 1}
                 onChange={(field, value) => updateLineItem(idx, field, value)}
                 onRemove={() => removeLineItem(idx)}
@@ -132,68 +158,75 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
             ))}
           </div>
 
-          <div className="mt-5 flex items-baseline justify-between">
+          <div className="mt-6 flex flex-wrap items-baseline justify-between gap-6">
             <button type="button" onClick={addLineItem} className="btn-quiet">
-              + Add line item
+              + Add line
             </button>
 
-            {runningTotal && (
-              <div className="flex items-baseline gap-4 text-sm">
-                <span className="mono-chip">Subtotal</span>
-                <span className="font-mono text-cream text-base tabular-nums">
-                  {runningTotal} <span className="text-muted">USDC</span>
+            <div className="flex items-baseline gap-6">
+              <span className="mono-chip">Subtotal</span>
+              <span className="font-mono text-ink text-xl md:text-2xl tabular-nums tracking-tight">
+                {formatMicros(subtotalMicros)}
+                <span className="ml-2 text-dim text-xs font-sans uppercase tracking-[0.16em]">
+                  {PAYMENT_SYMBOL}
                 </span>
-              </div>
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Terms */}
+      <section className="space-y-7 animate-fade-up" style={{ animationDelay: "200ms" }}>
+        <SectionHeader eyebrow="03" title="Terms" />
+
+        <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-10">
+          <Field label="Notes" optional>
+            <textarea
+              value={values.notes}
+              onChange={(e) => updateValues({ notes: e.target.value })}
+              className="input-editorial resize-none"
+              rows={3}
+              placeholder="Net 30. Late fee 1.5%/month. Thanks for your business."
+            />
+          </Field>
+          <Field label="Due date" optional>
+            <input
+              type="date"
+              value={values.dueDate}
+              onChange={(e) => updateValues({ dueDate: e.target.value })}
+              className="input-editorial font-mono"
+            />
+          </Field>
+        </div>
+      </section>
+
+      {/* Submit + contextual error */}
+      <div className="pt-2 animate-fade-up space-y-5" style={{ animationDelay: "300ms" }}>
+        {errorMessage && (
+          <div className="flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-xl">
+            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+            <span className="text-sm text-ink leading-relaxed flex-1">{errorMessage}</span>
+            {onDismissError && (
+              <button
+                type="button"
+                onClick={onDismissError}
+                className="text-dim hover:text-ink transition-colors text-lg leading-none shrink-0"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
             )}
           </div>
-
-          <p className="mt-6 max-w-md text-[12px] leading-relaxed text-dim">
-            Amounts are expressed in USDC micro-units (6 decimals). Enter{" "}
-            <span className="font-mono text-muted">100000000</span> for 100.00 USDC. A helper to
-            type human-readable amounts is on the stretches plan.
-          </p>
-        </div>
-      </section>
-
-      {/* §III Terms */}
-      <section className="space-y-10 animate-fade-up" style={{ animationDelay: "240ms" }}>
-        <SectionHeader number="III" title="Terms" />
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-10 md:gap-12">
-          <div className="md:col-span-2">
-            <Field label="Notes">
-              <textarea
-                value={values.notes}
-                onChange={(e) => setValues({ ...values, notes: e.target.value })}
-                className="input-editorial resize-none"
-                rows={3}
-                placeholder="Net 30. Late fee 1.5%/month. Thanks for your business."
-              />
-            </Field>
-          </div>
-          <div>
-            <Field label="Due">
-              <input
-                type="date"
-                value={values.dueDate}
-                onChange={(e) => setValues({ ...values, dueDate: e.target.value })}
-                className="input-editorial font-mono"
-              />
-            </Field>
-          </div>
-        </div>
-      </section>
-
-      {/* Submit */}
-      <div className="pt-4 animate-fade-up" style={{ animationDelay: "360ms" }}>
+        )}
         <button
           type="submit"
-          disabled={submitting}
-          className="btn-primary w-full md:w-auto md:min-w-[360px]"
+          disabled={submitting || subtotalMicros === 0n}
+          className="btn-primary w-full md:w-auto md:min-w-[340px]"
         >
           {submitting ? (
             <span className="inline-flex items-center gap-3">
-              <span className="h-1.5 w-1.5 rounded-full bg-ink animate-slow-pulse" />
+              <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
               Publishing encrypted invoice
             </span>
           ) : (
@@ -202,7 +235,7 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
             </span>
           )}
         </button>
-        <p className="mt-5 max-w-xl text-[12px] font-mono tracking-[0.12em] uppercase text-dim">
+        <p className="max-w-xl text-[12px] font-mono tracking-[0.12em] uppercase text-dim">
           Encrypts client-side · Anchors hash on Solana · Settles via Umbra UTXO
         </p>
       </div>
@@ -210,31 +243,37 @@ export function InvoiceForm({ onSubmit, submitting }: Props) {
   );
 }
 
-function SectionHeader({ number, title }: { number: string; title: string }) {
+function SectionHeader({ eyebrow, title }: { eyebrow: string; title: string }) {
   return (
-    <div className="flex items-baseline gap-6 border-b border-line pb-3">
-      <span className="section-no">§ {number}</span>
-      <h2 className="font-serif italic text-2xl md:text-3xl">{title}</h2>
-      <span className="flex-1 h-px bg-line/60 mb-1" />
+    <div className="flex items-baseline gap-5 border-b border-line pb-3">
+      <span className="font-mono text-[10.5px] text-gold tracking-[0.18em] tabular-nums">
+        {eyebrow}
+      </span>
+      <h2 className="font-sans font-medium text-ink text-[20px] md:text-[22px] tracking-[-0.015em] leading-none">
+        {title}
+      </h2>
+      <span className="flex-1 h-px bg-line/50 mb-1.5" />
     </div>
   );
 }
 
 function Field({
   label,
-  hint,
+  optional,
   children,
 }: {
   label: string;
-  hint?: string;
+  optional?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-baseline flex-wrap gap-x-3">
+      <div className="flex items-baseline gap-3">
         <label className="mono-chip">{label}</label>
-        {hint && (
-          <span className="text-[12px] text-dim font-sans leading-relaxed">— {hint}</span>
+        {optional && (
+          <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-dim">
+            Optional
+          </span>
         )}
       </div>
       {children}
@@ -242,57 +281,113 @@ function Field({
   );
 }
 
+function FieldHint({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-[12px] text-dim font-sans leading-relaxed mt-1.5">{children}</div>
+  );
+}
+
+function OptionalToggle({
+  label,
+  hint,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  hint: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-t border-line/60 pt-5">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group flex items-baseline gap-3 text-left"
+      >
+        <span
+          className={`font-mono text-[11px] tabular-nums transition-colors ${
+            open ? "text-gold" : "text-dim group-hover:text-ink"
+          }`}
+        >
+          {open ? "−" : "+"}
+        </span>
+        <span className="mono-chip group-hover:text-ink transition-colors">{label}</span>
+      </button>
+      {!open && <div className="text-[12px] text-dim mt-1.5 ml-5">{hint}</div>}
+      {open && <div className="mt-5 ml-5">{children}</div>}
+    </div>
+  );
+}
+
 function LineItemRow({
   index,
   item,
+  amountMicros,
   canRemove,
   onChange,
   onRemove,
 }: {
   index: number;
   item: { description: string; quantity: string; unitPrice: string };
+  amountMicros: bigint | null;
   canRemove: boolean;
-  onChange: (
-    field: "description" | "quantity" | "unitPrice",
-    value: string,
-  ) => void;
+  onChange: (field: "description" | "quantity" | "unitPrice", value: string) => void;
   onRemove: () => void;
 }) {
+  const amountDisplay =
+    amountMicros == null ? (
+      <span className="text-dim">—</span>
+    ) : (
+      <span className="text-ink">{formatMicros(amountMicros)}</span>
+    );
+
   return (
-    <div className="grid grid-cols-12 gap-4 items-baseline py-4 group">
-      <div className="col-span-1 font-mono text-[12px] text-dim tabular-nums pt-2.5">
+    <div className="md:grid md:grid-cols-[1.75rem_1fr_4rem_9rem_8rem_1.5rem] md:gap-4 md:items-baseline py-4 group flex flex-col gap-3">
+      <div className="font-mono text-[11px] text-dim tabular-nums md:pt-2.5">
         {String(index + 1).padStart(2, "0")}
       </div>
-      <div className="col-span-6">
+      <div>
         <input
           value={item.description}
           onChange={(e) => onChange("description", e.target.value)}
           className="input-editorial"
           placeholder="Brand identity design (40h)"
           required
+          aria-label={`Description for line ${index + 1}`}
         />
       </div>
-      <div className="col-span-2">
+      <div>
         <input
           value={item.quantity}
-          onChange={(e) => onChange("quantity", e.target.value)}
+          onChange={(e) => onChange("quantity", sanitizeInteger(e.target.value))}
           inputMode="numeric"
           className="input-editorial text-right font-mono tabular-nums"
           placeholder="1"
           required
+          aria-label={`Quantity for line ${index + 1}`}
         />
       </div>
-      <div className="col-span-2">
-        <input
-          value={item.unitPrice}
-          onChange={(e) => onChange("unitPrice", e.target.value)}
-          inputMode="numeric"
-          className="input-editorial text-right font-mono tabular-nums"
-          placeholder="100000000"
-          required
-        />
+      <div>
+        <div className="relative">
+          <span className="absolute left-0 top-1/2 -translate-y-1/2 font-mono text-[13px] text-dim pointer-events-none">
+            $
+          </span>
+          <input
+            value={item.unitPrice}
+            onChange={(e) => onChange("unitPrice", sanitizeDecimal(e.target.value))}
+            inputMode="decimal"
+            className="input-editorial pl-4 text-right font-mono tabular-nums"
+            placeholder="0.00"
+            required
+            aria-label={`Unit price for line ${index + 1}`}
+          />
+        </div>
       </div>
-      <div className="col-span-1 text-right pt-1.5">
+      <div className="text-right font-mono text-base tabular-nums md:pt-2">{amountDisplay}</div>
+      <div className="md:text-right md:pt-1.5">
         {canRemove && (
           <button
             type="button"
@@ -308,10 +403,47 @@ function LineItemRow({
   );
 }
 
-function formatMicroUsdc(micros: bigint): string {
-  const divisor = 1_000_000n;
+// ---- helpers ------------------------------------------------------------
+
+function sanitizeInteger(raw: string): string {
+  return raw.replace(/[^\d]/g, "");
+}
+
+function sanitizeDecimal(raw: string): string {
+  let cleaned = raw.replace(/[^\d.]/g, "");
+  const firstDot = cleaned.indexOf(".");
+  if (firstDot !== -1) {
+    cleaned =
+      cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
+    const [whole, frac = ""] = cleaned.split(".");
+    cleaned = whole + "." + frac.slice(0, 6);
+  }
+  return cleaned;
+}
+
+function parseAmountToBaseUnits(value: string): bigint | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(new RegExp(`^(\\d+)(?:\\.(\\d{0,${PAYMENT_DECIMALS}}))?$`));
+  if (!match) return null;
+  const whole = BigInt(match[1]);
+  const fraction = (match[2] ?? "").padEnd(PAYMENT_DECIMALS, "0").slice(0, PAYMENT_DECIMALS);
+  return whole * (10n ** BigInt(PAYMENT_DECIMALS)) + BigInt(fraction);
+}
+
+function computeLineMicros(quantity: string, unitPrice: string): bigint | null {
+  if (!quantity.trim() || !unitPrice.trim()) return null;
+  const qty = Number.parseInt(quantity, 10);
+  if (!Number.isFinite(qty) || qty <= 0) return null;
+  const micros = parseAmountToBaseUnits(unitPrice);
+  if (micros == null) return null;
+  return BigInt(qty) * micros;
+}
+
+function formatMicros(micros: bigint): string {
+  const divisor = 10n ** BigInt(PAYMENT_DECIMALS);
   const whole = micros / divisor;
   const fraction = micros % divisor;
-  const fractionStr = fraction.toString().padStart(6, "0").slice(0, 2);
+  const fractionStr = fraction.toString().padStart(PAYMENT_DECIMALS, "0").slice(0, Math.min(4, PAYMENT_DECIMALS));
   return `${whole.toLocaleString("en-US")}.${fractionStr}`;
 }

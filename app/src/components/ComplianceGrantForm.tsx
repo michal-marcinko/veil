@@ -28,59 +28,94 @@ export function ComplianceGrantForm({ onSubmit, submitting }: Props) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <div>
-        <label className="block text-sm font-medium mb-1">
-          Auditor Solana wallet address
-        </label>
+    <form onSubmit={handleSubmit} className="space-y-8">
+      <Field label="Auditor Solana wallet address">
         <input
           value={receiverAddress}
           onChange={(e) => setReceiverAddress(e.target.value)}
           placeholder="base58 Solana wallet address"
-          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded font-mono text-sm"
+          className="input-editorial font-mono text-sm"
           required
         />
-        <p className="text-xs text-gray-500 mt-1">
-          The on-chain address of your auditor or accountant.
-        </p>
-      </div>
-      <div>
-        <label className="block text-sm font-medium mb-1">
-          Auditor X25519 public key
-        </label>
+        <FieldHint>The on-chain address of your auditor or accountant.</FieldHint>
+      </Field>
+
+      <Field label="Auditor X25519 public key">
         <input
           value={receiverX25519PubKey}
           onChange={(e) => setReceiverX25519PubKey(e.target.value)}
           placeholder="base58 encoded X25519 public key (32 bytes)"
-          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded font-mono text-sm"
+          className="input-editorial font-mono text-sm"
           required
         />
-        <p className="text-xs text-gray-500 mt-1">
-          Ask your auditor for their X25519 key. Once the grant is created, they can
-          decrypt transactions scoped by the grant nonce.{" "}
-          <strong>Warning:</strong> the nonce creates permanent disclosure for
-          everything encrypted under it, even after revocation.
-        </p>
-      </div>
-      <div>
-        <label className="block text-sm font-medium mb-1">
-          Note for the auditor <span className="text-gray-500">(optional)</span>
-        </label>
+        <FieldHint>
+          Ask your auditor for their X25519 key. Once granted, they can decrypt
+          transactions scoped by this nonce.{" "}
+          <span className="text-brick">
+            Warning: the nonce creates permanent disclosure for everything encrypted
+            under it, even after revocation.
+          </span>
+        </FieldHint>
+      </Field>
+
+      <Field label="Note for the auditor" optional>
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="Scope, period covered, engagement reference, etc."
           rows={3}
-          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-sm"
+          className="input-editorial resize-none"
         />
-      </div>
+      </Field>
+
       <button
         type="submit"
         disabled={submitting}
-        className="w-full px-6 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+        className="btn-primary w-full md:w-auto md:min-w-[280px]"
       >
-        {submitting ? "Creating grant..." : "Grant access"}
+        {submitting ? (
+          <span className="inline-flex items-center gap-3">
+            <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
+            Creating grant…
+          </span>
+        ) : (
+          <span>
+            Grant access <span aria-hidden>→</span>
+          </span>
+        )}
       </button>
     </form>
+  );
+}
+
+function Field({
+  label,
+  optional,
+  children,
+}: {
+  label: string;
+  optional?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline gap-3">
+        <label className="mono-chip">{label}</label>
+        {optional && (
+          <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-dim">
+            Optional
+          </span>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function FieldHint({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-[12px] text-dim font-sans leading-relaxed mt-1.5">
+      {children}
+    </div>
   );
 }

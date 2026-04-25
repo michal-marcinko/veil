@@ -1,10 +1,33 @@
 "use client";
 
 import { AnchorProvider, Program, BN } from "@coral-xyz/anchor";
-import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import bs58 from "bs58";
 import idl from "./invoice_registry.json";
 import type { InvoiceRegistry } from "./invoice_registry";
 import { INVOICE_REGISTRY_PROGRAM_ID, RPC_URL } from "./constants";
+
+// Phantom's Wallet Standard signer auto-submits signed transactions. Anchor's
+// .rpc() then sends again and preflight rejects with "already processed".
+// Build + sign + submit manually so we can swallow the duplicate-send error.
+async function signAndSubmit(wallet: any, connection: Connection, tx: Transaction): Promise<string> {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = wallet.publicKey;
+
+  const signed: Transaction = await wallet.signTransaction(tx);
+  const sig = bs58.encode(signed.signatures[0].signature!);
+
+  try {
+    await connection.sendRawTransaction(signed.serialize(), { skipPreflight: false });
+  } catch (err: any) {
+    const msg = (err?.message ?? String(err)).toLowerCase();
+    if (!msg.includes("already been processed") && !msg.includes("already processed")) throw err;
+  }
+
+  await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+  return sig;
+}
 
 /**
  * Anchor 0.30.x reads the program address from the IDL's `address` field,
@@ -45,9 +68,8 @@ export async function createInvoiceOnChain(
   const nonceArr = Array.from(params.nonce);
   const expiresAt = params.expiresAt !== null ? new BN(params.expiresAt) : null;
 
-  if (params.restrictedPayer) {
-    await (program.methods as any)
-      .createInvoiceRestricted(
+  const methodBuilder = params.restrictedPayer
+    ? (program.methods as any).createInvoiceRestricted(
         nonceArr,
         metadataHashArr,
         params.metadataUri,
@@ -55,29 +77,23 @@ export async function createInvoiceOnChain(
         expiresAt,
         params.restrictedPayer,
       )
-      .accountsPartial({
-        invoice: pda,
-        creator: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-  } else {
-    await (program.methods as any)
-      .createInvoice(
+    : (program.methods as any).createInvoice(
         nonceArr,
         metadataHashArr,
         params.metadataUri,
         params.mint,
         expiresAt,
-      )
-      .accountsPartial({
-        invoice: pda,
-        creator: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-  }
+      );
 
+  const tx: Transaction = await methodBuilder
+    .accountsPartial({
+      invoice: pda,
+      creator: wallet.publicKey,
+      systemProgram: SystemProgram.programId,
+    })
+    .transaction();
+
+  await signAndSubmit(wallet, program.provider.connection as any, tx);
   return pda;
 }
 
@@ -87,11 +103,11 @@ export async function markPaidOnChain(
   utxoCommitment: Uint8Array,
 ): Promise<string> {
   const program = getProgram(wallet);
-  const tx = await (program.methods as any)
+  const tx: Transaction = await (program.methods as any)
     .markPaid(Array.from(utxoCommitment))
     .accountsPartial({ invoice: invoicePda, payer: wallet.publicKey })
-    .rpc();
-  return tx as string;
+    .transaction();
+  return signAndSubmit(wallet, program.provider.connection as any, tx);
 }
 
 export async function fetchInvoice(wallet: any, pda: PublicKey) {

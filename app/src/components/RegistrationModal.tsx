@@ -34,27 +34,25 @@ export function RegistrationModal({ open, steps, onCancel }: Props) {
       aria-modal="true"
     >
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-ink/80 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" />
 
       {/* Dialog */}
       <div
-        className="relative w-full max-w-lg bg-paper border border-line p-9 md:p-11 animate-fade-up"
-        style={{ boxShadow: "0 40px 100px -20px rgba(0,0,0,0.65)" }}
+        className="relative w-full max-w-lg bg-paper-3 border border-line rounded-[4px] p-8 md:p-10 animate-fade-up"
+        style={{ boxShadow: "0 30px 80px -24px rgba(26,24,20,0.35)" }}
       >
         {/* Corner meta */}
-        <div className="absolute top-4 left-4 mono-chip">One-time · ~10s</div>
-        <div className="absolute top-4 right-4 mono-chip">Umbra</div>
+        <div className="flex items-baseline justify-between mb-6">
+          <span className="eyebrow">One-time · ~10s</span>
+          <span className="eyebrow">Umbra</span>
+        </div>
 
         {/* Title */}
-        <div className="pt-8 md:pt-10">
-          <div className="flex items-baseline gap-5 mb-5">
-            <span className="section-no">Setup</span>
-            <span className="h-px w-16 bg-line" />
-          </div>
-          <h2 className="font-serif text-3xl md:text-4xl tracking-tight leading-[1.05]">
-            Setting up your <span className="italic">private</span> account
+        <div>
+          <h2 className="font-sans font-medium text-ink text-[26px] md:text-[30px] tracking-[-0.02em] leading-[1.1]">
+            Setting up your private account
           </h2>
-          <p className="text-muted mt-4 text-[13px] md:text-sm leading-relaxed max-w-md">
+          <p className="text-muted mt-4 text-[13.5px] leading-[1.55] max-w-md">
             Three on-chain transactions establish your cryptographic identity. Your wallet will
             prompt you once for consent; subsequent operations reuse the cached seed.
           </p>
@@ -100,11 +98,11 @@ function StepRow({
   return (
     <li className="grid grid-cols-[auto_1fr_auto] gap-5 items-start">
       <span
-        className={`font-mono text-[13px] tabular-nums pt-0.5 transition-colors duration-300 ${
+        className={`font-mono text-[12px] tabular-nums pt-0.5 transition-colors duration-300 ${
           status === "done"
             ? "text-gold"
             : status === "in_progress"
-              ? "text-cream"
+              ? "text-ink"
               : "text-dim"
         }`}
       >
@@ -112,13 +110,13 @@ function StepRow({
       </span>
       <div>
         <div
-          className={`font-serif text-lg md:text-xl leading-tight transition-colors duration-300 ${
-            status === "done" ? "text-muted line-through" : "text-cream"
+          className={`font-sans font-medium text-[15.5px] md:text-[16px] tracking-[-0.01em] leading-tight transition-colors duration-300 ${
+            status === "done" ? "text-muted" : "text-ink"
           }`}
         >
           {title}
         </div>
-        <div className="text-[12px] text-dim mt-1 font-sans leading-relaxed">{desc}</div>
+        <div className="text-[12.5px] text-muted mt-1 font-sans leading-[1.5]">{desc}</div>
       </div>
       <StatusGlyph status={status} />
     </li>
@@ -131,8 +129,8 @@ function StatusGlyph({ status }: { status: StepStatus }) {
   }
   if (status === "in_progress") {
     return (
-      <span className="pt-2 inline-block h-2 w-2 rounded-full bg-cream animate-slow-pulse" />
+      <span className="pt-2 inline-block h-2 w-2 rounded-full bg-gold animate-slow-pulse" />
     );
   }
-  return <span className="pt-2 inline-block h-2 w-2 rounded-full border border-dim" />;
+  return <span className="pt-2 inline-block h-2 w-2 rounded-full border border-line-2" />;
 }

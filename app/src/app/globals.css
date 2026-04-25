@@ -1,51 +1,56 @@
+@import url("https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=fragment-mono@400&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    color-scheme: dark;
+    color-scheme: light;
+    --font-sans: "Switzer", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "Fragment Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
   }
 
   html {
-    font-feature-settings: "kern", "ss01";
+    font-family: var(--font-sans);
+    font-feature-settings: "kern", "ss01", "ss02", "cv01", "cv09";
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   body {
-    background-color: #0a0a0a;
-    color: #f5f5f4;
+    background-color: #f1ece0;
+    color: #1c1712;
+    font-family: var(--font-sans);
   }
 
-  /* Subtle SVG grain overlay — atmosphere without shadows */
+  /* Subtle paper grain — barely perceptible, warms the cream */
   body::before {
     content: "";
     position: fixed;
     inset: 0;
     pointer-events: none;
     z-index: 1;
-    opacity: 0.035;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.96 0 0 0 0 0.96 0 0 0 0 0.94 0 0 0 1 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
-    mix-blend-mode: overlay;
-  }
-
-  .font-serif {
-    letter-spacing: -0.01em;
-    font-feature-settings: "ss01", "kern", "liga";
+    opacity: 0.4;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch' seed='4'/><feColorMatrix values='0 0 0 0 0.38 0 0 0 0 0.34 0 0 0 0 0.26 0 0 0 0.28 0'/></filter><rect width='220' height='220' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply;
   }
 
   input[type="date"]::-webkit-calendar-picker-indicator {
-    filter: invert(1) opacity(0.45);
     cursor: pointer;
+    opacity: 0.5;
   }
 
   ::selection {
-    background: #d4a64f;
-    color: #0a0a0a;
+    background: #6a2420;
+    color: #f8f4e9;
   }
 
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 10px;
+    height: 10px;
   }
 
   ::-webkit-scrollbar-track {
@@ -53,35 +58,17 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #2a2a28;
-    border-radius: 0;
+    background: #d6ceba;
+    border: 2px solid #f1ece0;
+    border-radius: 999px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #3a3a38;
-  }
-
-  /* Override wallet adapter button styling to match editorial palette */
-  .wallet-adapter-button-trigger {
-    background-color: transparent !important;
-    border: 1px solid #2a2a28 !important;
-    border-radius: 0 !important;
-    font-family: var(--font-sans), system-ui, sans-serif !important;
-    font-weight: 400 !important;
-    height: auto !important;
-    padding: 0.75rem 1.25rem !important;
-    color: #f5f5f4 !important;
-    transition: border-color 200ms ease, color 200ms ease !important;
-  }
-
-  .wallet-adapter-button-trigger:hover {
-    background-color: transparent !important;
-    border-color: #d4a64f !important;
-    color: #d4a64f !important;
+    background: #bdb39b;
   }
 
   .wallet-adapter-button:not([disabled]):focus-visible {
-    outline-color: #d4a64f !important;
+    outline-color: #6a2420 !important;
   }
 
   .wallet-adapter-button-start-icon {
@@ -90,81 +77,120 @@
 }
 
 @layer components {
-  /* Editorial link underline that wipes in on hover */
-  .link-under {
-    position: relative;
-    transition: color 150ms ease;
-  }
-
-  .link-under::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -3px;
-    height: 1px;
-    background: currentColor;
-    transform: scaleX(0);
-    transform-origin: left;
-    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .link-under:hover::after,
-  .link-under:focus-visible::after {
-    transform: scaleX(1);
-  }
-
   /* Editorial underline-only input */
   .input-editorial {
     @apply w-full bg-transparent border-0 border-b border-line
-           py-2.5 px-0 text-cream placeholder:text-dim
+           py-2.5 px-0 text-ink placeholder:text-dim
            focus:outline-none focus:border-gold
            transition-colors duration-200 text-base;
-    caret-color: #d4a64f;
-  }
-
-  .input-editorial:focus {
-    caret-color: #d4a64f;
+    caret-color: #6a2420;
   }
 
   textarea.input-editorial {
     line-height: 1.6;
   }
 
-  /* Monospace metadata chip */
   .mono-chip {
-    @apply font-mono text-[11px] tracking-[0.18em] uppercase text-muted;
+    @apply font-mono text-[11px] tracking-[0.12em] uppercase text-muted;
   }
 
-  .section-no {
-    @apply font-mono text-[11px] tracking-[0.2em] uppercase text-dim;
-  }
-
-  /* Primary button — fills with gold, inverts on hover. No rounding. */
+  /* Primary — oxblood fill, inverts on hover */
   .btn-primary {
-    @apply relative inline-flex items-center justify-center gap-3
-           bg-gold text-ink px-7 py-3.5 font-sans font-medium
-           tracking-tight text-[15px]
-           border border-gold transition-all duration-200
-           hover:bg-ink hover:text-gold
-           focus:outline-none focus-visible:ring-1 focus-visible:ring-gold focus-visible:ring-offset-2 focus-visible:ring-offset-ink
-           disabled:opacity-40 disabled:cursor-not-allowed
-           disabled:hover:bg-gold disabled:hover:text-ink;
+    @apply relative inline-flex items-center justify-center gap-2.5
+           bg-gold text-paper px-6 py-3 font-sans font-medium
+           tracking-[-0.005em] text-[14px] rounded-[3px]
+           border border-gold transition-colors duration-150
+           hover:bg-ink hover:border-ink
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-gold/40 focus-visible:ring-offset-2 focus-visible:ring-offset-paper
+           disabled:opacity-40 disabled:cursor-not-allowed;
   }
 
-  /* Ghost button — outlined */
+  /* Secondary — outlined in ink */
   .btn-ghost {
-    @apply relative inline-flex items-center justify-center gap-3
-           bg-transparent text-cream px-7 py-3.5 font-sans
-           tracking-tight text-[15px]
-           border border-line transition-all duration-200
-           hover:border-cream hover:text-cream
-           focus:outline-none focus-visible:ring-1 focus-visible:ring-cream focus-visible:ring-offset-2 focus-visible:ring-offset-ink;
+    @apply relative inline-flex items-center justify-center gap-2.5
+           bg-transparent text-ink px-6 py-3 font-sans font-medium
+           tracking-[-0.005em] text-[14px] rounded-[3px]
+           border border-line-2 transition-colors duration-150
+           hover:border-ink
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-2 focus-visible:ring-offset-paper;
   }
 
-  /* Small text button */
   .btn-quiet {
-    @apply font-mono text-[12px] tracking-[0.14em] uppercase
-           text-gold hover:text-cream transition-colors duration-200;
+    @apply font-sans text-[13px] font-medium text-gold hover:text-ink transition-colors;
+  }
+
+  /* Small uppercase eyebrow label — mono, tight */
+  .eyebrow {
+    @apply font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted;
+  }
+
+  /* Horizontal divider rule — thin line flanked by nothing */
+  .rule {
+    @apply h-px w-full bg-line;
+  }
+
+  /* Wallet adapter — serious financial chip */
+  .wallet-adapter-button {
+    color: #1c1712 !important;
+  }
+
+  .wallet-adapter-button-trigger {
+    background-color: transparent !important;
+    border: 1px solid #bdb39b !important;
+    border-radius: 3px !important;
+    font-family: var(--font-sans), system-ui, sans-serif !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+    letter-spacing: -0.005em !important;
+    text-transform: none !important;
+    height: auto !important;
+    padding: 0.6rem 1rem !important;
+    color: #1c1712 !important;
+    transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease !important;
+  }
+
+  .wallet-adapter-button-trigger:hover {
+    background-color: transparent !important;
+    border-color: #1c1712 !important;
+    color: #1c1712 !important;
+  }
+
+  /* Dropdown menu (Copy address / Change wallet / Disconnect) */
+  .wallet-adapter-dropdown-list {
+    background-color: #f8f4e9 !important;
+    border: 1px solid #d6ceba !important;
+    border-radius: 3px !important;
+    box-shadow: 0 10px 40px -18px rgba(28, 23, 18, 0.22) !important;
+    font-family: var(--font-sans), system-ui, sans-serif !important;
+  }
+
+  .wallet-adapter-dropdown-list-item {
+    color: #1c1712 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    letter-spacing: -0.005em !important;
+    background-color: transparent !important;
+  }
+
+  .wallet-adapter-dropdown-list-item:hover {
+    background-color: #e7e0cf !important;
+    color: #6a2420 !important;
+  }
+}
+
+@layer utilities {
+  /* Tabular numerics — critical for financial UI */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Subtle page-load reveal — one stagger, not a parade */
+  .reveal {
+    animation: reveal 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes reveal {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 }

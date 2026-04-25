@@ -8,6 +8,9 @@ target/
 .env
 .env.local
 .env.*.local
+veil-bundlr.json
+*-keypair.json
+app/scripts/
 .DS_Store
 test-ledger/
 .swarmhash
