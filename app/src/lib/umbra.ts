@@ -319,6 +319,35 @@ export async function scanClaimableUtxos(client: UmbraClient) {
   };
 }
 
+export interface ScanSummary {
+  receivedCount: number;
+  publicReceivedCount: number;
+  /** Total value across public-received UTXOs. Always a bigint. */
+  publicReceivedTotal: bigint;
+}
+
+/**
+ * Compute a plain-old-data summary over a scan result. Guarantees bigint-only
+ * arithmetic — callers must never reach for `0` as an accumulator because the
+ * SDK's `amount` field is a bigint.
+ */
+export function summarizeScan(scan: {
+  received: any[];
+  publicReceived: any[];
+}): ScanSummary {
+  let total = 0n;
+  for (const utxo of scan.publicReceived) {
+    const raw = (utxo as any)?.amount;
+    if (raw == null) continue;
+    total += typeof raw === "bigint" ? raw : BigInt(raw);
+  }
+  return {
+    receivedCount: scan.received.length,
+    publicReceivedCount: scan.publicReceived.length,
+    publicReceivedTotal: total,
+  };
+}
+
 export interface ClaimArgs {
   client: UmbraClient;
   utxos: any[]; // ScannedUtxoData[] — opaque to us
@@ -351,7 +380,11 @@ export async function getEncryptedBalance(
   const results = await query([mint as any]);
   for (const [, result] of results as any) {
     if (result?.state === "shared") {
-      return BigInt(result.balance);
+      const raw = result.balance;
+      if (typeof raw === "bigint") return raw;
+      if (typeof raw === "number") return BigInt(Math.trunc(raw));
+      if (typeof raw === "string") return BigInt(raw);
+      return BigInt(raw as any);
     }
   }
   return 0n;
