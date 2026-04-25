@@ -478,3 +478,72 @@ export async function issueComplianceGrant(args: ComplianceGrantArgs): Promise<s
   );
   return signature as unknown as string;
 }
+
+// ---------------------------------------------------------------------------
+// Feature A: Compliance grant registry (localStorage-backed)
+//
+// The Umbra SDK does NOT expose a "list my grants as granter" function. Grant
+// PDAs are marker accounts (seeds: granterX25519 || nonce || receiverX25519)
+// and the indexer API does not document a grants-by-granter endpoint as of
+// 2026-04-21 (probed: HTTP 404). We therefore persist issued grants client-side
+// keyed by the granter's wallet address; on page load we refresh status by
+// probing the on-chain PDA via getUserComplianceGrantQuerierFunction.
+// ---------------------------------------------------------------------------
+
+const GRANT_STORAGE_KEY_PREFIX = "veil.grants.v1.";
+
+export interface PersistedGrant {
+  /** Granter Solana wallet (base58). */
+  granterAddress: string;
+  /** Receiver/auditor Solana wallet (base58). */
+  receiverAddress: string;
+  /** Granter's MVK X25519 public key, base58. */
+  granterX25519Base58: string;
+  /** Receiver's X25519 public key, base58. */
+  receiverX25519Base58: string;
+  /** Grant nonce, decimal string (BigInt.toString()). */
+  nonce: string;
+  /** Unix millis when issuance tx was confirmed. */
+  issuedAt: number;
+  /** Issuance transaction signature. */
+  signature: string;
+}
+
+function storageKey(granterAddress: string): string {
+  return `${GRANT_STORAGE_KEY_PREFIX}${granterAddress}`;
+}
+
+export function persistIssuedGrant(grant: PersistedGrant): void {
+  if (typeof localStorage === "undefined") return;
+  const key = storageKey(grant.granterAddress);
+  const raw = localStorage.getItem(key);
+  const list: PersistedGrant[] = raw ? JSON.parse(raw) : [];
+  list.push(grant);
+  localStorage.setItem(key, JSON.stringify(list));
+}
+
+export function readPersistedGrants(granterAddress: string): PersistedGrant[] {
+  if (typeof localStorage === "undefined") return [];
+  const raw = localStorage.getItem(storageKey(granterAddress));
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function removePersistedGrant(
+  granterAddress: string,
+  receiverX25519Base58: string,
+  nonce: string,
+): void {
+  if (typeof localStorage === "undefined") return;
+  const key = storageKey(granterAddress);
+  const list = readPersistedGrants(granterAddress);
+  const next = list.filter(
+    (g) => !(g.receiverX25519Base58 === receiverX25519Base58 && g.nonce === nonce),
+  );
+  localStorage.setItem(key, JSON.stringify(next));
+}
