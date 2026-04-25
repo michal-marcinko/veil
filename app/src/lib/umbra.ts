@@ -562,6 +562,47 @@ export async function listComplianceGrants(
 }
 
 // ---------------------------------------------------------------------------
+// revokeComplianceGrant — wrapper around getComplianceGrantRevokerFunction
+// ---------------------------------------------------------------------------
+
+import { getComplianceGrantRevokerFunction } from "@umbra-privacy/sdk";
+
+export interface RevokeComplianceGrantArgs {
+  client: UmbraClient;
+  grant: PersistedGrant;
+  __revokerOverride?: (
+    receiver: string,
+    granterX25519: Uint8Array,
+    receiverX25519: Uint8Array,
+    nonce: bigint,
+  ) => Promise<string>;
+}
+
+export async function revokeComplianceGrant(
+  args: RevokeComplianceGrantArgs,
+): Promise<string> {
+  const revoker = args.__revokerOverride
+    ?? ((r, g, rx, n) => {
+      const deleteGrant = getComplianceGrantRevokerFunction({ client: args.client });
+      return deleteGrant(r as any, g as any, rx as any, n as any) as unknown as Promise<string>;
+    });
+
+  const signature = await revoker(
+    args.grant.receiverAddress,
+    bs58.decode(args.grant.granterX25519Base58),
+    bs58.decode(args.grant.receiverX25519Base58),
+    BigInt(args.grant.nonce),
+  );
+
+  removePersistedGrant(
+    args.grant.granterAddress,
+    args.grant.receiverX25519Base58,
+    args.grant.nonce,
+  );
+  return signature;
+}
+
+// ---------------------------------------------------------------------------
 // Feature A: Compliance grant registry (localStorage-backed)
 //
 // The Umbra SDK does NOT expose a "list my grants as granter" function. Grant

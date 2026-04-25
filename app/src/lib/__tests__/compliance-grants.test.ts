@@ -200,3 +200,74 @@ describe("listComplianceGrants", () => {
     expect(result[0].status).toBe("unknown");
   });
 });
+
+import { revokeComplianceGrant } from "@/lib/umbra";
+
+describe("revokeComplianceGrant", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+      clear: () => { store.clear(); },
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+  });
+
+  it("calls the revoker with (receiver, granterX25519, receiverX25519, nonce) and removes from storage", async () => {
+    const granterAddress = "Alice1111111111111111111111111111111111111";
+    const granterX25519 = new Uint8Array(32).fill(1);
+    const receiverX25519 = new Uint8Array(32).fill(2);
+    persistIssuedGrant({
+      granterAddress,
+      receiverAddress: "Bob",
+      granterX25519Base58: bs58.encode(granterX25519),
+      receiverX25519Base58: bs58.encode(receiverX25519),
+      nonce: "42",
+      issuedAt: 1,
+      signature: "issue-sig",
+    });
+
+    let captured: any = null;
+    const sig = await revokeComplianceGrant({
+      client: { signer: { address: granterAddress } } as any,
+      grant: readPersistedGrants(granterAddress)[0],
+      __revokerOverride: async (r, g, rx, n) => {
+        captured = { r, g: Array.from(g), rx: Array.from(rx), n };
+        return "revoke-sig";
+      },
+    });
+
+    expect(sig).toBe("revoke-sig");
+    expect(captured.r).toBe("Bob");
+    expect(captured.g).toEqual(Array.from(granterX25519));
+    expect(captured.rx).toEqual(Array.from(receiverX25519));
+    expect(captured.n).toBe(42n);
+    expect(readPersistedGrants(granterAddress)).toEqual([]);
+  });
+
+  it("does not remove from storage when revoker throws", async () => {
+    const granterAddress = "Alice1111111111111111111111111111111111111";
+    persistIssuedGrant({
+      granterAddress,
+      receiverAddress: "Bob",
+      granterX25519Base58: bs58.encode(new Uint8Array(32).fill(1)),
+      receiverX25519Base58: bs58.encode(new Uint8Array(32).fill(2)),
+      nonce: "42",
+      issuedAt: 1,
+      signature: "s",
+    });
+
+    await expect(
+      revokeComplianceGrant({
+        client: { signer: { address: granterAddress } } as any,
+        grant: readPersistedGrants(granterAddress)[0],
+        __revokerOverride: async () => { throw new Error("user rejected"); },
+      }),
+    ).rejects.toThrow("user rejected");
+
+    expect(readPersistedGrants(granterAddress)).toHaveLength(1);
+  });
+});
