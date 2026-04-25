@@ -176,3 +176,44 @@ export async function fetchInvoicesByCreator(
     account: normalizeInvoice(entry.account),
   }));
 }
+
+/**
+ * Fetch an Invoice account without requiring a connected wallet.
+ * Used by the public verifier at `/receipt/[pda]`.
+ *
+ * Anchor's Program constructor needs a provider, and the provider needs
+ * a Wallet shim. We pass one that refuses to sign so any accidental
+ * write attempt will fail loudly instead of silently succeeding.
+ */
+export async function fetchInvoicePublic(pda: PublicKey) {
+  const connection = new Connection(RPC_URL, "confirmed");
+  const readOnlyWallet = {
+    publicKey: PublicKey.default, // not null — AnchorProvider checks for .toBuffer()
+    signTransaction: async () => {
+      throw new Error("fetchInvoicePublic: read-only provider cannot sign");
+    },
+    signAllTransactions: async () => {
+      throw new Error("fetchInvoicePublic: read-only provider cannot sign");
+    },
+  };
+  const provider = new AnchorProvider(connection as any, readOnlyWallet as any, {
+    commitment: "confirmed",
+  });
+  const program = new Program(idl as any, provider) as Program<InvoiceRegistry>;
+  return (program.account as any).invoice.fetch(pda);
+}
+
+/**
+ * Fetch the block time of a confirmed Solana transaction signature.
+ * Returns unix seconds, or null if the RPC can't find the tx.
+ */
+export async function fetchTxBlockTime(txSig: string): Promise<number | null> {
+  const connection = new Connection(RPC_URL, "confirmed");
+  const decoded = bs58.decode(txSig);
+  if (decoded.length !== 64) throw new Error(`Invalid tx signature length: ${decoded.length}`);
+  const parsed = await connection.getTransaction(txSig, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0,
+  });
+  return parsed?.blockTime ?? null;
+}
