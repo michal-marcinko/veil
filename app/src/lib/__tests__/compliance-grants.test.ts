@@ -125,3 +125,78 @@ describe("issueComplianceGrant persistence", () => {
     expect(persisted[0].issuedAt).toBeGreaterThan(0);
   });
 });
+
+import { listComplianceGrants, type GrantWithStatus } from "@/lib/umbra";
+
+describe("listComplianceGrants", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+      clear: () => { store.clear(); },
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+  });
+
+  it("returns persisted grants annotated with status from querier", async () => {
+    const granterAddress = "Alice1111111111111111111111111111111111111";
+    persistIssuedGrant({
+      granterAddress,
+      receiverAddress: "Bob222222222222222222222222222222222222222",
+      granterX25519Base58: bs58.encode(new Uint8Array(32).fill(1)),
+      receiverX25519Base58: bs58.encode(new Uint8Array(32).fill(2)),
+      nonce: "10",
+      issuedAt: 1000,
+      signature: "sigActive",
+    });
+    persistIssuedGrant({
+      granterAddress,
+      receiverAddress: "Carol333333333333333333333333333333333333",
+      granterX25519Base58: bs58.encode(new Uint8Array(32).fill(1)),
+      receiverX25519Base58: bs58.encode(new Uint8Array(32).fill(3)),
+      nonce: "11",
+      issuedAt: 1001,
+      signature: "sigRevoked",
+    });
+
+    const fakeClient = { signer: { address: granterAddress } } as any;
+
+    const result: GrantWithStatus[] = await listComplianceGrants({
+      client: fakeClient,
+      __querierOverride: async (_granter, _nonce, receiverX25519) => {
+        // The second grant (receiver byte = 3) is revoked.
+        const revoked = receiverX25519[0] === 3;
+        return { state: revoked ? "non_existent" : "exists" } as any;
+      },
+    });
+
+    expect(result).toHaveLength(2);
+    const byNonce = Object.fromEntries(result.map(g => [g.nonce, g.status]));
+    expect(byNonce["10"]).toBe("active");
+    expect(byNonce["11"]).toBe("revoked");
+  });
+
+  it("marks grants revoked when querier throws (network error ⇒ conservative)", async () => {
+    const granterAddress = "Alice1111111111111111111111111111111111111";
+    persistIssuedGrant({
+      granterAddress,
+      receiverAddress: "Bob",
+      granterX25519Base58: bs58.encode(new Uint8Array(32).fill(1)),
+      receiverX25519Base58: bs58.encode(new Uint8Array(32).fill(2)),
+      nonce: "42",
+      issuedAt: 1000,
+      signature: "s",
+    });
+
+    const result = await listComplianceGrants({
+      client: { signer: { address: granterAddress } } as any,
+      __querierOverride: async () => { throw new Error("rpc down"); },
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].status).toBe("unknown");
+  });
+});

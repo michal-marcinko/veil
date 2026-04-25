@@ -506,6 +506,62 @@ export async function issueComplianceGrant(args: ComplianceGrantArgs): Promise<s
 }
 
 // ---------------------------------------------------------------------------
+// listComplianceGrants — read persisted + probe on-chain status
+// ---------------------------------------------------------------------------
+
+import { getUserComplianceGrantQuerierFunction } from "@umbra-privacy/sdk";
+
+export type GrantStatus = "active" | "revoked" | "unknown";
+
+export interface GrantWithStatus extends PersistedGrant {
+  status: GrantStatus;
+}
+
+export interface ListComplianceGrantsArgs {
+  client: UmbraClient;
+  /** Test-only override for the SDK querier factory result. */
+  __querierOverride?: (
+    granterX25519: Uint8Array,
+    nonce: bigint,
+    receiverX25519: Uint8Array,
+  ) => Promise<{ state: "exists" | "non_existent" }>;
+}
+
+export async function listComplianceGrants(
+  args: ListComplianceGrantsArgs,
+): Promise<GrantWithStatus[]> {
+  const granterAddress = args.client.signer.address as unknown as string;
+  const persisted = readPersistedGrants(granterAddress);
+  if (persisted.length === 0) return [];
+
+  const querier = args.__querierOverride
+    ?? (() => {
+      const fn = getUserComplianceGrantQuerierFunction({ client: args.client });
+      return (
+        granterX25519: Uint8Array,
+        nonce: bigint,
+        receiverX25519: Uint8Array,
+      ) => fn(granterX25519 as any, nonce as any, receiverX25519 as any) as unknown as Promise<{ state: "exists" | "non_existent" }>;
+    })();
+
+  const annotated = await Promise.all(
+    persisted.map(async (g): Promise<GrantWithStatus> => {
+      try {
+        const result = await querier(
+          bs58.decode(g.granterX25519Base58),
+          BigInt(g.nonce),
+          bs58.decode(g.receiverX25519Base58),
+        );
+        return { ...g, status: result.state === "exists" ? "active" : "revoked" };
+      } catch {
+        return { ...g, status: "unknown" };
+      }
+    }),
+  );
+  return annotated;
+}
+
+// ---------------------------------------------------------------------------
 // Feature A: Compliance grant registry (localStorage-backed)
 //
 // The Umbra SDK does NOT expose a "list my grants as granter" function. Grant
