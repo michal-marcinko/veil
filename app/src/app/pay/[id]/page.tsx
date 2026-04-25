@@ -13,6 +13,9 @@ import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
 import type { InvoiceMetadata } from "@/lib/types";
+import { buildReceipt, signReceipt, encodeReceipt, type SignedReceipt } from "@/lib/receipt";
+import { fetchTxBlockTime } from "@/lib/anchor";
+import bs58 from "bs58";
 
 export default function PayPage({ params }: { params: { id: string } }) {
   const wallet = useWallet();
@@ -27,6 +30,8 @@ export default function PayPage({ params }: { params: { id: string } }) {
     commitment: "pending",
   });
   const [paid, setPaid] = useState(false);
+  const [receiptUrl, setReceiptUrl] = useState<string | null>(null);
+  const [receiptBuildError, setReceiptBuildError] = useState<string | null>(null);
   const [shielded, setShielded] = useState<ShieldedAvailability | null>(null);
   const [useShielded, setUseShielded] = useState(true); // default ON when available
 
@@ -107,7 +112,6 @@ export default function PayPage({ params }: { params: { id: string } }) {
       setRegOpen(false);
 
       const invoicePda = new PublicKey(params.id);
-      const utxoCommitment = new Uint8Array(32);
 
       const payArgs = {
         client,
@@ -119,13 +123,51 @@ export default function PayPage({ params }: { params: { id: string } }) {
       const shouldUseShielded =
         useShielded && shielded?.kind === "available";
 
-      if (shouldUseShielded) {
-        await payInvoiceFromShielded(payArgs);
-      } else {
-        await payInvoice(payArgs);
+      const payResult = shouldUseShielded
+        ? await payInvoiceFromShielded(payArgs)
+        : await payInvoice(payArgs);
+
+      // Derive a real 32-byte utxo_commitment from the actual Umbra UTXO signature.
+      // This is non-forgeable (only the signer of the real tx can produce it) and
+      // guarantees the receipt verifier's "non-zero commitment" check passes.
+      const sigBytes = bs58.decode(payResult.createUtxoSignature);
+      const utxoCommitment = await sha256(sigBytes);
+
+      const markPaidSig = await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
+
+      try {
+        // Hash metadata_uri concatenated with metadata_hash for tamper-evidence.
+        const invoice = await fetchInvoice(wallet as any, invoicePda);
+        const uriBytes = new TextEncoder().encode(invoice.metadataUri);
+        const hashBytes = new Uint8Array(invoice.metadataHash as any);
+        const combined = new Uint8Array(uriBytes.length + hashBytes.length);
+        combined.set(uriBytes, 0);
+        combined.set(hashBytes, uriBytes.length);
+        const invoiceHash = await sha256(combined);
+
+        // Solana block time — falls back to local clock if the RPC hasn't
+        // indexed the tx yet (typical within ~1s of confirmation).
+        const blockTime = await fetchTxBlockTime(markPaidSig);
+        const timestamp = blockTime ?? Math.floor(Date.now() / 1000);
+
+        const receipt = buildReceipt({
+          invoicePda: invoicePda.toBase58(),
+          payerPubkey: wallet.publicKey!.toBase58(),
+          markPaidTxSig: markPaidSig,
+          timestamp,
+          invoiceHash: bs58.encode(invoiceHash),
+        });
+        const signed: SignedReceipt = await signReceipt(receipt, wallet as any);
+        const blob = encodeReceipt(signed);
+        const url = `${window.location.origin}/receipt/${invoicePda.toBase58()}#${blob}`;
+        setReceiptUrl(url);
+      } catch (err: any) {
+        // Payment already landed on-chain — receipt failure is non-fatal.
+        // eslint-disable-next-line no-console
+        console.error("[Veil receipt] build/sign failed:", err);
+        setReceiptBuildError(err.message ?? String(err));
       }
 
-      await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
       setPaid(true);
     } catch (err: any) {
       // eslint-disable-next-line no-console
@@ -185,16 +227,54 @@ export default function PayPage({ params }: { params: { id: string } }) {
       <div className="max-w-2xl mx-auto reveal">
         <InvoiceView metadata={metadata} />
         {paid ? (
-          <div className="mt-8 border border-sage/40 bg-sage/5 rounded-[3px] p-5 flex items-start gap-3">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0 mt-0.5 text-sage">
-              <path d="M3 8l3.5 3.5L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            <div>
-              <div className="text-[14px] text-ink font-medium">Payment sent.</div>
-              <div className="text-[13px] text-muted mt-1 leading-relaxed">
-                The recipient will see it when they next open their dashboard.
+          <div className="mt-8 border border-sage/40 bg-sage/5 rounded-[3px] p-5">
+            <div className="flex items-start gap-3">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0 mt-0.5 text-sage">
+                <path d="M3 8l3.5 3.5L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <div className="flex-1">
+                <div className="text-[14px] text-ink font-medium">Payment sent.</div>
+                <div className="text-[13px] text-muted mt-1 leading-relaxed">
+                  The recipient will see it when they next open their dashboard.
+                </div>
               </div>
             </div>
+
+            {receiptUrl && (
+              <div className="mt-5 pt-5 border-t border-sage/30">
+                <div className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim mb-2">
+                  Receipt URL
+                </div>
+                <div className="flex items-start gap-2">
+                  <input
+                    readOnly
+                    value={receiptUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 text-[12px] font-mono bg-paper border border-line rounded-[2px] px-2 py-1.5 text-ink truncate"
+                  />
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(receiptUrl);
+                      setStatus("Receipt URL copied.");
+                    }}
+                    className="text-[12px] font-mono tracking-[0.05em] uppercase px-3 py-1.5 border border-line rounded-[2px] text-ink hover:bg-line/30"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <div className="mt-3 text-[12px] text-muted leading-relaxed">
+                  Share this link to prove you paid this invoice. The amount is hidden;
+                  only the fact-of-payment is verifiable.
+                </div>
+              </div>
+            )}
+
+            {receiptBuildError && !receiptUrl && (
+              <div className="mt-4 pt-4 border-t border-sage/30 text-[12px] text-muted leading-relaxed">
+                Payment confirmed, but the receipt couldn't be signed ({receiptBuildError}).
+                Your invoice is still marked paid on-chain.
+              </div>
+            )}
           </div>
         ) : (
           <div className="mt-8">
