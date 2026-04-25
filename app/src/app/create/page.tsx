@@ -13,7 +13,7 @@ import {
 import { getOrCreateClient, ensureRegistered } from "@/lib/umbra";
 import { createInvoiceOnChain } from "@/lib/anchor";
 import { buildMetadata, validateMetadata } from "@/lib/types";
-import { encryptJson, generateKey, keyToBase58, sha256 } from "@/lib/encryption";
+import { encryptJson, deriveKeyFromWalletSignature, keyToBase58, sha256 } from "@/lib/encryption";
 import { uploadCiphertext } from "@/lib/arweave";
 import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
@@ -93,7 +93,7 @@ export default function CreatePage() {
       });
       validateMetadata(md);
 
-      const key = generateKey();
+      const key = await deriveKeyFromWalletSignature(wallet as any, invoiceId);
       const ciphertext = await encryptJson(md, key);
       const { uri } = await uploadCiphertext(ciphertext);
       const hash = await sha256(ciphertext);
