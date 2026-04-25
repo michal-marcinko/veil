@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 interface DashboardInvoice {
   pda: string;
   creator: string;
@@ -41,19 +43,22 @@ export function DashboardList({
       </div>
       <ul className="border border-line rounded-[4px] bg-paper-3 divide-y divide-line">
         {invoices.map((inv) => (
-          <li
-            key={inv.pda}
-            className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/40 transition-colors"
-          >
-            <div className="flex items-baseline gap-5 min-w-0">
-              <span className="font-mono text-[11px] text-dim tnum shrink-0">
-                {formatDate(inv.createdAt)}
-              </span>
-              <span className="font-mono text-[13px] text-ink truncate">
-                {inv.pda.slice(0, 8)}…{inv.pda.slice(-4)}
-              </span>
-            </div>
-            <StatusBadge status={inv.status} />
+          <li key={inv.pda}>
+            <Link
+              href={`/invoice/${inv.pda}`}
+              className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/40 transition-colors cursor-pointer"
+              aria-label={`Open invoice ${inv.pda}`}
+            >
+              <div className="flex items-baseline gap-5 min-w-0">
+                <span className="font-mono text-[11px] text-dim tnum shrink-0">
+                  {formatDate(inv.createdAt)}
+                </span>
+                <span className="font-mono text-[13px] text-ink truncate">
+                  {inv.pda.slice(0, 8)}…{inv.pda.slice(-4)}
+                </span>
+              </div>
+              <StatusBadge status={inv.status} />
+            </Link>
           </li>
         ))}
       </ul>

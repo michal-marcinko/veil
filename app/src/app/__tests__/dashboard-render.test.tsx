@@ -88,4 +88,14 @@ describe("Dashboard page", () => {
       expect(screen.getByText(dateRe)).toBeInTheDocument();
     });
   });
+
+  it("renders each invoice row as a link to /invoice/[pda]", async () => {
+    render(<DashboardPage />);
+    await waitFor(() => {
+      const link = screen.getByRole("link", {
+        name: /Open invoice 11111111111111111111111111111113/i,
+      });
+      expect(link).toHaveAttribute("href", "/invoice/11111111111111111111111111111113");
+    });
+  });
 });
