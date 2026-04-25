@@ -8,6 +8,31 @@ export function generateKey(): Uint8Array {
   return key;
 }
 
+/**
+ * Derive a 32-byte AES key deterministically from a wallet signature over
+ * a stable, per-invoice message. The key is:
+ *
+ *   sha256( wallet.signMessage("Veil invoice <invoiceId>") )
+ *
+ * Property: same wallet + same invoiceId always yields the same key, so
+ * the creator can re-open her own invoice after closing the tab. The key
+ * never exists on-chain and never leaves the creator's machine.
+ */
+export async function deriveKeyFromWalletSignature(
+  wallet: { signMessage?: (msg: Uint8Array) => Promise<Uint8Array> },
+  invoiceId: string,
+): Promise<Uint8Array> {
+  if (typeof wallet?.signMessage !== "function") {
+    throw new Error(
+      "Wallet does not expose signMessage — cannot derive invoice key.",
+    );
+  }
+  const message = new TextEncoder().encode(`Veil invoice ${invoiceId}`);
+  const signature = await wallet.signMessage(message);
+  const hash = await crypto.subtle.digest("SHA-256", signature);
+  return new Uint8Array(hash);
+}
+
 export function keyToBase58(key: Uint8Array): string {
   return bs58.encode(key);
 }

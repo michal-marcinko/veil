@@ -1,0 +1,145 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
+import { PublicKey } from "@solana/web3.js";
+import { InvoiceView } from "@/components/InvoiceView";
+import { decryptJson, sha256, deriveKeyFromWalletSignature } from "@/lib/encryption";
+import { fetchCiphertext } from "@/lib/arweave";
+import { fetchInvoice } from "@/lib/anchor";
+import type { InvoiceMetadata } from "@/lib/types";
+
+export default function InvoiceCreatorPage({ params }: { params: { id: string } }) {
+  const wallet = useWallet();
+  const [metadata, setMetadata] = useState<InvoiceMetadata | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>("idle");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setError(null);
+        if (!wallet.publicKey) return;
+
+        setStatus("Loading invoice from chain…");
+        const invoicePda = new PublicKey(params.id);
+        const invoice = await fetchInvoice(wallet as any, invoicePda);
+
+        if (invoice.creator.toBase58() !== wallet.publicKey.toBase58()) {
+          setError(
+            "This invoice was created by a different wallet. Only the original creator can re-open it this way.",
+          );
+          setStatus("idle");
+          return;
+        }
+
+        setStatus("Awaiting wallet signature to derive decryption key…");
+        const key = await deriveKeyFromWalletSignature(wallet as any, invoicePda.toBase58());
+
+        setStatus("Fetching encrypted metadata…");
+        const ciphertext = await fetchCiphertext(invoice.metadataUri);
+        const computedHash = await sha256(ciphertext);
+        const onChainHash = new Uint8Array(invoice.metadataHash as any);
+        const hashMatches = computedHash.every((b, i) => b === onChainHash[i]);
+        if (!hashMatches) {
+          setError("This invoice has been tampered with. Do NOT trust its contents.");
+          setStatus("idle");
+          return;
+        }
+
+        setStatus("Decrypting…");
+        const md = (await decryptJson(ciphertext, key)) as InvoiceMetadata;
+        setMetadata(md);
+        setStatus("done");
+      } catch (err: any) {
+        // eslint-disable-next-line no-console
+        console.error("[Veil invoice re-open] failed:", err);
+        setError(err.message ?? String(err));
+        setStatus("idle");
+      }
+    })();
+  }, [params.id, wallet.publicKey]);
+
+  if (error) {
+    return (
+      <Shell>
+        <div className="max-w-2xl mx-auto reveal">
+          <div className="flex items-start gap-4 border-l-2 border-brick pl-5 py-3">
+            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+            <span className="text-[14.5px] text-ink leading-relaxed flex-1">{error}</span>
+          </div>
+          <div className="mt-6">
+            <a href="/dashboard" className="btn-quiet">
+              ← Back to dashboard
+            </a>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (!wallet.connected) {
+    return (
+      <Shell>
+        <div className="max-w-lg mx-auto reveal">
+          <span className="eyebrow">Invoice</span>
+          <h1 className="mt-4 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+            Connect the creator wallet to view this invoice.
+          </h1>
+          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
+            Only the wallet that created this invoice can re-derive its decryption key.
+          </p>
+          <div className="mt-8">
+            <ClientWalletMultiButton />
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (!metadata) {
+    return (
+      <Shell>
+        <div className="max-w-2xl mx-auto reveal">
+          <p className="text-[13.5px] text-muted">{status}</p>
+        </div>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell>
+      <div className="max-w-2xl mx-auto reveal">
+        <InvoiceView metadata={metadata} />
+        <div className="mt-6">
+          <a href="/dashboard" className="btn-quiet">
+            ← Back to dashboard
+          </a>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-screen relative pb-32">
+      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+          <a href="/" className="flex items-baseline gap-3">
+            <span className="font-sans font-semibold text-[17px] tracking-[-0.02em] text-ink">
+              Veil
+            </span>
+            <span className="hidden sm:inline font-mono text-[10.5px] tracking-[0.08em] text-muted">
+              — private invoicing
+            </span>
+          </a>
+          <ClientWalletMultiButton />
+        </div>
+      </nav>
+
+      <section className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
+    </main>
+  );
+}

@@ -98,7 +98,7 @@ export default function DashboardPage() {
     creator: i.account.creator.toBase58(),
     metadataUri: i.account.metadataUri,
     status: Object.keys(i.account.status)[0] as any,
-    createdAt: Number(i.account.createdAt),
+    createdAt: i.account.createdAt, // already a number after normalizeInvoice in Task 3
   }));
 
   return (
@@ -125,7 +125,7 @@ export default function DashboardPage() {
             <div>
               <span className="eyebrow">Private {PAYMENT_SYMBOL} balance</span>
               <div className="mt-3 font-sans tnum text-ink text-[32px] md:text-[40px] font-medium tracking-[-0.02em] leading-none">
-                {(Number(balance) / 10 ** PAYMENT_DECIMALS).toFixed(Math.min(4, PAYMENT_DECIMALS))}
+                {formatBigintAmount(balance, PAYMENT_DECIMALS)}
                 <span className="ml-3 font-mono text-[12px] text-muted tracking-[0.14em] uppercase">
                   {PAYMENT_SYMBOL}
                 </span>
@@ -195,4 +195,14 @@ function Shell({ children }: { children: React.ReactNode }) {
       <section className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
     </main>
   );
+}
+
+function formatBigintAmount(amount: bigint | null, decimals: number): string {
+  if (amount == null) return "0";
+  const divisor = 10n ** BigInt(decimals);
+  const whole = amount / divisor;
+  const frac = amount % divisor;
+  const display = Math.min(4, decimals);
+  const padded = frac.toString().padStart(decimals, "0").slice(0, display);
+  return `${whole.toString()}.${padded}`;
 }

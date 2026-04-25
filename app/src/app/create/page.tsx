@@ -13,7 +13,7 @@ import {
 import { getOrCreateClient, ensureRegistered } from "@/lib/umbra";
 import { createInvoiceOnChain } from "@/lib/anchor";
 import { buildMetadata, validateMetadata } from "@/lib/types";
-import { encryptJson, generateKey, keyToBase58, sha256 } from "@/lib/encryption";
+import { encryptJson, deriveKeyFromWalletSignature, keyToBase58, sha256 } from "@/lib/encryption";
 import { uploadCiphertext } from "@/lib/arweave";
 import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
@@ -69,6 +69,10 @@ export default function CreatePage() {
       const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const subtotal = parsedItems.reduce((sum, li) => sum + li.totalMicros, 0n);
 
+      const nonce = crypto.getRandomValues(new Uint8Array(8));
+      const { deriveInvoicePda } = await import("@/lib/anchor");
+      const [pda] = deriveInvoicePda(wallet.publicKey, nonce);
+
       const md = buildMetadata({
         invoiceId,
         creatorDisplayName: values.creatorDisplayName,
@@ -93,14 +97,16 @@ export default function CreatePage() {
       });
       validateMetadata(md);
 
-      const key = generateKey();
+      // Sign over the PDA (always knowable off-chain from wallet + nonce),
+      // so the re-open flow can re-derive the same key without needing to
+      // first decrypt the metadata.
+      const key = await deriveKeyFromWalletSignature(wallet as any, pda.toBase58());
       const ciphertext = await encryptJson(md, key);
       const { uri } = await uploadCiphertext(ciphertext);
       const hash = await sha256(ciphertext);
 
-      const nonce = crypto.getRandomValues(new Uint8Array(8));
       const restrictedPayer = values.payerWallet ? new PublicKey(values.payerWallet) : null;
-      const pda = await createInvoiceOnChain(wallet as any, {
+      await createInvoiceOnChain(wallet as any, {
         nonce,
         metadataHash: hash,
         metadataUri: uri,
