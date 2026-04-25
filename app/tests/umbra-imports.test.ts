@@ -9,10 +9,12 @@ import {
   getUmbraRelayer,
   getComplianceGrantIssuerFunction,
   getEncryptedBalanceQuerierFunction,
+  getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction,
 } from "@umbra-privacy/sdk";
 import {
   getCreateReceiverClaimableUtxoFromPublicBalanceProver,
   getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver,
+  getCreateReceiverClaimableUtxoFromEncryptedBalanceProver,
 } from "@umbra-privacy/web-zk-prover";
 
 describe("Umbra SDK imports", () => {
@@ -26,10 +28,12 @@ describe("Umbra SDK imports", () => {
     expect(getUmbraRelayer).toBeTypeOf("function");
     expect(getComplianceGrantIssuerFunction).toBeTypeOf("function");
     expect(getEncryptedBalanceQuerierFunction).toBeTypeOf("function");
+    expect(getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction).toBeTypeOf("function");
   });
 
   it("exports ZK provers we depend on", () => {
     expect(getCreateReceiverClaimableUtxoFromPublicBalanceProver).toBeTypeOf("function");
     expect(getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver).toBeTypeOf("function");
+    expect(getCreateReceiverClaimableUtxoFromEncryptedBalanceProver).toBeTypeOf("function");
   });
 });
