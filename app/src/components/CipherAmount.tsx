@@ -21,6 +21,13 @@ function shortAddr(): string {
   return `${randomB58(4)}…${randomB58(4)}`;
 }
 
+/**
+ * The brand demo moment. Two panes, IDENTICAL row structure (From / To /
+ * Amount), DIFFERENT visibility — left is what the client sees on the
+ * invoice (human names + dollars), right is what the chain exposes to
+ * the world (wallet addresses + cipher). The semantic parallel is the
+ * point: same payment, two views, only one of them leaks signal.
+ */
 export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
   const [from, setFrom] = useState("8xK2…pN3q");
   const [to, setTo] = useState("2NYX…P4Nw");
@@ -48,18 +55,17 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
 
         <dl className="space-y-4 text-[13.5px]">
           <div className="flex items-baseline justify-between">
-            <dt className="text-muted">Design retainer</dt>
-            <dd className="tnum text-ink font-medium">$4,000.00</dd>
+            <dt className="text-muted">From</dt>
+            <dd className="text-ink font-medium">Acme Design Ltd.</dd>
           </div>
           <div className="flex items-baseline justify-between">
-            <dt className="text-muted">Revisions · 4 hrs</dt>
-            <dd className="tnum text-ink font-medium">$200.00</dd>
+            <dt className="text-muted">To</dt>
+            <dd className="text-ink font-medium">Globex Corp.</dd>
           </div>
           <div className="h-px bg-line" />
-          {/* Total due — vertical stack to mirror the right pane's Amount row */}
           <div className="pt-1">
-            <dt className="text-ink font-medium mb-3">Total due</dt>
-            <dd className="font-sans tnum text-ink text-[28px] md:text-[32px] font-medium tracking-[-0.02em] leading-none">
+            <dt className="text-ink font-medium mb-3">Amount</dt>
+            <dd className="font-sans tnum text-ink text-[24px] md:text-[26px] font-medium tracking-[-0.02em] leading-none">
               {amount}
             </dd>
           </div>
@@ -92,13 +98,9 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
             <dd className="font-mono tnum text-ink">{to}</dd>
           </div>
           <div className="h-px bg-line" />
-          {/* Amount row: vertical stack — the cipher is too long to fit
-              inline with the label without colliding. Letting it occupy
-              its own line gives it the visual weight it needs to read
-              as the proof-of-encryption moment. */}
           <div className="pt-1">
             <dt className="text-ink font-medium mb-3">Amount</dt>
-            <dd className="font-mono tnum text-ink text-[18px] md:text-[20px] font-normal tracking-[0.05em] leading-none break-all">
+            <dd className="font-mono tnum text-ink text-[24px] md:text-[26px] font-normal tracking-[0.04em] leading-none break-all">
               {cipher}
             </dd>
           </div>
