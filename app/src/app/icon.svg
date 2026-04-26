@@ -112,7 +112,14 @@
     <g id="page" filter="url(#softShadow)">
       <path id="page-fill" d="M138 83 H380 V358 L334 410 H138 Z" fill="url(#pageFill)"/>
 
-      <!-- Only draw the page outline where the page is not covered by the veil. -->
+      <!-- Full page outline. The upper segments are visible during the
+           pre-descent phase of the veil-descend animation (so the page
+           reads as a complete rectangle while its content is exposed),
+           then the descended veil paints opaquely over them — the veil
+           group renders later in source order, so it covers these. -->
+      <path id="page-outline-top" d="M138 83 H380" class="stroke-main"/>
+      <path id="page-outline-left-upper" d="M138 83 V280" class="stroke-main"/>
+      <path id="page-outline-right-upper" d="M380 83 V257" class="stroke-main"/>
       <path id="page-outline-left-lower" d="M138 280 V410" class="stroke-main"/>
       <path id="page-outline-bottom" d="M138 410 H334" class="stroke-main"/>
       <path id="page-outline-right-lower" d="M380 257 V358" class="stroke-main"/>
