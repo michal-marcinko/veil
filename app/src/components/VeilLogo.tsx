@@ -104,10 +104,10 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
       onFocus={play}
     >
       <img
-        src="/veil-icon.png"
+        src="/veil-icon.svg"
         alt=""
         aria-hidden
-        className="h-10 w-10 object-contain mix-blend-multiply select-none shrink-0 pointer-events-none"
+        className="h-10 w-10 object-contain select-none shrink-0 pointer-events-none"
         draggable={false}
       />
 
