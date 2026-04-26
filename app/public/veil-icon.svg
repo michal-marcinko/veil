@@ -67,9 +67,31 @@
         fill: var(--ink);
       }
 
+      /*
+        Brand moment: on every render of the SVG (page load, route nav),
+        the veil descends from a thin sliver at the top edge to its full
+        position over ~620ms — briefly exposing the invoice content
+        underneath before covering it. The exposure-then-conceal arc
+        IS the privacy story, told in a single gesture.
+      */
+      @keyframes veil-descend {
+        0% {
+          transform: scaleY(0);
+          opacity: 0;
+        }
+        25% {
+          opacity: 1;
+        }
+        100% {
+          transform: scaleY(1);
+          opacity: 1;
+        }
+      }
+
       .veil-animate {
         transform-box: fill-box;
-        transform-origin: 50% 70%;
+        transform-origin: 50% 0%;
+        animation: veil-descend 620ms cubic-bezier(0.22, 1, 0.36, 1) 120ms both;
       }
 
       @media (prefers-reduced-motion: reduce) {
