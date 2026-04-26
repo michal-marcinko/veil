@@ -275,6 +275,14 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
     { zkProver } as any,
   );
 
+  // eslint-disable-next-line no-console
+  console.log("[Veil payInvoice] creating UTXO destined for:", {
+    destinationAddress: args.recipientAddress,
+    payerSignerAddress: (args.client as any)?.signer?.address,
+    mint: args.mint,
+    amount: args.amount.toString(),
+  });
+
   const result = await create({
     destinationAddress: args.recipientAddress as any,
     mint: args.mint as any,
@@ -360,6 +368,8 @@ import { UMBRA_RELAYER_API } from "./constants";
  * not by UTXO correlation.
  */
 export async function scanClaimableUtxos(client: UmbraClient) {
+  // eslint-disable-next-line no-console
+  console.log("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
   const scan = getClaimableUtxoScannerFunction({ client });
   // treeIndex 0, startInsertionIndex 0 — scan the full current tree.
   // The SDK's U32 type is a branded bigint (per
