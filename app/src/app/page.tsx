@@ -56,7 +56,7 @@ export default function LandingPage() {
       {/* Hero — 12-col grid: text on left, CipherAmount panel inline on right.
           Decorative logo float sits absolute in the section's top-right,
           hidden below md breakpoint so mobile stays uncluttered. */}
-      <section className="relative z-10 max-w-[1400px] mx-auto px-6 md:px-8 pt-20 md:pt-24 pb-24 md:pb-28">
+      <section className="relative z-10 max-w-[1400px] mx-auto px-6 md:px-8 pt-28 md:pt-36 pb-32 md:pb-40">
         {/* Decorative logo — atmosphere, not interactive */}
         <img
           src="/veil-icon.png"
@@ -66,10 +66,10 @@ export default function LandingPage() {
           draggable={false}
         />
 
-        <div className="grid grid-cols-12 gap-8 lg:gap-12 items-center">
+        <div className="grid grid-cols-12 gap-10 lg:gap-20 items-center">
           {/* Left column — headline, body, CTAs */}
           <div className="col-span-12 lg:col-span-6 reveal">
-            <div className="flex items-center gap-3 mb-8">
+            <div className="flex items-center gap-3 mb-10">
               <span className="eyebrow">Solana · USDC</span>
               <span className="h-px w-8 bg-line" />
               <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
@@ -81,12 +81,12 @@ export default function LandingPage() {
               <span className="text-muted">Without broadcasting what you charge.</span>
             </h1>
 
-            <p className="mt-7 max-w-[480px] text-[16.5px] leading-[1.55] text-ink/80">
+            <p className="mt-10 max-w-[480px] text-[16.5px] leading-[1.55] text-ink/80">
               You see the amount. Your client sees the amount. Everyone else —
               competitors, scrapers, on-chain bots — sees noise.
             </p>
 
-            <div className="mt-9 flex flex-wrap items-center gap-3">
+            <div className="mt-12 flex flex-wrap items-center gap-3">
               <a href="/create" className="btn-primary">
                 Send an invoice
                 <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
@@ -95,7 +95,7 @@ export default function LandingPage() {
               </a>
               <a href="/dashboard" className="btn-ghost">Open dashboard</a>
             </div>
-            <p className="mt-4 text-[12.5px] text-dim">
+            <p className="mt-5 text-[12.5px] text-dim">
               Wallet required · takes about a minute
             </p>
           </div>
@@ -115,7 +115,7 @@ export default function LandingPage() {
 
       {/* How it works */}
       <section className="relative z-10 border-t border-line bg-paper-2/40">
-        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-20 md:py-24">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-28 md:py-36">
           <div className="grid grid-cols-12 gap-6 md:gap-10">
             <div className="col-span-12 md:col-span-4">
               <span className="eyebrow">How it works</span>
@@ -152,7 +152,7 @@ export default function LandingPage() {
 
       {/* Trust row — single quiet band */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-14">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-16 md:py-20">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-10 md:gap-14">
             <Fact label="Settles on" value="Solana · USDC" />
             <Fact label="Encryption" value="X25519 · AES-256-GCM" />
@@ -167,7 +167,7 @@ export default function LandingPage() {
           the claim in real research (PIVY, 2026). One small chip CTA so the
           quote doesn't compete with the hero's primary CTAs. */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-24 md:py-32">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-32 md:py-40">
           <figure className="max-w-[820px]">
             <span className="eyebrow">Why it matters</span>
             <blockquote className="mt-6 font-display italic font-medium text-ink text-[32px] sm:text-[40px] md:text-[48px] leading-[1.1] tracking-[-0.02em]">
