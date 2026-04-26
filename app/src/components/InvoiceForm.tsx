@@ -79,9 +79,9 @@ export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-14">
+    <form onSubmit={handleSubmit} className="space-y-8">
       {/* Parties */}
-      <section className="space-y-7 animate-fade-up">
+      <section className="rounded-[4px] border border-line bg-paper-3/60 p-7 md:p-9 space-y-7 animate-fade-up">
         <SectionHeader eyebrow="01" title="Parties" />
 
         <div className="space-y-7">
@@ -130,7 +130,7 @@ export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError
       </section>
 
       {/* Items */}
-      <section className="space-y-7 animate-fade-up" style={{ animationDelay: "100ms" }}>
+      <section className="rounded-[4px] border border-line bg-paper-3/60 p-7 md:p-9 space-y-7 animate-fade-up" style={{ animationDelay: "100ms" }}>
         <SectionHeader eyebrow="02" title="Items" />
 
         <div>
@@ -158,18 +158,23 @@ export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError
             ))}
           </div>
 
-          <div className="mt-6 flex flex-wrap items-baseline justify-between gap-6">
-            <button type="button" onClick={addLineItem} className="btn-quiet">
-              + Add line
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-6">
+            <button
+              type="button"
+              onClick={addLineItem}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[3px] border border-line bg-paper hover:bg-paper-2 hover:border-ink/60 transition-colors text-[13px] font-sans font-medium text-ink"
+            >
+              <span aria-hidden className="text-gold">+</span>
+              Add line
             </button>
 
-            <div className="flex items-baseline gap-6">
+            <div className="inline-flex items-baseline gap-4 rounded-[3px] bg-paper-2/60 border border-line px-5 py-3">
               <span className="mono-chip">Subtotal</span>
-              <span className="font-mono text-ink text-xl md:text-2xl tabular-nums tracking-tight">
+              <span className="font-sans font-medium text-ink text-[24px] md:text-[28px] tabular-nums tracking-[-0.02em] leading-none">
                 {formatMicros(subtotalMicros)}
-                <span className="ml-2 text-dim text-xs font-sans uppercase tracking-[0.16em]">
-                  {PAYMENT_SYMBOL}
-                </span>
+              </span>
+              <span className="font-mono text-[10.5px] text-dim tracking-[0.14em] uppercase">
+                {PAYMENT_SYMBOL}
               </span>
             </div>
           </div>
@@ -177,7 +182,7 @@ export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError
       </section>
 
       {/* Terms */}
-      <section className="space-y-7 animate-fade-up" style={{ animationDelay: "200ms" }}>
+      <section className="rounded-[4px] border border-line bg-paper-3/60 p-7 md:p-9 space-y-7 animate-fade-up" style={{ animationDelay: "200ms" }}>
         <SectionHeader eyebrow="03" title="Terms" />
 
         <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-10">
@@ -245,14 +250,13 @@ export function InvoiceForm({ onSubmit, submitting, errorMessage, onDismissError
 
 function SectionHeader({ eyebrow, title }: { eyebrow: string; title: string }) {
   return (
-    <div className="flex items-baseline gap-5 border-b border-line pb-3">
+    <div className="flex items-baseline gap-4 pb-1">
       <span className="font-mono text-[10.5px] text-gold tracking-[0.18em] tabular-nums">
         {eyebrow}
       </span>
       <h2 className="font-sans font-medium text-ink text-[20px] md:text-[22px] tracking-[-0.015em] leading-none">
         {title}
       </h2>
-      <span className="flex-1 h-px bg-line/50 mb-1.5" />
     </div>
   );
 }
@@ -371,20 +375,15 @@ function LineItemRow({
         />
       </div>
       <div>
-        <div className="relative">
-          <span className="absolute left-0 top-1/2 -translate-y-1/2 font-mono text-[13px] text-dim pointer-events-none">
-            $
-          </span>
-          <input
-            value={item.unitPrice}
-            onChange={(e) => onChange("unitPrice", sanitizeDecimal(e.target.value))}
-            inputMode="decimal"
-            className="input-editorial pl-4 text-right font-mono tabular-nums"
-            placeholder="0.00"
-            required
-            aria-label={`Unit price for line ${index + 1}`}
-          />
-        </div>
+        <input
+          value={item.unitPrice}
+          onChange={(e) => onChange("unitPrice", sanitizeDecimal(e.target.value))}
+          inputMode="decimal"
+          className="input-editorial text-right font-mono tabular-nums"
+          placeholder="0.00"
+          required
+          aria-label={`Unit price for line ${index + 1}`}
+        />
       </div>
       <div className="text-right font-mono text-base tabular-nums md:pt-2">{amountDisplay}</div>
       <div className="md:text-right md:pt-1.5">

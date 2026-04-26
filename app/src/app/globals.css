@@ -113,16 +113,30 @@
 
 @layer components {
   /* Editorial underline-only input */
+  /*
+    Editorial input — real visual presence so the form doesn't disappear
+    into the cream paper. Soft paper-3 fill with a hairline ink border;
+    on focus the border deepens to ink + a subtle gold halo, no flashing
+    blue browser default. Matches the wallet pill / btn-ghost rhythm.
+  */
   .input-editorial {
-    @apply w-full bg-transparent border-0 border-b border-line
-           py-2.5 px-0 text-ink placeholder:text-dim
-           focus:outline-none focus:border-gold
-           transition-colors duration-200 text-base;
+    @apply w-full bg-paper-3 border border-line rounded-[3px]
+           py-2.5 px-3.5 text-ink placeholder:text-dim/80
+           transition-[border-color,background-color,box-shadow] duration-160
+           focus:outline-none focus:bg-paper focus:border-ink
+           hover:border-line-2
+           text-[14.5px];
     caret-color: #6a2420;
   }
 
+  .input-editorial:focus {
+    box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.12);
+  }
+
   textarea.input-editorial {
-    line-height: 1.6;
+    line-height: 1.55;
+    padding-top: 12px;
+    padding-bottom: 12px;
   }
 
   .mono-chip {
