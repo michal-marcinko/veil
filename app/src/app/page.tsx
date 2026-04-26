@@ -8,22 +8,22 @@ const STEPS = [
   {
     k: "01",
     title: "Your browser encrypts the amount",
-    body: "Before anything reaches Solana, the amount is sealed with a key only you and your client can open.",
+    body: "The amount is sealed in your browser with a key only you and your client share. Nothing leaves your screen as plaintext.",
   },
   {
     k: "02",
     title: "Paid through Umbra",
-    body: "Your client pays into a receiver-claimable private UTXO. The amount and payment path stay off public invoice rails.",
+    body: "Your client sends the payment through Umbra's private pool. The amount stays hidden, and the trail stays off your public Solana history.",
   },
   {
     k: "03",
     title: "Recipient confirms receipt",
-    body: "Your dashboard scans and claims incoming UTXOs, then marks the invoice paid from your wallet.",
+    body: "Your dashboard picks up the incoming payment automatically. You mark it paid from your wallet — only the recipient can confirm settlement.",
   },
   {
     k: "04",
     title: "You decide who else can read it",
-    body: "Generate an auditor key for your accountant, a client, or a regulator. They see exactly the invoices you grant — nothing more.",
+    body: "Share scoped access with your accountant, client, or regulator. They see only the invoices you grant — nothing more.",
   },
 ];
 
