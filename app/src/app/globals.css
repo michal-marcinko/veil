@@ -1,4 +1,4 @@
-@import url("https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=fragment-mono@400&display=swap");
+@import url("https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=fragment-mono@400&f[]=boska@500,600&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -9,6 +9,20 @@
     color-scheme: light;
     --font-sans: "Switzer", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
     --font-mono: "Fragment Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+    /*
+     * Display typeface for the wordmark. Boska is a contemporary display
+     * serif (Indian Type Foundry, free via Fontshare) — distinctive ball
+     * terminals, designed for short brand-scale words at large sizes.
+     * Fallbacks resolve to ui-serif, Georgia.
+     *
+     * To swap quickly without code changes, edit ONLY the first family
+     * here. Compatible Fontshare alternatives (already free):
+     *   "Stardom"    — high-contrast bolder serif
+     *   "Zodiak"     — modern condensed serif with a quirky character
+     *   "Author"     — geometric editorial sans (if you want to drop serif)
+     *   "Cabinet Grotesk" — refined geometric sans
+     */
+    --font-display: "Boska", ui-serif, Georgia, "Times New Roman", serif;
   }
 
   html {

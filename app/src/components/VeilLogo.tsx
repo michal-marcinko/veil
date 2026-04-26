@@ -49,9 +49,16 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
           `.reveal` curve. Feels considered rather than snappy.
         - prefers-reduced-motion → instant snap, no transition
       */}
-      <span className="relative inline-block overflow-hidden h-7 leading-none">
-        {/* Width ghost — invisible, sizes the container to fit "private invoicing" */}
-        <span className="invisible block h-7 font-sans font-medium text-[19px] tracking-[-0.025em] lowercase leading-7 whitespace-nowrap">
+      {/*
+        Wordmark in Boska — display serif chosen for personality. Both
+        "veil" and "private invoicing" share IDENTICAL type treatment so
+        the slot-machine roll reads as a clean letter swap rather than a
+        weight/size shift. Italics for editorial restraint; ball terminals
+        on the 'a', 'i', 'e' carry the brand voice.
+      */}
+      <span className="relative inline-block overflow-hidden h-8 leading-none">
+        {/* Width ghost — invisible, reserves room for the wider phrase */}
+        <span className="invisible block h-8 font-display font-medium text-[24px] tracking-[-0.015em] lowercase leading-8 whitespace-nowrap">
           private invoicing
         </span>
 
@@ -61,16 +68,16 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
             absolute inset-x-0 top-0 flex flex-col
             transition-transform duration-[460ms]
             [transition-timing-function:cubic-bezier(0.22,1,0.36,1)]
-            group-hover:-translate-y-7
+            group-hover:-translate-y-8
             motion-reduce:transition-none motion-reduce:transform-none
           "
         >
-          <span className="h-7 flex items-center font-sans font-medium text-[19px] tracking-[-0.025em] text-ink lowercase whitespace-nowrap leading-none">
+          <span className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink lowercase whitespace-nowrap leading-none">
             veil
           </span>
           <span
             aria-hidden
-            className="h-7 flex items-center font-sans font-medium text-[19px] tracking-[-0.025em] text-ink lowercase whitespace-nowrap leading-none"
+            className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink lowercase whitespace-nowrap leading-none"
           >
             private invoicing
           </span>
