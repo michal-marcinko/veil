@@ -84,8 +84,20 @@ export default function DashboardPage() {
       if (await isFullyRegistered(client)) {
         try {
           const scan = await scanClaimableUtxos(client);
-          if (scan.publicReceived.length > 0) {
-            const claimResult = await claimUtxos({ client, utxos: scan.publicReceived });
+          // Both buckets represent "incoming payment from someone else."
+          // Bob's payment lands in `received` if he paid via shielded path,
+          // `publicReceived` if he funded from public ATA. Union and claim
+          // everything so we don't miss either case.
+          const incoming = [...scan.received, ...scan.publicReceived];
+          // eslint-disable-next-line no-console
+          console.log("[Veil dashboard] scan result:", {
+            received: scan.received.length,
+            publicReceived: scan.publicReceived.length,
+            selfBurnable: scan.selfBurnable.length,
+            publicSelfBurnable: scan.publicSelfBurnable.length,
+          });
+          if (incoming.length > 0) {
+            const claimResult = await claimUtxos({ client, utxos: incoming });
             for (const invoice of all.filter(isPendingInvoice)) {
               try {
                 const commitment = await deriveClaimCommitment(invoice.publicKey, claimResult);

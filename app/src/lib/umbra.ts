@@ -366,10 +366,21 @@ export async function scanClaimableUtxos(client: UmbraClient) {
   // node_modules/@umbra-privacy/sdk/dist/types-*.d.ts), so passing JS
   // numbers triggers "Cannot mix BigInt and other types" inside the SDK
   // when it does internal arithmetic. Pass BigInt(0) explicitly.
+  //
+  // The SDK splits results into 4 buckets:
+  //   - received          : encrypted-balance UTXOs from others
+  //   - publicReceived    : public-balance UTXOs from others via public ATA
+  //   - selfBurnable      : encrypted-balance UTXOs you sent yourself
+  //   - publicSelfBurnable: public-balance UTXOs you sent yourself
+  // For the dashboard's "Bob paid me" flow we want both `received` AND
+  // `publicReceived` — depending on Bob's funding source his UTXO lands
+  // in different buckets. We expose all four so callers can pick.
   const result = await scan(BigInt(0) as any, BigInt(0) as any);
   return {
     received: result.received,
     publicReceived: result.publicReceived,
+    selfBurnable: result.selfBurnable,
+    publicSelfBurnable: result.publicSelfBurnable,
   };
 }
 
