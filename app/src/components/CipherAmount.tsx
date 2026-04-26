@@ -46,11 +46,8 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
     <div className="grid grid-cols-1 md:grid-cols-2 border border-line bg-paper-3 rounded-[4px] overflow-hidden shadow-[0_1px_0_rgba(0,0,0,0.02),0_20px_60px_-30px_rgba(26,24,20,0.25)]">
       {/* Left pane — client view */}
       <div className="p-7 md:p-8 border-b md:border-b-0 md:border-r border-line">
-        <div className="flex items-center justify-between mb-6">
+        <div className="mb-6">
           <span className="eyebrow">What your client sees</span>
-          <span className="font-mono text-[10.5px] text-muted tnum">
-            INV-00421
-          </span>
         </div>
 
         <dl className="space-y-4 text-[13.5px]">
@@ -81,11 +78,8 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
 
       {/* Right pane — public chain view */}
       <div className="p-7 md:p-8 bg-paper-2/50">
-        <div className="flex items-center justify-between mb-6">
+        <div className="mb-6">
           <span className="eyebrow">What the world sees</span>
-          <span className="font-mono text-[10.5px] text-muted tnum">
-            SLOT 310,442,881
-          </span>
         </div>
 
         <dl className="space-y-4 text-[13.5px]">
