@@ -371,21 +371,26 @@ export async function scanClaimableUtxos(client: UmbraClient) {
   // eslint-disable-next-line no-console
   console.log("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
   const scan = getClaimableUtxoScannerFunction({ client });
-  // treeIndex 0, startInsertionIndex 0 — scan the full current tree.
+  // treeIndex 0, startInsertionIndex 0, endInsertionIndex 1_000_000.
   // The SDK's U32 type is a branded bigint (per
   // node_modules/@umbra-privacy/sdk/dist/types-*.d.ts), so passing JS
-  // numbers triggers "Cannot mix BigInt and other types" inside the SDK
-  // when it does internal arithmetic. Pass BigInt(0) explicitly.
+  // numbers triggers "Cannot mix BigInt and other types" inside the SDK.
+  //
+  // The third arg (endInsertionIndex) is OPTIONAL but appears to default
+  // to startInsertionIndex when omitted, giving an empty range scan that
+  // returns 0 UTXOs. Pass an explicit upper bound — 1M leaves covers any
+  // realistic devnet tree size.
   //
   // The SDK splits results into 4 buckets:
   //   - received          : encrypted-balance UTXOs from others
   //   - publicReceived    : public-balance UTXOs from others via public ATA
   //   - selfBurnable      : encrypted-balance UTXOs you sent yourself
   //   - publicSelfBurnable: public-balance UTXOs you sent yourself
-  // For the dashboard's "Bob paid me" flow we want both `received` AND
-  // `publicReceived` — depending on Bob's funding source his UTXO lands
-  // in different buckets. We expose all four so callers can pick.
-  const result = await scan(BigInt(0) as any, BigInt(0) as any);
+  const result = await scan(
+    BigInt(0) as any,
+    BigInt(0) as any,
+    BigInt(1_000_000) as any,
+  );
   return {
     received: result.received,
     publicReceived: result.publicReceived,
