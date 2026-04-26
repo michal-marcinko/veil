@@ -53,49 +53,63 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      {/* Hero */}
-      <section className="relative z-10 max-w-[1200px] mx-auto px-6 md:px-8 pt-20 md:pt-28 pb-20 md:pb-28">
-        <div className="max-w-[720px] reveal">
-          <div className="flex items-center gap-3 mb-8">
-            <span className="eyebrow">Solana · USDC</span>
-            <span className="h-px w-8 bg-line" />
-            <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
-          </div>
+      {/* Hero — 12-col grid: text on left, CipherAmount panel inline on right.
+          Decorative logo float sits absolute in the section's top-right,
+          hidden below md breakpoint so mobile stays uncluttered. */}
+      <section className="relative z-10 max-w-[1200px] mx-auto px-6 md:px-8 pt-20 md:pt-24 pb-24 md:pb-28">
+        {/* Decorative logo — atmosphere, not interactive */}
+        <img
+          src="/veil-icon.png"
+          alt=""
+          aria-hidden
+          className="hidden lg:block absolute top-8 right-6 md:right-8 w-[280px] h-[280px] object-contain opacity-50 mix-blend-multiply pointer-events-none select-none -rotate-[4deg] origin-top-right"
+          draggable={false}
+        />
 
-          <h1 className="font-sans font-medium text-ink text-[44px] sm:text-[56px] md:text-[68px] leading-[1.02] tracking-[-0.035em]">
-            Invoice clients in USDC.
-            <br />
-            <span className="text-muted">Without broadcasting what you charge.</span>
-          </h1>
+        <div className="grid grid-cols-12 gap-8 lg:gap-12 items-center">
+          {/* Left column — headline, body, CTAs */}
+          <div className="col-span-12 lg:col-span-5 reveal">
+            <div className="flex items-center gap-3 mb-8">
+              <span className="eyebrow">Solana · USDC</span>
+              <span className="h-px w-8 bg-line" />
+              <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
+            </div>
 
-          <p className="mt-8 max-w-[560px] text-[17px] leading-[1.55] text-ink/80">
-            You see the amount. Your client sees the amount. Everyone else —
-            competitors, scrapers, on-chain bots — sees noise.
-          </p>
+            <h1 className="font-sans font-medium text-ink text-[40px] sm:text-[48px] lg:text-[56px] xl:text-[64px] leading-[1.03] tracking-[-0.035em]">
+              Invoice clients in USDC.
+              <br />
+              <span className="text-muted">Without broadcasting what you charge.</span>
+            </h1>
 
-          <div className="mt-10 flex flex-wrap items-center gap-3">
-            <a href="/create" className="btn-primary">
-              Send an invoice
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
-                <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </a>
-            <a href="/dashboard" className="btn-ghost">Open dashboard</a>
-            <span className="ml-1 text-[12.5px] text-dim">
+            <p className="mt-7 max-w-[480px] text-[16.5px] leading-[1.55] text-ink/80">
+              You see the amount. Your client sees the amount. Everyone else —
+              competitors, scrapers, on-chain bots — sees noise.
+            </p>
+
+            <div className="mt-9 flex flex-wrap items-center gap-3">
+              <a href="/create" className="btn-primary">
+                Send an invoice
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                  <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </a>
+              <a href="/dashboard" className="btn-ghost">Open dashboard</a>
+            </div>
+            <p className="mt-4 text-[12.5px] text-dim">
               Wallet required · takes about a minute
-            </span>
+            </p>
           </div>
-        </div>
 
-        {/* Demo card — the product, not a decoration */}
-        <div
-          className="mt-20 md:mt-24 reveal"
-          style={{ animationDelay: "120ms" }}
-        >
-          <div className="flex items-baseline justify-between mb-3">
-            <span className="eyebrow">One invoice, seen two ways</span>
+          {/* Right column — the brand demo moment, inline with the headline */}
+          <div
+            className="col-span-12 lg:col-span-7 reveal"
+            style={{ animationDelay: "120ms" }}
+          >
+            <div className="flex items-baseline justify-between mb-3">
+              <span className="eyebrow">One invoice, seen two ways</span>
+            </div>
+            <CipherAmount amount="$4,200.00" />
           </div>
-          <CipherAmount amount="$4,200.00" />
         </div>
       </section>
 
