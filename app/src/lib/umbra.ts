@@ -362,7 +362,11 @@ import { UMBRA_RELAYER_API } from "./constants";
 export async function scanClaimableUtxos(client: UmbraClient) {
   const scan = getClaimableUtxoScannerFunction({ client });
   // treeIndex 0, startInsertionIndex 0 — scan the full current tree.
-  const result = await scan(0 as any, 0 as any);
+  // The SDK's U32 type is a branded bigint (per
+  // node_modules/@umbra-privacy/sdk/dist/types-*.d.ts), so passing JS
+  // numbers triggers "Cannot mix BigInt and other types" inside the SDK
+  // when it does internal arithmetic. Pass BigInt(0) explicitly.
+  const result = await scan(BigInt(0) as any, BigInt(0) as any);
   return {
     received: result.received,
     publicReceived: result.publicReceived,
