@@ -12,11 +12,16 @@ const STEPS = [
   },
   {
     k: "02",
-    title: "Settled while still encrypted",
-    body: "Arcium's MPC network verifies the transfer without any single node ever decrypting the amount. Your USDC arrives. Nobody else learns how much.",
+    title: "Paid through Umbra",
+    body: "Your client pays into a receiver-claimable private UTXO. The amount and payment path stay off public invoice rails.",
   },
   {
     k: "03",
+    title: "Recipient confirms receipt",
+    body: "Your dashboard scans and claims incoming UTXOs, then marks the invoice paid from your wallet.",
+  },
+  {
+    k: "04",
     title: "You decide who else can read it",
     body: "Generate an auditor key for your accountant, a client, or a regulator. They see exactly the invoices you grant — nothing more.",
   },
@@ -99,7 +104,7 @@ export default function LandingPage() {
             <div className="col-span-12 md:col-span-4">
               <span className="eyebrow">How it works</span>
               <h2 className="mt-4 font-sans font-medium text-[28px] md:text-[34px] leading-[1.1] tracking-[-0.02em] text-ink">
-                Three steps.
+                Four steps.
                 <br />
                 <span className="text-muted">One private invoice.</span>
               </h2>
@@ -135,7 +140,7 @@ export default function LandingPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-10 md:gap-14">
             <Fact label="Settles on" value="Solana · USDC" />
             <Fact label="Encryption" value="X25519 · AES-256-GCM" />
-            <Fact label="Privacy layer" value="Umbra · Arcium MPC" />
+            <Fact label="Privacy layer" value="Umbra private UTXOs" />
             <Fact label="Sharing" value="Auditor keys, per-invoice" />
           </div>
         </div>
@@ -168,7 +173,12 @@ export default function LandingPage() {
             </figcaption>
           </figure>
 
-          <div className="mt-12">
+          <p className="mt-12 text-[14.5px] text-ink/70 max-w-[640px] leading-[1.55]">
+            Private invoices, receipts, and accountant access for Solana
+            businesses.
+          </p>
+
+          <div className="mt-7">
             <a href="/create" className="btn-primary">
               Send your first invoice
               <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>

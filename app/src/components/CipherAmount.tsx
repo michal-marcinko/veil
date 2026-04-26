@@ -105,7 +105,7 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
             <rect x="2.5" y="5.5" width="7" height="5" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
             <path d="M4 5.5V4a2 2 0 014 0v1.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
-          <span>Encrypted · Arcium MPC</span>
+          <span>Encrypted · Umbra private UTXO</span>
         </div>
       </div>
     </div>
