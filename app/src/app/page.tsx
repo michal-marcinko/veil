@@ -162,21 +162,40 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Closing CTA */}
+      {/* Closing — editorial pull-quote, not a duplicate of the hero CTA.
+          Boska italic carries the brand voice; the source citation grounds
+          the claim in real research (PIVY, 2026). One small chip CTA so the
+          quote doesn't compete with the hero's primary CTAs. */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-20 md:py-24">
-          <div className="max-w-[640px]">
-            <h2 className="font-sans font-medium text-[32px] md:text-[40px] leading-[1.05] tracking-[-0.025em] text-ink">
-              What you charge isn't anyone else's business.
-            </h2>
-            <p className="mt-5 text-[16px] leading-[1.55] text-ink/70 max-w-[520px]">
-              Send your first invoice in about a minute. Devnet works today —
-              mainnet lands when Umbra does.
-            </p>
-            <div className="mt-8 flex items-center gap-3">
-              <a href="/create" className="btn-primary">Send an invoice</a>
-              <a href="/dashboard" className="btn-quiet">Open dashboard →</a>
-            </div>
+        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-24 md:py-32">
+          <figure className="max-w-[820px]">
+            <span className="eyebrow">Why it matters</span>
+            <blockquote className="mt-6 font-display italic font-medium text-ink text-[32px] sm:text-[40px] md:text-[48px] leading-[1.1] tracking-[-0.02em]">
+              <span aria-hidden className="text-muted mr-1">&ldquo;</span>
+              Public crypto payroll is a roadmap for targeted social engineering.
+              <span aria-hidden className="text-muted ml-1">&rdquo;</span>
+            </blockquote>
+            <figcaption className="mt-7 flex flex-wrap items-baseline gap-x-4 gap-y-2 font-mono text-[11px] tracking-[0.14em] uppercase text-muted">
+              <span>— PIVY · 2026</span>
+              <span className="text-dim">·</span>
+              <a
+                href="https://pivy.me/blog/3dc66fc2-bf12-4924-95c2-7550d7dd4501"
+                target="_blank"
+                rel="noreferrer"
+                className="text-dim hover:text-ink transition-colors"
+              >
+                Source
+              </a>
+            </figcaption>
+          </figure>
+
+          <div className="mt-12">
+            <a href="/create" className="btn-primary">
+              Send your first invoice
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </a>
           </div>
         </div>
       </section>
