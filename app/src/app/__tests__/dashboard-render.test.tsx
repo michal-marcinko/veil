@@ -37,6 +37,7 @@ vi.mock("@/lib/anchor", () => ({
       },
     },
   ]),
+  markPaidOnChain: vi.fn(async () => "mark-paid-sig"),
 }));
 
 vi.mock("@/lib/umbra", () => ({

@@ -152,7 +152,7 @@ export async function markPaidOnChain(
   const program = getProgram(wallet);
   const tx: Transaction = await (program.methods as any)
     .markPaid(Array.from(utxoCommitment))
-    .accountsPartial({ invoice: invoicePda, payer: wallet.publicKey })
+    .accountsPartial({ invoice: invoicePda, creator: wallet.publicKey })
     .transaction();
   return signAndSubmit(wallet, program.provider.connection as any, tx);
 }
