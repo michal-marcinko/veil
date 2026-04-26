@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 /**
  * Brand wordmark with a one-shot typewriter sequence on hover.
@@ -42,12 +43,17 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
   }, []);
 
   function setSafe(s: string) {
-    if (mountedRef.current) setText(s);
+    if (!mountedRef.current) return;
+    // flushSync forces React to commit the DOM update before returning.
+    // Without it, React 18's concurrent batching may collapse rapid
+    // setText calls (every 28-58ms) into a single final render — which
+    // is exactly what makes a per-character typewriter look like nothing
+    // happened. flushSync is heavy in general but correct here: we
+    // explicitly want each character as its own paint.
+    flushSync(() => setText(s));
   }
 
   async function play() {
-    // eslint-disable-next-line no-console
-    console.log("[VeilLogo] play() fired", { busy: busyRef.current });
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -97,10 +103,9 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
   return (
     <a
       href="/"
-      className="inline-flex items-center gap-1 group cursor-pointer hover:outline hover:outline-2 hover:outline-brick rounded-sm p-1 -m-1"
+      className="inline-flex items-center gap-1 group cursor-pointer"
       onMouseEnter={play}
       onFocus={play}
-      onMouseOver={play}
     >
       <img
         src="/veil-icon.png"
