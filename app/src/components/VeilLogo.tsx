@@ -18,7 +18,7 @@
  */
 export function VeilLogo({ tagline }: { tagline?: string }) {
   return (
-    <a href="/" className="inline-flex items-center gap-3 group">
+    <a href="/" className="inline-flex items-center gap-2 group">
       <img
         src="/veil-icon.png"
         alt=""
