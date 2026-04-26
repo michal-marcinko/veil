@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { CipherAmount } from "@/components/CipherAmount";
+import { PrimaryCta } from "@/components/PrimaryCta";
 
 const STEPS = [
   {
@@ -34,18 +36,20 @@ export default function LandingPage() {
       <nav className="relative z-20 max-w-[1400px] mx-auto px-6 md:px-8 pt-6 flex items-center justify-between">
         <VeilLogo />
         <div className="flex items-center gap-1 md:gap-2">
-          <a
+          <Link
             href="/create"
+            prefetch
             className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
           >
             Create
-          </a>
-          <a
+          </Link>
+          <Link
             href="/dashboard"
+            prefetch
             className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
           >
             Dashboard
-          </a>
+          </Link>
           <a
             href="https://github.com"
             className="hidden md:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
@@ -77,13 +81,15 @@ export default function LandingPage() {
             </p>
 
             <div className="mt-12 flex flex-wrap items-center gap-3">
-              <a href="/create" className="btn-primary">
-                Send an invoice
-                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
-                  <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </a>
-              <a href="/dashboard" className="btn-ghost">Open dashboard</a>
+              <PrimaryCta href="/create" pendingChildren="Opening…">
+                <span className="inline-flex items-center gap-2.5">
+                  Send an invoice
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                    <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </PrimaryCta>
+              <Link href="/dashboard" prefetch className="btn-ghost">Open dashboard</Link>
             </div>
           </div>
 
@@ -179,12 +185,14 @@ export default function LandingPage() {
           </p>
 
           <div className="mt-7">
-            <a href="/create" className="btn-primary">
-              Send your first invoice
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
-                <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </a>
+            <PrimaryCta href="/create" pendingChildren="Opening…">
+              <span className="inline-flex items-center gap-2.5">
+                Send your first invoice
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                  <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </PrimaryCta>
           </div>
         </div>
       </section>
@@ -200,8 +208,8 @@ export default function LandingPage() {
             <span>v0.1</span>
           </div>
           <div className="flex items-center gap-5 text-[12.5px] text-muted">
-            <a href="/create" className="hover:text-ink transition-colors">Create</a>
-            <a href="/dashboard" className="hover:text-ink transition-colors">Dashboard</a>
+            <Link href="/create" prefetch className="hover:text-ink transition-colors">Create</Link>
+            <Link href="/dashboard" prefetch className="hover:text-ink transition-colors">Dashboard</Link>
             <a href="#" className="hover:text-ink transition-colors">Docs</a>
           </div>
         </div>

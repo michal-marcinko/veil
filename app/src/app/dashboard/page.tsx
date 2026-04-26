@@ -272,7 +272,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="min-h-screen relative pb-32">
       <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
-        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+        <div className="max-w-[1400px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
           <VeilLogo />
           <div className="flex items-center gap-1 md:gap-2">
             <a
@@ -294,7 +294,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </nav>
 
-      <section className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
+      <section className="max-w-[1400px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
     </main>
   );
 }

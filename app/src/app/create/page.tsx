@@ -234,7 +234,7 @@ function Frame({
   return (
     <main className="min-h-screen relative pb-32">
       <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
-        <div className="max-w-[1100px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
+        <div className="max-w-[1400px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
           <VeilLogo />
           <div className="flex items-center gap-1 md:gap-2">
             <a
@@ -256,14 +256,14 @@ function Frame({
         </div>
       </nav>
 
-      <header className="max-w-[1100px] mx-auto px-6 md:px-8 pt-16 md:pt-20 pb-10 md:pb-12">
+      <header className="max-w-[1400px] mx-auto px-6 md:px-8 pt-16 md:pt-20 pb-10 md:pb-12">
         <span className="eyebrow">New invoice</span>
         <h1 className="mt-3 font-sans font-medium text-ink text-[40px] md:text-[52px] leading-[1.03] tracking-[-0.03em] reveal">
           {heading}
         </h1>
       </header>
 
-      <section className="max-w-[1100px] mx-auto px-6 md:px-8 max-w-3xl">{children}</section>
+      <section className="max-w-[1400px] mx-auto px-6 md:px-8 max-w-3xl">{children}</section>
     </main>
   );
 }
