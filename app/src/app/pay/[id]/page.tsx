@@ -9,7 +9,7 @@ import { InvoiceView } from "@/components/InvoiceView";
 import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/components/RegistrationModal";
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
-import { fetchInvoice, markPaidOnChain } from "@/lib/anchor";
+import { fetchInvoice } from "@/lib/anchor";
 import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded } from "@/lib/umbra";
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
@@ -128,14 +128,6 @@ export default function PayPage({ params }: { params: { id: string } }) {
         ? await payInvoiceFromShielded(payArgs)
         : await payInvoice(payArgs);
 
-      // Derive a real 32-byte utxo_commitment from the actual Umbra UTXO signature.
-      // This is non-forgeable (only the signer of the real tx can produce it) and
-      // guarantees the receipt verifier's "non-zero commitment" check passes.
-      const sigBytes = bs58.decode(payResult.createUtxoSignature);
-      const utxoCommitment = await sha256(sigBytes);
-
-      const markPaidSig = await markPaidOnChain(wallet as any, invoicePda, utxoCommitment);
-
       try {
         // Hash metadata_uri concatenated with metadata_hash for tamper-evidence.
         const invoice = await fetchInvoice(wallet as any, invoicePda);
@@ -148,13 +140,14 @@ export default function PayPage({ params }: { params: { id: string } }) {
 
         // Solana block time — falls back to local clock if the RPC hasn't
         // indexed the tx yet (typical within ~1s of confirmation).
-        const blockTime = await fetchTxBlockTime(markPaidSig);
+        const paymentIntentSig = payResult.createUtxoSignature;
+        const blockTime = await fetchTxBlockTime(paymentIntentSig);
         const timestamp = blockTime ?? Math.floor(Date.now() / 1000);
 
         const receipt = buildReceipt({
           invoicePda: invoicePda.toBase58(),
           payerPubkey: wallet.publicKey!.toBase58(),
-          markPaidTxSig: markPaidSig,
+          markPaidTxSig: paymentIntentSig,
           timestamp,
           invoiceHash: bs58.encode(invoiceHash),
         });
@@ -236,7 +229,7 @@ export default function PayPage({ params }: { params: { id: string } }) {
               <div className="flex-1">
                 <div className="text-[14px] text-ink font-medium">Payment sent.</div>
                 <div className="text-[13px] text-muted mt-1 leading-relaxed">
-                  The recipient will see it when they next open their dashboard.
+                  The recipient will claim it and mark the invoice paid from their dashboard.
                 </div>
               </div>
             </div>
@@ -265,7 +258,7 @@ export default function PayPage({ params }: { params: { id: string } }) {
                 </div>
                 <div className="mt-3 text-[12px] text-muted leading-relaxed">
                   Share this link to prove you paid this invoice. The amount is hidden;
-                  only the fact-of-payment is verifiable.
+                  it verifies after the recipient claims the UTXO and marks the invoice paid.
                 </div>
               </div>
             )}
@@ -273,7 +266,7 @@ export default function PayPage({ params }: { params: { id: string } }) {
             {receiptBuildError && !receiptUrl && (
               <div className="mt-4 pt-4 border-t border-sage/30 text-[12px] text-muted leading-relaxed">
                 Payment confirmed, but the receipt couldn't be signed ({receiptBuildError}).
-                Your invoice is still marked paid on-chain.
+                The recipient can still claim the UTXO and mark the invoice paid.
               </div>
             )}
           </div>

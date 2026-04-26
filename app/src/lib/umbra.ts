@@ -264,7 +264,7 @@ export interface PayInvoiceResult {
  * Pay an invoice by creating a receiver-claimable UTXO funded from Bob's
  * public ATA. Per the Design 2026-04-16 addendum, optionalData is NOT
  * exposed on `CreateUtxoArgs` — the linkage between UTXO and invoice is
- * established off-chain (Bob calls `markPaidOnChain` separately).
+ * established off-chain when the recipient claims and acknowledges receipt.
  */
 export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
   const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver({
@@ -311,9 +311,8 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
  *     `./shielded-pay` for the check. If the balance is insufficient the SDK
  *     will throw inside proof generation.
  *
- * Post-call the caller MUST still invoke `markPaidOnChain(wallet, pda, utxoCommitment)`
- * exactly as in the public-balance path — `utxo_commitment` remains an
- * all-zeros audit breadcrumb per the 2026-04-16 design addendum.
+ * Post-call the recipient dashboard claims the incoming UTXO and invokes
+ * `markPaidOnChain(wallet, pda, utxoCommitment)`.
  */
 export async function payInvoiceFromShielded(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
   const zkProver = getCreateReceiverClaimableUtxoFromEncryptedBalanceProver({

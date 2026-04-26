@@ -4,8 +4,8 @@ import bs58 from "bs58";
 export interface PaymentReceipt {
   version: 1;
   invoicePda: string;      // base58 PDA of the Invoice account
-  payerPubkey: string;     // base58 of the wallet that signed markPaid
-  markPaidTxSig: string;   // base58 Solana transaction signature
+  payerPubkey: string;     // base58 of the wallet that signed this receipt intent
+  markPaidTxSig: string;   // base58 payment-intent or mark-paid transaction signature
   timestamp: number;       // unix seconds, from Solana block time
   invoiceHash: string;     // base58 sha256(metadata_uri || metadata_hash)
 }
