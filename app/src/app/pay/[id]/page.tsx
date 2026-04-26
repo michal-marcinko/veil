@@ -13,6 +13,7 @@ import { fetchInvoice } from "@/lib/anchor";
 import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded } from "@/lib/umbra";
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
+import { downloadInvoicePdf } from "@/lib/pdfDownload";
 import type { InvoiceMetadata } from "@/lib/types";
 import { buildReceipt, signReceipt, encodeReceipt, type SignedReceipt } from "@/lib/receipt";
 import { fetchTxBlockTime } from "@/lib/anchor";
@@ -313,6 +314,15 @@ export default function PayPage({ params }: { params: { id: string } }) {
             </p>
           </div>
         )}
+        <div className="mt-6">
+          <button
+            type="button"
+            onClick={() => downloadInvoicePdf(metadata, params.id)}
+            className="btn-quiet"
+          >
+            Download PDF →
+          </button>
+        </div>
         <RegistrationModal open={regOpen} steps={regSteps} />
         {status && <div className="mt-4 text-[13px] text-muted">{status}</div>}
       </div>
