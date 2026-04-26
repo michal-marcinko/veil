@@ -53,49 +53,63 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      {/* Hero */}
-      <section className="relative z-10 max-w-[1200px] mx-auto px-6 md:px-8 pt-20 md:pt-28 pb-20 md:pb-28">
-        <div className="max-w-[720px] reveal">
-          <div className="flex items-center gap-3 mb-8">
-            <span className="eyebrow">Solana · USDC</span>
-            <span className="h-px w-8 bg-line" />
-            <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
-          </div>
+      {/* Hero — 12-col grid: text on left, CipherAmount panel inline on right.
+          Decorative logo float sits absolute in the section's top-right,
+          hidden below md breakpoint so mobile stays uncluttered. */}
+      <section className="relative z-10 max-w-[1200px] mx-auto px-6 md:px-8 pt-20 md:pt-24 pb-24 md:pb-28">
+        {/* Decorative logo — atmosphere, not interactive */}
+        <img
+          src="/veil-icon.png"
+          alt=""
+          aria-hidden
+          className="hidden lg:block absolute top-8 right-6 md:right-8 w-[280px] h-[280px] object-contain opacity-50 mix-blend-multiply pointer-events-none select-none -rotate-[4deg] origin-top-right"
+          draggable={false}
+        />
 
-          <h1 className="font-sans font-medium text-ink text-[44px] sm:text-[56px] md:text-[68px] leading-[1.02] tracking-[-0.035em]">
-            Invoice clients in USDC.
-            <br />
-            <span className="text-muted">Without broadcasting what you charge.</span>
-          </h1>
+        <div className="grid grid-cols-12 gap-8 lg:gap-12 items-center">
+          {/* Left column — headline, body, CTAs */}
+          <div className="col-span-12 lg:col-span-5 reveal">
+            <div className="flex items-center gap-3 mb-8">
+              <span className="eyebrow">Solana · USDC</span>
+              <span className="h-px w-8 bg-line" />
+              <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
+            </div>
 
-          <p className="mt-8 max-w-[560px] text-[17px] leading-[1.55] text-ink/80">
-            You see the amount. Your client sees the amount. Everyone else —
-            competitors, scrapers, on-chain bots — sees noise.
-          </p>
+            <h1 className="font-sans font-medium text-ink text-[40px] sm:text-[48px] lg:text-[56px] xl:text-[64px] leading-[1.03] tracking-[-0.035em]">
+              Invoice clients in USDC.
+              <br />
+              <span className="text-muted">Without broadcasting what you charge.</span>
+            </h1>
 
-          <div className="mt-10 flex flex-wrap items-center gap-3">
-            <a href="/create" className="btn-primary">
-              Send an invoice
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
-                <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </a>
-            <a href="/dashboard" className="btn-ghost">Open dashboard</a>
-            <span className="ml-1 text-[12.5px] text-dim">
+            <p className="mt-7 max-w-[480px] text-[16.5px] leading-[1.55] text-ink/80">
+              You see the amount. Your client sees the amount. Everyone else —
+              competitors, scrapers, on-chain bots — sees noise.
+            </p>
+
+            <div className="mt-9 flex flex-wrap items-center gap-3">
+              <a href="/create" className="btn-primary">
+                Send an invoice
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                  <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </a>
+              <a href="/dashboard" className="btn-ghost">Open dashboard</a>
+            </div>
+            <p className="mt-4 text-[12.5px] text-dim">
               Wallet required · takes about a minute
-            </span>
+            </p>
           </div>
-        </div>
 
-        {/* Demo card — the product, not a decoration */}
-        <div
-          className="mt-20 md:mt-24 reveal"
-          style={{ animationDelay: "120ms" }}
-        >
-          <div className="flex items-baseline justify-between mb-3">
-            <span className="eyebrow">One invoice, seen two ways</span>
+          {/* Right column — the brand demo moment, inline with the headline */}
+          <div
+            className="col-span-12 lg:col-span-7 reveal"
+            style={{ animationDelay: "120ms" }}
+          >
+            <div className="flex items-baseline justify-between mb-3">
+              <span className="eyebrow">One invoice, seen two ways</span>
+            </div>
+            <CipherAmount amount="$4,200.00" />
           </div>
-          <CipherAmount amount="$4,200.00" />
         </div>
       </section>
 
@@ -148,21 +162,40 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Closing CTA */}
+      {/* Closing — editorial pull-quote, not a duplicate of the hero CTA.
+          Boska italic carries the brand voice; the source citation grounds
+          the claim in real research (PIVY, 2026). One small chip CTA so the
+          quote doesn't compete with the hero's primary CTAs. */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-20 md:py-24">
-          <div className="max-w-[640px]">
-            <h2 className="font-sans font-medium text-[32px] md:text-[40px] leading-[1.05] tracking-[-0.025em] text-ink">
-              What you charge isn't anyone else's business.
-            </h2>
-            <p className="mt-5 text-[16px] leading-[1.55] text-ink/70 max-w-[520px]">
-              Send your first invoice in about a minute. Devnet works today —
-              mainnet lands when Umbra does.
-            </p>
-            <div className="mt-8 flex items-center gap-3">
-              <a href="/create" className="btn-primary">Send an invoice</a>
-              <a href="/dashboard" className="btn-quiet">Open dashboard →</a>
-            </div>
+        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-24 md:py-32">
+          <figure className="max-w-[820px]">
+            <span className="eyebrow">Why it matters</span>
+            <blockquote className="mt-6 font-display italic font-medium text-ink text-[32px] sm:text-[40px] md:text-[48px] leading-[1.1] tracking-[-0.02em]">
+              <span aria-hidden className="text-muted mr-1">&ldquo;</span>
+              Public crypto payroll is a roadmap for targeted social engineering.
+              <span aria-hidden className="text-muted ml-1">&rdquo;</span>
+            </blockquote>
+            <figcaption className="mt-7 flex flex-wrap items-baseline gap-x-4 gap-y-2 font-mono text-[11px] tracking-[0.14em] uppercase text-muted">
+              <span>— PIVY · 2026</span>
+              <span className="text-dim">·</span>
+              <a
+                href="https://pivy.me/blog/3dc66fc2-bf12-4924-95c2-7550d7dd4501"
+                target="_blank"
+                rel="noreferrer"
+                className="text-dim hover:text-ink transition-colors"
+              >
+                Source
+              </a>
+            </figcaption>
+          </figure>
+
+          <div className="mt-12">
+            <a href="/create" className="btn-primary">
+              Send your first invoice
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                <path d="M2 5.5h7M6 2.5l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </a>
           </div>
         </div>
       </section>
