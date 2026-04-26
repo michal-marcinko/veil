@@ -56,8 +56,9 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
             <dd className="tnum text-ink font-medium">$200.00</dd>
           </div>
           <div className="h-px bg-line" />
-          <div className="flex items-baseline justify-between pt-1">
-            <dt className="text-ink font-medium">Total due</dt>
+          {/* Total due — vertical stack to mirror the right pane's Amount row */}
+          <div className="pt-1">
+            <dt className="text-ink font-medium mb-3">Total due</dt>
             <dd className="font-sans tnum text-ink text-[28px] md:text-[32px] font-medium tracking-[-0.02em] leading-none">
               {amount}
             </dd>

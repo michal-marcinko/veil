@@ -57,15 +57,6 @@ export default function LandingPage() {
           Decorative logo float sits absolute in the section's top-right,
           hidden below md breakpoint so mobile stays uncluttered. */}
       <section className="relative z-10 max-w-[1400px] mx-auto px-6 md:px-8 pt-28 md:pt-36 pb-32 md:pb-40">
-        {/* Decorative logo — atmosphere, not interactive */}
-        <img
-          src="/veil-icon.png"
-          alt=""
-          aria-hidden
-          className="hidden lg:block absolute top-6 right-6 md:right-8 w-[320px] h-[320px] object-contain opacity-45 mix-blend-multiply pointer-events-none select-none -rotate-[4deg] origin-top-right"
-          draggable={false}
-        />
-
         <div className="grid grid-cols-12 gap-10 lg:gap-20 items-center">
           {/* Left column — headline, body, CTAs */}
           <div className="col-span-12 lg:col-span-6 reveal">
@@ -76,8 +67,8 @@ export default function LandingPage() {
             </h1>
 
             <p className="mt-10 max-w-[480px] text-[16.5px] leading-[1.55] text-ink/80">
-              You see the amount. Your client sees the amount. Everyone else —
-              competitors, scrapers, on-chain bots — sees noise.
+              You see the amount. Your client sees the amount. Everyone else
+              sees noise.
             </p>
 
             <div className="mt-12 flex flex-wrap items-center gap-3">
@@ -89,9 +80,6 @@ export default function LandingPage() {
               </a>
               <a href="/dashboard" className="btn-ghost">Open dashboard</a>
             </div>
-            <p className="mt-5 text-[12.5px] text-dim">
-              Wallet required · takes about a minute
-            </p>
           </div>
 
           {/* Right column — the brand demo moment, inline with the headline */}
@@ -99,9 +87,6 @@ export default function LandingPage() {
             className="col-span-12 lg:col-span-6 reveal"
             style={{ animationDelay: "120ms" }}
           >
-            <div className="flex items-baseline justify-between mb-3">
-              <span className="eyebrow">One invoice, seen two ways</span>
-            </div>
             <CipherAmount amount="$4,200.00" />
           </div>
         </div>
