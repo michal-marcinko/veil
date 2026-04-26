@@ -234,8 +234,11 @@ export type InvoiceRegistry = {
           "writable": true
         },
         {
-          "name": "payer",
-          "signer": true
+          "name": "creator",
+          "signer": true,
+          "relations": [
+            "invoice"
+          ]
         }
       ],
       "args": [
