@@ -26,7 +26,7 @@ describe("downloadInvoicePdf", () => {
 
   beforeEach(() => {
     anchorClicks = 0;
-    createObjectURL = vi.fn(() => "blob:fake");
+    createObjectURL = vi.fn().mockReturnValue("blob:fake");
     revokeObjectURL = vi.fn();
     Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true });
     Object.defineProperty(URL, "revokeObjectURL", { value: revokeObjectURL, configurable: true });
