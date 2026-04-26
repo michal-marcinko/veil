@@ -18,12 +18,12 @@ const STEPS = [
   {
     k: "03",
     title: "Recipient confirms receipt",
-    body: "Your dashboard picks up the incoming payment automatically. You mark it paid from your wallet — only the recipient can confirm settlement.",
+    body: "Your dashboard picks up the incoming payment automatically. You mark it paid from your wallet. Only the recipient can confirm settlement.",
   },
   {
     k: "04",
     title: "You decide who else can read it",
-    body: "Share scoped access with your accountant, client, or regulator. They see only the invoices you grant — nothing more.",
+    body: "Share scoped access with your accountant, client, or regulator. They see only the invoices you grant. Nothing more.",
   },
 ];
 
