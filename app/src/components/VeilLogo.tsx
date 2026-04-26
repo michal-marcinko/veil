@@ -59,7 +59,7 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
       */}
       <span className="relative inline-block overflow-hidden h-8 leading-none">
         {/* Width ghost — invisible, reserves room for the wider phrase */}
-        <span className="invisible block h-8 font-display font-medium text-[24px] tracking-[-0.015em] leading-8 whitespace-nowrap">
+        <span className="invisible block h-8 font-display font-semibold text-[24px] tracking-[-0.02em] leading-8 whitespace-nowrap">
           Private invoicing
         </span>
 
@@ -73,12 +73,12 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
             motion-reduce:transition-none motion-reduce:transform-none
           "
         >
-          <span className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink whitespace-nowrap leading-none">
+          <span className="h-8 flex items-center font-display font-semibold text-[24px] tracking-[-0.02em] text-ink whitespace-nowrap leading-none">
             Veil
           </span>
           <span
             aria-hidden
-            className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink whitespace-nowrap leading-none"
+            className="h-8 flex items-center font-display font-semibold text-[24px] tracking-[-0.02em] text-ink whitespace-nowrap leading-none"
           >
             Private invoicing
           </span>
