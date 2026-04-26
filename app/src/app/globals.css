@@ -40,6 +40,27 @@
     font-family: var(--font-sans);
   }
 
+  /* Typewriter cursor for the brand wordmark hover effect */
+  @keyframes typewriter-blink {
+    0%, 50% { opacity: 1; }
+    50.01%, 100% { opacity: 0; }
+  }
+  .typewriter-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 0.85em;
+    margin-left: 3px;
+    background-color: currentColor;
+    vertical-align: -0.08em;
+    animation: typewriter-blink 1s step-end infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .typewriter-cursor {
+      animation: none;
+      opacity: 1;
+    }
+  }
+
   /* Subtle paper grain — barely perceptible, warms the cream */
   body::before {
     content: "";
