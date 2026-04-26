@@ -46,6 +46,8 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
   }
 
   async function play() {
+    // eslint-disable-next-line no-console
+    console.log("[VeilLogo] play() fired", { busy: busyRef.current });
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -95,9 +97,10 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
   return (
     <a
       href="/"
-      className="inline-flex items-center gap-1 group cursor-pointer"
+      className="inline-flex items-center gap-1 group cursor-pointer hover:outline hover:outline-2 hover:outline-brick rounded-sm p-1 -m-1"
       onMouseEnter={play}
       onFocus={play}
+      onMouseOver={play}
     >
       <img
         src="/veil-icon.png"
