@@ -27,34 +27,53 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
         draggable={false}
       />
 
-      {/* Stacked wordmark. Both texts occupy the same grid cell so the
-          wrapper measures itself against the wider phrase. */}
-      <span className="grid items-center leading-none [grid-template-areas:'stack']">
-        <span
-          className="
-            [grid-area:stack]
-            font-sans font-bold text-[22px] tracking-[-0.03em]
-            text-ink lowercase whitespace-nowrap
-            transition-[opacity,transform] duration-200 ease-out
-            group-hover:opacity-0 group-hover:-translate-y-1.5
-            motion-reduce:transition-none motion-reduce:transform-none
-          "
-        >
-          veil
-        </span>
-        <span
-          aria-hidden
-          className="
-            [grid-area:stack]
-            font-sans font-medium text-[16px] tracking-[-0.01em]
-            text-ink lowercase whitespace-nowrap
-            opacity-0 translate-y-1.5
-            transition-[opacity,transform] duration-200 ease-out
-            group-hover:opacity-100 group-hover:translate-y-0
-            motion-reduce:transition-none motion-reduce:transform-none
-          "
-        >
+      {/*
+        Slot-machine reveal. Container is height-locked to a single line
+        and clips overflow; the inner strip holds both phrases stacked
+        vertically and translates up by one line on hover.
+
+        Both phrases share IDENTICAL type treatment (same font, weight,
+        size, tracking) so the user perceives a smooth letter-to-letter
+        roll rather than a jarring weight/size shift. Width is set by an
+        invisible "ghost" copy of the wider phrase, so the wrapper
+        reserves the full width upfront — neighbours never shift.
+
+        Type treatment:
+        - Switzer 500 (medium) — refined, not the default Bold
+        - 19px with negative -0.025em tracking — display-grade tightness
+        - Stylistic alternates inherited from html (cv01, cv09, ss01, ss02)
+        - lowercase keeps the editorial register
+
+        Motion:
+        - 460ms with cubic-bezier(0.22, 1, 0.36, 1) — the project's own
+          `.reveal` curve. Feels considered rather than snappy.
+        - prefers-reduced-motion → instant snap, no transition
+      */}
+      <span className="relative inline-block overflow-hidden h-7 leading-none">
+        {/* Width ghost — invisible, sizes the container to fit "private invoicing" */}
+        <span className="invisible block h-7 font-sans font-medium text-[19px] tracking-[-0.025em] lowercase leading-7 whitespace-nowrap">
           private invoicing
+        </span>
+
+        {/* Sliding strip */}
+        <span
+          className="
+            absolute inset-x-0 top-0 flex flex-col
+            transition-transform duration-[460ms]
+            [transition-timing-function:cubic-bezier(0.22,1,0.36,1)]
+            group-hover:-translate-y-7
+            motion-reduce:transition-none motion-reduce:transform-none
+          "
+        >
+          <span className="h-7 flex items-center font-sans font-medium text-[19px] tracking-[-0.025em] text-ink lowercase whitespace-nowrap leading-none">
+            veil
+          </span>
+          <span
+            aria-hidden
+            className="h-7 flex items-center font-sans font-medium text-[19px] tracking-[-0.025em] text-ink lowercase whitespace-nowrap leading-none"
+          >
+            private invoicing
+          </span>
         </span>
       </span>
 
