@@ -1,31 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
-
-/**
- * Brand wordmark with a one-shot typewriter sequence on hover.
- *
- * Sequence (fires once, runs to completion regardless of hover state):
- *   1. Backspace "Veil"
- *   2. Type "Private invoicing"
- *   3. Hold (~1.4s — the descriptor "rests")
- *   4. Backspace "Private invoicing"
- *   5. Type "Veil" — back to rest state
- *
- * Locked while playing — re-hovering does nothing until the cycle
- * completes. `prefers-reduced-motion` short-circuits to a 1.2s text
- * swap. Width is locked via an invisible "ghost" of the wider phrase.
- */
 
 const PRIMARY = "Veil";
 const SECONDARY = "Private invoicing";
-
 const ERASE_MS = 28;
 const TYPE_MS = 58;
-const HOLD_BETWEEN_MS = 220;
 const HOLD_FOREIGN_MS = 1400;
-const HOLD_HOME_MS = 180;
+const HOLD_BETWEEN_MS = 220;
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -33,77 +15,68 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
   const [text, setText] = useState(PRIMARY);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const mountedRef = useRef(true);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  function setSafe(s: string) {
-    if (!mountedRef.current) return;
-    // flushSync forces React to commit the DOM update before returning.
-    // Without it, React 18's concurrent batching may collapse rapid
-    // setText calls (every 28-58ms) into a single final render — which
-    // is exactly what makes a per-character typewriter look like nothing
-    // happened. flushSync is heavy in general but correct here: we
-    // explicitly want each character as its own paint.
-    flushSync(() => setText(s));
-  }
+  // Diagnostic: log every render with current state
+  // eslint-disable-next-line no-console
+  console.log("[VeilLogo render]", { text, busy });
 
   async function play() {
+    // eslint-disable-next-line no-console
+    console.log("[VeilLogo play]", { busyRefBefore: busyRef.current });
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
 
-    const reduced =
-      typeof window !== "undefined" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const log = (s: string) => {
+      // eslint-disable-next-line no-console
+      console.log("[VeilLogo setText]", JSON.stringify(s));
+    };
 
-    if (reduced) {
-      setSafe(SECONDARY);
-      await wait(1200);
-      setSafe(PRIMARY);
-    } else {
-      // 1. erase "Veil"
+    try {
+      // erase Veil
       for (let i = PRIMARY.length; i > 0; i--) {
         await wait(ERASE_MS);
-        setSafe(PRIMARY.slice(0, i - 1));
+        const next = PRIMARY.slice(0, i - 1);
+        log(next);
+        setText(next);
       }
       await wait(HOLD_BETWEEN_MS);
 
-      // 2. type "Private invoicing"
+      // type Private invoicing
       for (let i = 0; i < SECONDARY.length; i++) {
         await wait(TYPE_MS);
-        setSafe(SECONDARY.slice(0, i + 1));
+        const next = SECONDARY.slice(0, i + 1);
+        log(next);
+        setText(next);
       }
       await wait(HOLD_FOREIGN_MS);
 
-      // 3. erase "Private invoicing"
+      // erase Private invoicing
       for (let i = SECONDARY.length; i > 0; i--) {
         await wait(ERASE_MS);
-        setSafe(SECONDARY.slice(0, i - 1));
+        const next = SECONDARY.slice(0, i - 1);
+        log(next);
+        setText(next);
       }
       await wait(HOLD_BETWEEN_MS);
 
-      // 4. type "Veil"
+      // type Veil
       for (let i = 0; i < PRIMARY.length; i++) {
         await wait(TYPE_MS);
-        setSafe(PRIMARY.slice(0, i + 1));
+        const next = PRIMARY.slice(0, i + 1);
+        log(next);
+        setText(next);
       }
-      await wait(HOLD_HOME_MS);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
-
-    busyRef.current = false;
-    if (mountedRef.current) setBusy(false);
   }
 
   return (
     <a
       href="/"
-      className="inline-flex items-center gap-1 group cursor-pointer"
+      className="inline-flex items-center gap-1 cursor-pointer"
       onMouseEnter={play}
       onFocus={play}
     >
@@ -116,24 +89,19 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
       />
 
       {/*
-        Stacked grid: invisible ghost of the longer phrase reserves
-        width upfront so neighbours never reflow during playback.
+        BARE-BONES: no grid, no ghost, no overflow tricks. Just the text.
+        Width will reflow as text changes — fixing later, after we
+        confirm the typewriter renders at all.
       */}
-      <span className="grid items-center leading-none [grid-template-areas:'stack']">
-        <span
-          aria-hidden
-          className="invisible [grid-area:stack] font-display font-semibold text-[24px] tracking-[-0.02em] leading-none whitespace-nowrap"
-        >
-          {SECONDARY}
-        </span>
-        <span
-          className="[grid-area:stack] font-display font-semibold text-[24px] tracking-[-0.02em] text-ink leading-none whitespace-nowrap inline-flex items-center"
-          aria-label={PRIMARY}
-        >
-          {/* non-breaking space when text is "" so baseline holds */}
-          <span>{text || " "}</span>
-          {busy && <span className="typewriter-cursor" aria-hidden />}
-        </span>
+      <span
+        className="font-display font-semibold text-[24px] tracking-[-0.02em] text-ink leading-none whitespace-nowrap"
+        aria-label={PRIMARY}
+        data-veil-text={text}
+        data-veil-busy={busy ? "1" : "0"}
+        style={{ minWidth: "5ch", display: "inline-block" }}
+      >
+        {text}
+        {busy && <span className="typewriter-cursor" aria-hidden />}
       </span>
 
       {tagline && (
