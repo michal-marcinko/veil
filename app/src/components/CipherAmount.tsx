@@ -91,9 +91,13 @@ export function CipherAmount({ amount = "$4,200.00" }: { amount?: string }) {
             <dd className="font-mono tnum text-ink">{to}</dd>
           </div>
           <div className="h-px bg-line" />
-          <div className="flex items-baseline justify-between pt-1">
-            <dt className="text-ink font-medium">Amount</dt>
-            <dd className="font-mono tnum text-ink text-[20px] md:text-[22px] font-normal tracking-[0.06em] leading-none">
+          {/* Amount row: vertical stack — the cipher is too long to fit
+              inline with the label without colliding. Letting it occupy
+              its own line gives it the visual weight it needs to read
+              as the proof-of-encryption moment. */}
+          <div className="pt-1">
+            <dt className="text-ink font-medium mb-3">Amount</dt>
+            <dd className="font-mono tnum text-ink text-[18px] md:text-[20px] font-normal tracking-[0.05em] leading-none break-all">
               {cipher}
             </dd>
           </div>

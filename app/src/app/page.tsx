@@ -69,12 +69,6 @@ export default function LandingPage() {
         <div className="grid grid-cols-12 gap-10 lg:gap-20 items-center">
           {/* Left column — headline, body, CTAs */}
           <div className="col-span-12 lg:col-span-6 reveal">
-            <div className="flex items-center gap-3 mb-10">
-              <span className="eyebrow">Solana · USDC</span>
-              <span className="h-px w-8 bg-line" />
-              <span className="eyebrow text-dim">Devnet today · mainnet with Umbra</span>
-            </div>
-
             <h1 className="font-sans font-medium text-ink text-[40px] sm:text-[48px] lg:text-[56px] xl:text-[64px] leading-[1.03] tracking-[-0.035em]">
               Invoice clients in USDC.
               <br />
