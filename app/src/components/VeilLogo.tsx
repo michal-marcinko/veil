@@ -51,15 +51,16 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
       */}
       {/*
         Wordmark in Boska — display serif chosen for personality. Both
-        "veil" and "private invoicing" share IDENTICAL type treatment so
+        "Veil" and "Private invoicing" share IDENTICAL type treatment so
         the slot-machine roll reads as a clean letter swap rather than a
-        weight/size shift. Italics for editorial restraint; ball terminals
-        on the 'a', 'i', 'e' carry the brand voice.
+        weight/size shift. Title-case carries more gravitas than the
+        lowercase indie-tech default; ball terminals on the 'a', 'i', 'e'
+        give the brand voice its character.
       */}
       <span className="relative inline-block overflow-hidden h-8 leading-none">
         {/* Width ghost — invisible, reserves room for the wider phrase */}
-        <span className="invisible block h-8 font-display font-medium text-[24px] tracking-[-0.015em] lowercase leading-8 whitespace-nowrap">
-          private invoicing
+        <span className="invisible block h-8 font-display font-medium text-[24px] tracking-[-0.015em] leading-8 whitespace-nowrap">
+          Private invoicing
         </span>
 
         {/* Sliding strip */}
@@ -72,14 +73,14 @@ export function VeilLogo({ tagline }: { tagline?: string }) {
             motion-reduce:transition-none motion-reduce:transform-none
           "
         >
-          <span className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink lowercase whitespace-nowrap leading-none">
-            veil
+          <span className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink whitespace-nowrap leading-none">
+            Veil
           </span>
           <span
             aria-hidden
-            className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink lowercase whitespace-nowrap leading-none"
+            className="h-8 flex items-center font-display font-medium text-[24px] tracking-[-0.015em] text-ink whitespace-nowrap leading-none"
           >
-            private invoicing
+            Private invoicing
           </span>
         </span>
       </span>
