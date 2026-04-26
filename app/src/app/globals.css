@@ -122,7 +122,7 @@
   .input-editorial {
     @apply w-full bg-paper-3 border border-line rounded-[3px]
            py-2.5 px-3.5 text-ink placeholder:text-dim/80
-           transition-[border-color,background-color,box-shadow] duration-160
+           transition-[border-color,background-color,box-shadow] duration-150
            focus:outline-none focus:bg-paper focus:border-ink
            hover:border-line-2
            text-[14.5px];
