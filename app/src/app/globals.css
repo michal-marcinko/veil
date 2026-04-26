@@ -209,26 +209,48 @@
   color: #1c1712 !important;
 }
 
-/* Trigger pill — the "Select Wallet" / connected-state chip */
+/* Trigger chip — pill-shaped wallet control. Distinct from the editorial
+   page CTAs (those are slightly-rounded rectangles in oxblood); this one
+   reads as a system / account control via the full-radius pill shape +
+   subtle paper-2 fill on hover. */
 .wallet-adapter-button-trigger {
-  background-color: transparent !important;
-  border: 1px solid #bdb39b !important;
-  border-radius: 3px !important;
+  background-color: rgba(231, 224, 207, 0.35) !important; /* paper-2 @ 35% */
+  border: 1px solid #d6ceba !important; /* line — hairline, not line-2 */
+  border-radius: 999px !important;
   font-family: var(--font-sans), system-ui, sans-serif !important;
   font-weight: 500 !important;
-  font-size: 13px !important;
+  font-size: 12.5px !important;
   letter-spacing: -0.005em !important;
   text-transform: none !important;
   height: auto !important;
-  padding: 0.6rem 1rem !important;
+  padding: 7px 14px 7px 12px !important;
   color: #1c1712 !important;
-  transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, box-shadow 180ms ease !important;
+  box-shadow: 0 1px 0 rgba(28, 23, 18, 0.02) !important;
 }
 
 .wallet-adapter-button-trigger:hover {
-  background-color: transparent !important;
+  background-color: rgba(231, 224, 207, 0.7) !important; /* paper-2 @ 70% */
   border-color: #1c1712 !important;
   color: #1c1712 !important;
+  box-shadow: 0 4px 14px -8px rgba(28, 23, 18, 0.18) !important;
+}
+
+.wallet-adapter-button-trigger:focus-visible {
+  outline: none !important;
+  border-color: #1c1712 !important;
+  box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.18) !important; /* gold @ 18% */
+}
+
+/* The wallet logo icon that appears when connected — keep it tight. */
+.wallet-adapter-button-trigger .wallet-adapter-button-start-icon,
+.wallet-adapter-button-trigger .wallet-adapter-button-start-icon img {
+  width: 14px !important;
+  height: 14px !important;
+  margin-right: 0 !important;
 }
 
 /* Dropdown when connected (Copy address / Change wallet / Disconnect) */
