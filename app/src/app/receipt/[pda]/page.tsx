@@ -87,27 +87,16 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
           return;
         }
 
-        // 6. utxo_commitment must be non-zero (i.e. mark_paid was actually called).
-        const commitment = new Uint8Array(invoice.utxoCommitment as any);
-        const allZero = commitment.every((b) => b === 0);
+        // 6. utxo_commitment must be non-zero (i.e. the creator acknowledged a claim).
+        const rawCommitment = invoice.utxoCommitment;
+        const commitment = rawCommitment ? new Uint8Array(rawCommitment as any) : new Uint8Array();
+        const allZero = commitment.length === 0 || commitment.every((b) => b === 0);
         if (allZero) {
           setState({
             kind: "error",
             reason: "Invoice is marked paid but utxo_commitment is empty.",
           });
           return;
-        }
-
-        // 7. If the invoice is restricted to a specific payer, it must match.
-        if (invoice.restrictedPayer) {
-          const restricted = new PublicKey(invoice.restrictedPayer).toBase58();
-          if (restricted !== signed.receipt.payerPubkey) {
-            setState({
-              kind: "error",
-              reason: "Receipt payer does not match the invoice's restricted_payer.",
-            });
-            return;
-          }
         }
 
         setState({ kind: "ok", signed });
@@ -150,7 +139,8 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
                 Valid receipt.
               </h1>
               <p className="mt-4 text-[14.5px] text-ink/70 leading-relaxed">
-                This payment was confirmed on-chain. Amount verified. Not disclosed.
+                This receipt signature is valid and the invoice is marked paid on-chain.
+                Amount not disclosed.
               </p>
 
               <dl className="mt-10 border-t border-line divide-y divide-line">
@@ -173,7 +163,7 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
                   </dd>
                 </div>
                 <div className="py-4 grid grid-cols-[140px_1fr] gap-4">
-                  <dt className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim">Transaction</dt>
+                  <dt className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim">Payment intent</dt>
                   <dd className="text-[13.5px] font-mono text-ink break-all">
                     <a
                       href={explorerTxUrl(state.signed.receipt.markPaidTxSig)}
@@ -188,7 +178,7 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
                 <div className="py-4 grid grid-cols-[140px_1fr] gap-4">
                   <dt className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim">Amount</dt>
                   <dd className="text-[13.5px] text-ink italic">
-                    Verified on-chain · not disclosed
+                    Not disclosed by receipt verifier
                   </dd>
                 </div>
               </dl>
