@@ -12,7 +12,7 @@ import { VeilLogo } from "@/components/VeilLogo";
 
 type VerifyState =
   | { kind: "loading" }
-  | { kind: "ok"; signed: SignedReceipt }
+  | { kind: "ok"; signed: SignedReceipt; chainStatus: "paid" | "pending" }
   | { kind: "error"; reason: string };
 
 function explorerTxUrl(sig: string): string {
@@ -78,28 +78,44 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
           return;
         }
 
-        // 5. Status must be Paid.
-        if (!("paid" in (invoice.status as any))) {
-          setState({
-            kind: "error",
-            reason: "Invoice on-chain status is not Paid — receipt cannot be validated.",
-          });
+        // 5. Reject terminal-bad states — Cancelled means the invoice was
+        // pulled before payment, Expired means the pay window closed.
+        // Pending and Paid are both VALID receipt states under the
+        // recipient-confirmed model:
+        //   - Paid: the recipient has scanned, claimed, and acknowledged
+        //   - Pending: Bob's payment intent is on-chain (verifiable via
+        //     markPaidTxSig — a real Umbra UTXO creation tx), but the
+        //     recipient hasn't opened their dashboard to mark it yet.
+        // The receipt is cryptographically valid in both cases. The
+        // status indicator below tells the verifier which it is.
+        if ("cancelled" in (invoice.status as any)) {
+          setState({ kind: "error", reason: "Invoice was cancelled by its creator — this receipt cannot be redeemed." });
+          return;
+        }
+        if ("expired" in (invoice.status as any)) {
+          setState({ kind: "error", reason: "Invoice expired before payment — this receipt cannot be redeemed." });
           return;
         }
 
-        // 6. utxo_commitment must be non-zero (i.e. the creator acknowledged a claim).
-        const rawCommitment = invoice.utxoCommitment;
-        const commitment = rawCommitment ? new Uint8Array(rawCommitment as any) : new Uint8Array();
-        const allZero = commitment.length === 0 || commitment.every((b) => b === 0);
-        if (allZero) {
-          setState({
-            kind: "error",
-            reason: "Invoice is marked paid but utxo_commitment is empty.",
-          });
-          return;
+        const chainStatus: "paid" | "pending" = "paid" in (invoice.status as any) ? "paid" : "pending";
+
+        // For Paid invoices, also sanity-check utxo_commitment was set.
+        // For Pending we skip this — the commitment is set by the
+        // recipient's auto-claim, which hasn't run yet.
+        if (chainStatus === "paid") {
+          const rawCommitment = invoice.utxoCommitment;
+          const commitment = rawCommitment ? new Uint8Array(rawCommitment as any) : new Uint8Array();
+          const allZero = commitment.length === 0 || commitment.every((b) => b === 0);
+          if (allZero) {
+            setState({
+              kind: "error",
+              reason: "Invoice is marked paid but utxo_commitment is empty.",
+            });
+            return;
+          }
         }
 
-        setState({ kind: "ok", signed });
+        setState({ kind: "ok", signed, chainStatus });
       } catch (err: any) {
         setState({ kind: "error", reason: `Unexpected error: ${err.message ?? String(err)}` });
       }
@@ -138,9 +154,32 @@ export default function ReceiptPage({ params }: { params: { pda: string } }) {
               <h1 className="mt-4 font-sans font-medium text-ink text-[32px] md:text-[38px] leading-[1.05] tracking-[-0.025em]">
                 Valid receipt.
               </h1>
-              <p className="mt-4 text-[14.5px] text-ink/70 leading-relaxed">
-                This receipt signature is valid and the invoice is marked paid on-chain.
-                Amount not disclosed.
+
+              {/* Status badge — Paid (sage) when the recipient has confirmed,
+                  Pending (gold) when Bob's payment intent is on-chain but
+                  the recipient hasn't run their dashboard claim yet. */}
+              <div className="mt-5 inline-flex items-center gap-2.5">
+                {state.chainStatus === "paid" ? (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-sage" />
+                    <span className="font-mono text-[11px] tracking-[0.14em] uppercase text-sage">
+                      Confirmed by recipient
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="h-1.5 w-1.5 rounded-full bg-gold animate-slow-pulse" />
+                    <span className="font-mono text-[11px] tracking-[0.14em] uppercase text-gold">
+                      Awaiting recipient confirmation
+                    </span>
+                  </>
+                )}
+              </div>
+
+              <p className="mt-5 text-[14.5px] text-ink/70 leading-relaxed">
+                {state.chainStatus === "paid"
+                  ? "Signature is valid, the recipient has scanned and acknowledged the payment, and the invoice is marked Paid on-chain. Amount not disclosed."
+                  : "Signature is valid and the payment intent is recorded on-chain (see Payment intent below). The recipient's dashboard will pick it up and flip the invoice to Paid within ~30 seconds of next opening."}
               </p>
 
               <dl className="mt-10 border-t border-line divide-y divide-line">
