@@ -44,7 +44,7 @@ describe("invoice-registry", () => {
     expect(invoice.paidAt).to.be.null;
   });
 
-  it("marks an invoice as paid when the payer signs", async () => {
+  it("marks an invoice as paid when the creator signs", async () => {
     const creator = provider.wallet.publicKey;
     const nonce = randomBytes(8);
     const [pda] = invoicePda(creator, nonce);
@@ -58,15 +58,9 @@ describe("invoice-registry", () => {
       .accounts({ invoice: pda, creator, systemProgram: SystemProgram.programId })
       .rpc();
 
-    // Any signer can mark paid when payer is None
-    const randomPayer = Keypair.generate();
-    const airdropSig = await provider.connection.requestAirdrop(randomPayer.publicKey, 1e9);
-    await provider.connection.confirmTransaction(airdropSig);
-
     await program.methods
       .markPaid(utxoCommitment)
-      .accounts({ invoice: pda, payer: randomPayer.publicKey })
-      .signers([randomPayer])
+      .accounts({ invoice: pda, creator })
       .rpc();
 
     const invoice = await program.account.invoice.fetch(pda);
@@ -75,7 +69,7 @@ describe("invoice-registry", () => {
     expect(Array.from(invoice.utxoCommitment as Uint8Array)).to.deep.equal(utxoCommitment);
   });
 
-  it("rejects mark_paid when payer is restricted and signer does not match", async () => {
+  it("rejects mark_paid from non-creator even when payer is restricted", async () => {
     const creator = provider.wallet.publicKey;
     const nonce = randomBytes(8);
     const [pda] = invoicePda(creator, nonce);
@@ -101,12 +95,12 @@ describe("invoice-registry", () => {
     try {
       await program.methods
         .markPaid(Array.from(randomBytes(32)))
-        .accounts({ invoice: pda, payer: randomSigner.publicKey })
+        .accounts({ invoice: pda, creator: randomSigner.publicKey })
         .signers([randomSigner])
         .rpc();
       expect.fail("should have thrown");
     } catch (err: any) {
-      expect(err.toString()).to.match(/NotPayer/);
+      expect(err.toString()).to.match(/NotCreator|ConstraintHasOne/);
     }
   });
 

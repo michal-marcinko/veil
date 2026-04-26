@@ -64,13 +64,6 @@ pub mod invoice_registry {
     pub fn mark_paid(ctx: Context<MarkPaid>, utxo_commitment: [u8; 32]) -> Result<()> {
         let invoice = &mut ctx.accounts.invoice;
         require!(invoice.status == InvoiceStatus::Pending, InvoiceError::InvalidStatus);
-        if let Some(expected_payer) = invoice.payer {
-            require_keys_eq!(
-                ctx.accounts.payer.key(),
-                expected_payer,
-                InvoiceError::NotPayer
-            );
-        }
         invoice.status = InvoiceStatus::Paid;
         invoice.paid_at = Some(Clock::get()?.unix_timestamp);
         invoice.utxo_commitment = Some(utxo_commitment);
@@ -146,9 +139,12 @@ pub struct CreateInvoice<'info> {
 
 #[derive(Accounts)]
 pub struct MarkPaid<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        has_one = creator @ InvoiceError::NotCreator,
+    )]
     pub invoice: Account<'info, Invoice>,
-    pub payer: Signer<'info>,
+    pub creator: Signer<'info>,
 }
 
 #[derive(Accounts)]
