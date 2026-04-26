@@ -5,7 +5,8 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { DashboardList } from "@/components/DashboardList";
-import { fetchInvoicesByCreator } from "@/lib/anchor";
+import { fetchInvoicesByCreator, markPaidOnChain } from "@/lib/anchor";
+import { sha256 } from "@/lib/encryption";
 import {
   getOrCreateClient,
   isFullyRegistered,
@@ -14,6 +15,44 @@ import {
   getEncryptedBalance,
 } from "@/lib/umbra";
 import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
+import bs58 from "bs58";
+
+function isPendingInvoice(invoice: any): boolean {
+  return "pending" in (invoice.account.status as any);
+}
+
+function findStableSignature(value: unknown, seen = new Set<object>()): string | null {
+  if (typeof value === "string") {
+    try {
+      return bs58.decode(value).length === 64 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object") return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findStableSignature(item, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    const found = findStableSignature(item, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function deriveClaimCommitment(invoicePda: any, claimResult: unknown): Promise<Uint8Array> {
+  const sig = findStableSignature(claimResult);
+  if (sig) return sha256(bs58.decode(sig));
+  return sha256(invoicePda.toBuffer());
+}
 
 export default function DashboardPage() {
   const wallet = useWallet();
@@ -26,8 +65,11 @@ export default function DashboardPage() {
     if (!wallet.publicKey) return;
     setLoading(true);
     setError(null);
+
+    // Hoisted so the scan/claim block below can iterate pending invoices.
+    let all: Awaited<ReturnType<typeof fetchInvoicesByCreator>> = [];
     try {
-      const all = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
+      all = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
       setInvoices(all.map((a: any) => ({ pda: a.publicKey, account: a.account })));
     } catch (err: any) {
       // eslint-disable-next-line no-console
@@ -43,7 +85,18 @@ export default function DashboardPage() {
         try {
           const scan = await scanClaimableUtxos(client);
           if (scan.publicReceived.length > 0) {
-            await claimUtxos({ client, utxos: scan.publicReceived });
+            const claimResult = await claimUtxos({ client, utxos: scan.publicReceived });
+            for (const invoice of all.filter(isPendingInvoice)) {
+              try {
+                const commitment = await deriveClaimCommitment(invoice.publicKey, claimResult);
+                await markPaidOnChain(wallet as any, invoice.publicKey, commitment);
+              } catch (err: any) {
+                // eslint-disable-next-line no-console
+                console.error("[Veil dashboard] mark_paid failed:", err);
+              }
+            }
+            const updated = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
+            setInvoices(updated.map((a: any) => ({ pda: a.publicKey, account: a.account })));
           }
         } catch (err: any) {
           // eslint-disable-next-line no-console
