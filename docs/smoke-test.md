@@ -52,14 +52,14 @@ If `NEXT_PUBLIC_PAYMENT_MINT` is wSOL (per Day 1 fallback), Bob needs wrapped SO
 - [ ] If prompted, click "Register with Umbra". Approve in Phantom.
 - [ ] Expected: pay page loads with Alice's memo, amount, and a **Pay** button.
 - [ ] If a "Pay from shielded balance" toggle is visible (Feature C landed), leave it OFF for this first run (we want to exercise the public-deposit → UTXO flow).
-- [ ] Click **Pay**. Approve Phantom transactions (expect 2–3 approvals: deposit, UTXO create, mark-paid).
-- [ ] Expected: success state with tx signature links.
+- [ ] Click **Pay**. Approve Phantom transactions (expect payment approvals only; Bob should not approve a `mark_paid` transaction).
+- [ ] Expected: success state with a receipt URL. The receipt may not verify as paid until Alice claims and marks the invoice paid.
 
 ## 5. Alice's dashboard reflects the payment
 
 - [ ] Switch back to Alice's browser.
 - [ ] Navigate to `/dashboard`.
-- [ ] Wait up to 60s (auto-claim polls every 30s).
+- [ ] Wait up to 60s (auto-claim polls every 30s and calls `mark_paid` as Alice after a successful claim).
 - [ ] Expected: the invoice row flips to **Paid**. A green checkmark or "Paid" badge is visible.
 - [ ] Click the invoice row — the detail page shows `status=Paid`, `paid_at=<timestamp>`, `utxo_commitment=<bytes>`.
 
