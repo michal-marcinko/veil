@@ -230,7 +230,8 @@ export default function PayPage({ params }: { params: { id: string } }) {
               <div className="flex-1">
                 <div className="text-[14px] text-ink font-medium">Payment sent.</div>
                 <div className="text-[13px] text-muted mt-1 leading-relaxed">
-                  The recipient will claim it and mark the invoice paid from their dashboard.
+                  The recipient&apos;s dashboard will pick this up and mark the invoice
+                  paid within ~30 seconds — no action needed from them.
                 </div>
               </div>
             </div>

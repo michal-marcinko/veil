@@ -21,7 +21,11 @@ import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 export default function CreatePage() {
   const wallet = useWallet();
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<{ url: string } | null>(null);
+  const [result, setResult] = useState<{
+    url: string;
+    payerName: string;
+    formattedAmount: string;
+  } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [regOpen, setRegOpen] = useState(false);
@@ -117,7 +121,11 @@ export default function CreatePage() {
       });
 
       const url = `${window.location.origin}/pay/${pda.toBase58()}#${keyToBase58(key)}`;
-      setResult({ url });
+      setResult({
+        url,
+        payerName: values.payerDisplayName,
+        formattedAmount: formatTotalForDisplay(subtotal, PAYMENT_DECIMALS, PAYMENT_SYMBOL),
+      });
     } catch (err: any) {
       setError(err.message ?? String(err));
       setRegOpen(false);
@@ -148,13 +156,37 @@ export default function CreatePage() {
 
   if (result) {
     return (
-      <Frame heading="Invoice published">
+      <Frame heading="Invoice sent">
         <div className="max-w-2xl reveal">
-          <span className="eyebrow">Shareable link</span>
-          <div className="mt-3 border border-line bg-paper-3 rounded-[3px] p-5 mb-8 font-mono text-[13px] text-ink break-all">
-            {result.url}
+          {/* Headline summary — what was created, for whom */}
+          <div className="flex items-baseline gap-2 mb-3">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-sage shrink-0 translate-y-[1px]">
+              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-sage">
+              Published privately
+            </span>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
+            <span className="tnum">{result.formattedAmount}</span>
+            <span className="text-muted"> requested from </span>
+            <span>{result.payerName}</span>
+          </h2>
+          <p className="mt-5 text-[14px] leading-[1.55] text-ink/70 max-w-[520px]">
+            Send this link to your client. Only their wallet (or yours, via your dashboard) can
+            open it — the amount and details are encrypted, the chain only sees an anchor hash.
+          </p>
+
+          {/* Shareable link */}
+          <div className="mt-9">
+            <span className="eyebrow">Pay link</span>
+            <div className="mt-3 border border-line bg-paper-3 rounded-[3px] p-4 font-mono text-[12.5px] text-ink break-all">
+              {result.url}
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="mt-7 flex flex-wrap items-center gap-3">
             <button onClick={handleCopy} className="btn-primary">
               {copied ? (
                 <span>Copied ✓</span>
@@ -174,28 +206,9 @@ export default function CreatePage() {
               }}
               className="btn-quiet"
             >
-              + Another invoice
+              + Send another
             </button>
           </div>
-
-          <ol className="mt-16 space-y-3.5 font-mono text-[11.5px] tracking-[0.1em] uppercase text-dim leading-relaxed">
-            <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0 tnum">01</span>
-              <span>Metadata encrypted client-side (AES-256-GCM).</span>
-            </li>
-            <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0 tnum">02</span>
-              <span>Ciphertext anchored to Arweave · hash on Solana.</span>
-            </li>
-            <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0 tnum">03</span>
-              <span>Decryption key in URL fragment — never sent to a server.</span>
-            </li>
-            <li className="flex gap-6">
-              <span className="text-gold w-6 shrink-0 tnum">04</span>
-              <span>Payment settles via Umbra UTXO · amount hidden onchain.</span>
-            </li>
-          </ol>
         </div>
       </Frame>
     );
@@ -212,6 +225,24 @@ export default function CreatePage() {
       <RegistrationModal open={regOpen} steps={regSteps} />
     </Frame>
   );
+}
+
+/**
+ * Format a base-units bigint as a human "$X,XXX.XX SYMBOL" string for the
+ * "Invoice sent" success summary. Trims trailing fractional zeros down to
+ * a 2-digit minimum so $4,200.00 stays $4,200.00 but $4,200.5000 reads
+ * $4,200.50, matching the on-screen InvoiceView formatting.
+ */
+function formatTotalForDisplay(units: bigint, decimals: number, symbol: string): string {
+  const divisor = 10n ** BigInt(decimals);
+  const whole = units / divisor;
+  const fraction = units % divisor;
+  const display = Math.min(4, decimals);
+  const padded = fraction.toString().padStart(decimals, "0").slice(0, display);
+  const trimmed = padded.replace(/0+$/, "").padEnd(2, "0");
+  const symbolPrefix = symbol === "USDC" ? "$" : "";
+  const symbolSuffix = symbol === "USDC" ? " USDC" : ` ${symbol}`;
+  return `${symbolPrefix}${whole.toLocaleString("en-US")}.${trimmed}${symbolSuffix}`;
 }
 
 function parseAmountToBaseUnits(value: string, decimals: number): bigint | null {
