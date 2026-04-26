@@ -9,6 +9,7 @@ import { InvoiceView } from "@/components/InvoiceView";
 import { decryptJson, sha256, deriveKeyFromWalletSignature } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice } from "@/lib/anchor";
+import { downloadInvoicePdf } from "@/lib/pdfDownload";
 import type { InvoiceMetadata } from "@/lib/types";
 
 export default function InvoiceCreatorPage({ params }: { params: { id: string } }) {
@@ -113,7 +114,17 @@ export default function InvoiceCreatorPage({ params }: { params: { id: string } 
     <Shell>
       <div className="max-w-2xl mx-auto reveal">
         <InvoiceView metadata={metadata} />
-        <div className="mt-6">
+        <div className="mt-8 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => downloadInvoicePdf(metadata, params.id)}
+            className="btn-ghost"
+          >
+            Download PDF
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+              <path d="M5.5 1v7M2.5 5.5l3 3 3-3M1.5 10h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
           <a href="/dashboard" className="btn-quiet">
             ← Back to dashboard
           </a>
