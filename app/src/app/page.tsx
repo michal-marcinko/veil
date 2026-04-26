@@ -26,7 +26,7 @@ export default function LandingPage() {
   return (
     <main className="relative min-h-screen">
       {/* Nav */}
-      <nav className="relative z-20 max-w-[1200px] mx-auto px-6 md:px-8 pt-6 flex items-center justify-between">
+      <nav className="relative z-20 max-w-[1400px] mx-auto px-6 md:px-8 pt-6 flex items-center justify-between">
         <VeilLogo />
         <div className="flex items-center gap-1 md:gap-2">
           <a
@@ -56,19 +56,19 @@ export default function LandingPage() {
       {/* Hero — 12-col grid: text on left, CipherAmount panel inline on right.
           Decorative logo float sits absolute in the section's top-right,
           hidden below md breakpoint so mobile stays uncluttered. */}
-      <section className="relative z-10 max-w-[1200px] mx-auto px-6 md:px-8 pt-20 md:pt-24 pb-24 md:pb-28">
+      <section className="relative z-10 max-w-[1400px] mx-auto px-6 md:px-8 pt-20 md:pt-24 pb-24 md:pb-28">
         {/* Decorative logo — atmosphere, not interactive */}
         <img
           src="/veil-icon.png"
           alt=""
           aria-hidden
-          className="hidden lg:block absolute top-8 right-6 md:right-8 w-[280px] h-[280px] object-contain opacity-50 mix-blend-multiply pointer-events-none select-none -rotate-[4deg] origin-top-right"
+          className="hidden lg:block absolute top-6 right-6 md:right-8 w-[320px] h-[320px] object-contain opacity-45 mix-blend-multiply pointer-events-none select-none -rotate-[4deg] origin-top-right"
           draggable={false}
         />
 
         <div className="grid grid-cols-12 gap-8 lg:gap-12 items-center">
           {/* Left column — headline, body, CTAs */}
-          <div className="col-span-12 lg:col-span-5 reveal">
+          <div className="col-span-12 lg:col-span-6 reveal">
             <div className="flex items-center gap-3 mb-8">
               <span className="eyebrow">Solana · USDC</span>
               <span className="h-px w-8 bg-line" />
@@ -102,7 +102,7 @@ export default function LandingPage() {
 
           {/* Right column — the brand demo moment, inline with the headline */}
           <div
-            className="col-span-12 lg:col-span-7 reveal"
+            className="col-span-12 lg:col-span-6 reveal"
             style={{ animationDelay: "120ms" }}
           >
             <div className="flex items-baseline justify-between mb-3">
@@ -115,7 +115,7 @@ export default function LandingPage() {
 
       {/* How it works */}
       <section className="relative z-10 border-t border-line bg-paper-2/40">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-20 md:py-24">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-20 md:py-24">
           <div className="grid grid-cols-12 gap-6 md:gap-10">
             <div className="col-span-12 md:col-span-4">
               <span className="eyebrow">How it works</span>
@@ -152,7 +152,7 @@ export default function LandingPage() {
 
       {/* Trust row — single quiet band */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-14">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-14">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-10 md:gap-14">
             <Fact label="Settles on" value="Solana · USDC" />
             <Fact label="Encryption" value="X25519 · AES-256-GCM" />
@@ -167,7 +167,7 @@ export default function LandingPage() {
           the claim in real research (PIVY, 2026). One small chip CTA so the
           quote doesn't compete with the hero's primary CTAs. */}
       <section className="relative z-10 border-t border-line">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-24 md:py-32">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-24 md:py-32">
           <figure className="max-w-[820px]">
             <span className="eyebrow">Why it matters</span>
             <blockquote className="mt-6 font-display italic font-medium text-ink text-[32px] sm:text-[40px] md:text-[48px] leading-[1.1] tracking-[-0.02em]">
@@ -202,7 +202,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="relative z-10 border-t border-line">
-        <div className="max-w-[1200px] mx-auto px-6 md:px-8 py-8 flex flex-wrap items-baseline justify-between gap-4">
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-8 flex flex-wrap items-baseline justify-between gap-4">
           <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[12.5px] text-muted">
             <span className="font-semibold text-ink">Veil</span>
             <span className="text-dim">·</span>
