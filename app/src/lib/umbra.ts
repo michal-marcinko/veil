@@ -298,6 +298,30 @@ export async function ensureRegistered(
   client: UmbraClient,
   onProgress?: (step: "init" | "x25519" | "commitment", status: "pre" | "post") => void,
 ): Promise<void> {
+  // CRITICAL: short-circuit when already registered.
+  //
+  // SDK note: `getUserRegistrationFunction` is NOT idempotent — calling
+  // it on a fully-registered account ROTATES the on-chain X25519 token
+  // encryption key to a fresh derivation. This breaks two things:
+  //
+  //   1. Encrypt-side asymmetry. The pay function (sdk index.js:9077)
+  //      uses Bob's CURRENTLY-DERIVED X25519 private key for ECDH, but
+  //      the receiver's decrypt (sdk index.js:1067) reads Bob's
+  //      REGISTERED X25519 public key from on-chain via the indexer's
+  //      depositorX25519PublicKey field. If Bob's key was rotated
+  //      between encrypt time and the next page nav (which would
+  //      re-rotate it again here), the registered pubkey on-chain no
+  //      longer corresponds to the private key Bob used in ECDH —
+  //      decryption fails with "invalid ghash tag".
+  //
+  //   2. Old UTXOs become unclaimable. Any UTXO encrypted under a key
+  //      pre-rotation is silently lost.
+  //
+  // Re-registration is a deliberate operation, exposed via the explicit
+  // "Repair Umbra key" button (repairUmbraReceiverKey) which uses the
+  // same registration function but with user consent.
+  if (await isFullyRegistered(client)) return;
+
   const zkProver = getUserRegistrationProver({ assetProvider: proxiedAssetProvider() });
   const register = getUserRegistrationFunction({ client }, { zkProver } as any);
   await register({
