@@ -1,11 +1,15 @@
 "use client";
 
 import {
+  getUserAccountX25519KeypairDeriver,
   getUmbraClient,
+  getUserEncryptionKeyRotatorFunction,
   getUserAccountQuerierFunction,
   getUserRegistrationFunction,
   getWebsocketTransactionForwarder,
 } from "@umbra-privacy/sdk";
+import { findEncryptedUserAccountPda } from "@umbra-privacy/sdk/pda";
+import { decodeEncryptedUserAccount } from "@umbra-privacy/umbra-codama";
 import {
   getUserRegistrationProver,
   getCdnZkAssetProvider,
@@ -16,6 +20,7 @@ import {
   getTransactionDecoder,
   getSignatureFromTransaction,
 } from "@solana/transactions";
+import bs58 from "bs58";
 import { NETWORK, RPC_URL, RPC_WSS_URL, UMBRA_INDEXER_API } from "./constants";
 
 type UmbraClient = Awaited<ReturnType<typeof getUmbraClient>>;
@@ -25,6 +30,25 @@ type UmbraClient = Awaited<ReturnType<typeof getUmbraClient>>;
 // (`/umbra-cdn/*` → CloudFront) configured in next.config.mjs.
 function proxiedAssetProvider() {
   return getCdnZkAssetProvider({ baseUrl: "/umbra-cdn" });
+}
+
+function isVeilDebugEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_VEIL_DEBUG === "1";
+}
+
+function debugLog(message: string, details?: unknown) {
+  if (!isVeilDebugEnabled()) return;
+  // eslint-disable-next-line no-console
+  console.log(message, details);
+}
+
+function bytesMatch(a: Uint8Array | null, b: Uint8Array | null): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((byte, i) => byte === b[i]);
+}
+
+function bytesToBase58(bytes: Uint8Array | null): string | null {
+  return bytes ? bs58.encode(bytes) : null;
 }
 
 let cachedClient: UmbraClient | null = null;
@@ -204,12 +228,73 @@ export async function isFullyRegistered(client: UmbraClient): Promise<boolean> {
   );
 }
 
+export interface UmbraReceiverDiagnostics {
+  signerAddress: string;
+  userAccountPda: string | null;
+  accountState: "exists" | "non_existent";
+  isUserAccountX25519KeyRegistered: boolean;
+  isUserCommitmentRegistered: boolean;
+  derivedTokenX25519PublicKey: string | null;
+  registeredTokenX25519PublicKey: string | null;
+  tokenX25519Matches: boolean | null;
+}
+
+export async function diagnoseUmbraReceiver(client: UmbraClient): Promise<UmbraReceiverDiagnostics> {
+  const signerAddress = (client as any)?.signer?.address as string;
+  const query = getUserAccountQuerierFunction({ client });
+  const queryResult = await query(signerAddress as any);
+
+  let userAccountPda: string | null = null;
+  let registeredTokenKey: Uint8Array | null = null;
+
+  if (queryResult.state === "exists") {
+    const pda = await findEncryptedUserAccountPda(
+      signerAddress as any,
+      (client as any).networkConfig.programId,
+    );
+    userAccountPda = String(pda);
+    const accountMap = await (client as any).accountInfoProvider([pda], { commitment: "confirmed" });
+    const maybeAccount = accountMap.get(pda);
+    if (maybeAccount?.exists) {
+      const decoded: any = decodeEncryptedUserAccount(maybeAccount as any);
+      registeredTokenKey = new Uint8Array(
+        Array.from(decoded.data.x25519PublicKeyForTokenEncryption.first),
+      );
+    }
+  }
+
+  let derivedTokenKey: Uint8Array | null = null;
+  if (queryResult.state === "exists") {
+    const derive = getUserAccountX25519KeypairDeriver({ client } as any);
+    const keypair = await derive();
+    derivedTokenKey = new Uint8Array(keypair.x25519Keypair.publicKey);
+  }
+
+  return {
+    signerAddress,
+    userAccountPda,
+    accountState: queryResult.state,
+    isUserAccountX25519KeyRegistered:
+      queryResult.state === "exists" && queryResult.data.isUserAccountX25519KeyRegistered,
+    isUserCommitmentRegistered:
+      queryResult.state === "exists" && queryResult.data.isUserCommitmentRegistered,
+    derivedTokenX25519PublicKey: bytesToBase58(derivedTokenKey),
+    registeredTokenX25519PublicKey: bytesToBase58(registeredTokenKey),
+    tokenX25519Matches:
+      queryResult.state === "exists" ? bytesMatch(derivedTokenKey, registeredTokenKey) : null,
+  };
+}
+
+export async function repairUmbraReceiverKey(client: UmbraClient): Promise<string[]> {
+  const register = getUserRegistrationFunction({ client });
+  const rotate = getUserEncryptionKeyRotatorFunction(register);
+  return (await rotate()) as unknown as string[];
+}
+
 export async function ensureRegistered(
   client: UmbraClient,
   onProgress?: (step: "init" | "x25519" | "commitment", status: "pre" | "post") => void,
 ): Promise<void> {
-  if (await isFullyRegistered(client)) return;
-
   const zkProver = getUserRegistrationProver({ assetProvider: proxiedAssetProvider() });
   const register = getUserRegistrationFunction({ client }, { zkProver } as any);
   await register({
@@ -275,8 +360,7 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
     { zkProver } as any,
   );
 
-  // eslint-disable-next-line no-console
-  console.log("[Veil payInvoice] creating UTXO destined for:", {
+  debugLog("[Veil payInvoice] creating UTXO destined for:", {
     destinationAddress: args.recipientAddress,
     payerSignerAddress: (args.client as any)?.signer?.address,
     mint: args.mint,
@@ -367,18 +451,79 @@ import { UMBRA_RELAYER_API } from "./constants";
  * Per-invoice "did Bob pay?" is answered by reading the Anchor PDA status,
  * not by UTXO correlation.
  */
+/**
+ * DIAGNOSTIC: fetch the indexer page containing Bob's most recent UTXO
+ * and dump the raw runtime shape. This tells us:
+ *  - whether the UTXO is actually in the indexer
+ *  - what `typeof utxo.treeIndex` is at runtime (bigint vs number — the
+ *    SDK's strict-inequality filter on line 1208 silently drops every
+ *    UTXO if the type doesn't match BigInt(0) we pass in)
+ *  - whether decryption attempts even reach Alice's UTXO
+ *
+ * Only logs when NEXT_PUBLIC_VEIL_DEBUG=1.
+ */
+export async function dumpRecentIndexerUtxos(client: UmbraClient, lookbackCount = 10) {
+  if (!isVeilDebugEnabled()) return;
+  try {
+    const fetcher = (client as any).fetchUtxoData;
+    if (!fetcher) {
+      // eslint-disable-next-line no-console
+      console.warn("[Veil dump] client has no fetchUtxoData");
+      return;
+    }
+    // First fetch with cursor 0 to learn totalCount, then jump near the end.
+    const peek = await fetcher(BigInt(0), BigInt(2 ** 20 - 1), 1);
+    const total = (peek as any).totalCount;
+    const totalNum = typeof total === "bigint" ? total : BigInt(total ?? 0);
+    const startCursor = totalNum > BigInt(lookbackCount) ? totalNum - BigInt(lookbackCount) : BigInt(0);
+    const tail = await fetcher(startCursor, BigInt(2 ** 20 - 1), lookbackCount + 5);
+    // eslint-disable-next-line no-console
+    console.log("[Veil dump] indexer tail (last items):", {
+      totalCount: total,
+      startCursor: startCursor.toString(),
+      itemsReturned: (tail as any).items?.size ?? (tail as any).items?.length,
+    });
+    const items = (tail as any).items;
+    const entries = items instanceof Map ? Array.from(items.entries()) : Object.entries(items ?? {});
+    for (const [key, utxo] of entries.slice(-Math.min(lookbackCount, entries.length))) {
+      // eslint-disable-next-line no-console
+      console.log("[Veil dump] utxo", String(key), {
+        treeIndex: (utxo as any).treeIndex,
+        treeIndexType: typeof (utxo as any).treeIndex,
+        insertionIndex: (utxo as any).insertionIndex,
+        insertionIndexType: typeof (utxo as any).insertionIndex,
+        absoluteIndex: (utxo as any).absoluteIndex,
+        depositorX25519PublicKeyLen: (utxo as any).depositorX25519PublicKey?.length,
+        aesEncryptedDataLen: (utxo as any).aesEncryptedData?.length,
+      });
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[Veil dump] failed:", err);
+  }
+}
+
 export async function scanClaimableUtxos(client: UmbraClient) {
-  // eslint-disable-next-line no-console
-  console.log("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
+  await dumpRecentIndexerUtxos(client, 5);
+  debugLog("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
+  if (isVeilDebugEnabled() && (client as any).fetchUtxoData) {
+    const raw = await (client as any).fetchUtxoData(BigInt(0), BigInt(1_000_000), BigInt(25));
+    debugLog("[Veil scanClaimableUtxos] raw indexer window:", {
+      items: raw.items?.size ?? 0,
+      totalCount: raw.totalCount,
+      hasMore: raw.hasMore,
+      nextCursor: raw.nextCursor?.toString?.() ?? raw.nextCursor,
+    });
+  }
   const scan = getClaimableUtxoScannerFunction({ client });
   // treeIndex 0, startInsertionIndex 0, endInsertionIndex 1_000_000.
   // The SDK's U32 type is a branded bigint (per
   // node_modules/@umbra-privacy/sdk/dist/types-*.d.ts), so passing JS
   // numbers triggers "Cannot mix BigInt and other types" inside the SDK.
   //
-  // The third arg (endInsertionIndex) is OPTIONAL but appears to default
-  // to startInsertionIndex when omitted, giving an empty range scan that
-  // returns 0 UTXOs. Pass an explicit upper bound — 1M leaves covers any
+  // The third arg (endInsertionIndex) is optional in the SDK; keeping it
+  // explicit makes the scan window visible in our own diagnostics.
+  // Pass an explicit upper bound; 1M leaves covers any
   // realistic devnet tree size.
   //
   // The SDK splits results into 4 buckets:
@@ -474,7 +619,6 @@ export async function getEncryptedBalance(
 // Task 18: Compliance grant issuance
 // ---------------------------------------------------------------------------
 
-import bs58 from "bs58";
 import { getComplianceGrantIssuerFunction } from "@umbra-privacy/sdk";
 
 export interface ComplianceGrantArgs {
