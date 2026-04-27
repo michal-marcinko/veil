@@ -2,12 +2,15 @@
 
 import {
   getUserAccountX25519KeypairDeriver,
+  getAesDecryptor,
   getUmbraClient,
   getUserEncryptionKeyRotatorFunction,
   getUserAccountQuerierFunction,
   getUserRegistrationFunction,
   getWebsocketTransactionForwarder,
 } from "@umbra-privacy/sdk";
+import { x25519 } from "@noble/curves/ed25519";
+import { keccak_256 } from "@noble/hashes/sha3";
 import { findEncryptedUserAccountPda } from "@umbra-privacy/sdk/pda";
 import { decodeEncryptedUserAccount } from "@umbra-privacy/umbra-codama";
 import {
@@ -503,8 +506,144 @@ export async function dumpRecentIndexerUtxos(client: UmbraClient, lookbackCount 
   }
 }
 
+// Mirrors SDK's AES domain separator constants (line ~1039 of index.js)
+const AES_DOMAIN_SEPARATORS = {
+  EPHEMERAL: keccak_256(
+    new TextEncoder().encode("UmbraPrivacy / CreateSelfClaimableUtxoFromEncryptedBalance"),
+  ).slice(0, 12),
+  RECEIVER: keccak_256(
+    new TextEncoder().encode("UmbraPrivacy / CreateReceiverClaimableUtxoFromEncryptedBalance"),
+  ).slice(0, 12),
+  PUBLIC_EPHEMERAL: keccak_256(
+    new TextEncoder().encode("UmbraPrivacy / CreateSelfClaimableUtxoFromPublicBalance"),
+  ).slice(0, 12),
+  PUBLIC_RECEIVER: keccak_256(
+    new TextEncoder().encode("UmbraPrivacy / CreateReceiverClaimableUtxoFromPublicBalance"),
+  ).slice(0, 12),
+} as const;
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((byte, i) => byte === b[i]);
+}
+
+function bytesPreview(b: Uint8Array | null | undefined, n = 8): string {
+  if (!b) return "(null)";
+  return Array.from(b.slice(0, n))
+    .map((x) => x.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * DIAGNOSTIC: replicate the SDK's tryDecryptUtxo on a single UTXO with
+ * verbose per-step logging. Tells us exactly which stage of decryption
+ * silently fails.
+ */
+export async function manualDecryptUtxo(client: UmbraClient, utxo: any) {
+  if (!isVeilDebugEnabled()) return;
+  const idx = utxo?.insertionIndex?.toString?.() ?? "?";
+  try {
+    // Step 1: derive Alice's X25519 keypair
+    const derive = getUserAccountX25519KeypairDeriver({ client } as any);
+    const keypair: any = await derive();
+    const alicePriv = new Uint8Array(keypair.x25519Keypair.privateKey);
+    const alicePub = new Uint8Array(keypair.x25519Keypair.publicKey);
+    // eslint-disable-next-line no-console
+    console.log(`[manual decrypt #${idx}] alice priv:${bytesPreview(alicePriv)} pub:${bytesPreview(alicePub)}`);
+
+    // Step 2: get Bob's depositor pubkey from UTXO
+    const bobPub = utxo.depositorX25519PublicKey
+      ? new Uint8Array(utxo.depositorX25519PublicKey)
+      : null;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[manual decrypt #${idx}] bob depositor pub len:${bobPub?.length} bytes:${bytesPreview(bobPub)}`,
+    );
+    if (!bobPub || bobPub.length !== 32) {
+      // eslint-disable-next-line no-console
+      console.error(`[manual decrypt #${idx}] ❌ bob pubkey wrong length`);
+      return;
+    }
+
+    // Step 3: ECDH
+    let sharedSecret: Uint8Array;
+    try {
+      sharedSecret = x25519.getSharedSecret(alicePriv, bobPub);
+      // eslint-disable-next-line no-console
+      console.log(`[manual decrypt #${idx}] ✓ ECDH ok, shared:${bytesPreview(sharedSecret)}`);
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error(`[manual decrypt #${idx}] ❌ ECDH failed:`, err?.message ?? err);
+      return;
+    }
+
+    // Step 4: derive AES key
+    const aesKey = keccak_256(sharedSecret).slice(0, 32);
+    // eslint-disable-next-line no-console
+    console.log(`[manual decrypt #${idx}] aes key:${bytesPreview(aesKey)}`);
+
+    // Step 5: AES decrypt
+    const aesDecryptor = getAesDecryptor();
+    let plaintext: Uint8Array;
+    try {
+      plaintext = await aesDecryptor(aesKey as any, utxo.aesEncryptedData);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[manual decrypt #${idx}] ✓ AES decrypt ok, plaintext len:${plaintext.length} first16:${bytesPreview(plaintext, 16)}`,
+      );
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[manual decrypt #${idx}] ❌ AES decrypt FAILED — wrong key. ciphertext len:${utxo.aesEncryptedData?.length}`,
+        err?.message ?? err,
+      );
+      return;
+    }
+
+    // Step 6: domain separator check
+    const sep = plaintext.slice(56, 68);
+    const matches = {
+      EPHEMERAL: bytesEqual(sep, AES_DOMAIN_SEPARATORS.EPHEMERAL),
+      RECEIVER: bytesEqual(sep, AES_DOMAIN_SEPARATORS.RECEIVER),
+      PUBLIC_EPHEMERAL: bytesEqual(sep, AES_DOMAIN_SEPARATORS.PUBLIC_EPHEMERAL),
+      PUBLIC_RECEIVER: bytesEqual(sep, AES_DOMAIN_SEPARATORS.PUBLIC_RECEIVER),
+    };
+    const matched = Object.entries(matches).find(([, v]) => v)?.[0] ?? null;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[manual decrypt #${idx}] domain separator:${bytesPreview(sep, 12)} matched:${matched ?? "❌ NONE"}`,
+    );
+  } catch (err: any) {
+    // eslint-disable-next-line no-console
+    console.error(`[manual decrypt #${idx}] outer fail:`, err);
+  }
+}
+
 export async function scanClaimableUtxos(client: UmbraClient) {
   await dumpRecentIndexerUtxos(client, 5);
+
+  // Manually attempt decrypt of last 3 UTXOs to find the silent failure stage
+  if (isVeilDebugEnabled()) {
+    try {
+      const fetcher = (client as any).fetchUtxoData;
+      if (fetcher) {
+        const peek = await fetcher(BigInt(0), BigInt(2 ** 20 - 1), 1);
+        const total = (peek as any).totalCount;
+        const totalNum = typeof total === "bigint" ? total : BigInt(total ?? 0);
+        const start = totalNum > 3n ? totalNum - 3n : BigInt(0);
+        const tail = await fetcher(start, BigInt(2 ** 20 - 1), 5);
+        const items = (tail as any).items;
+        const entries = items instanceof Map ? Array.from(items.values()) : Object.values(items ?? {});
+        for (const utxo of entries) {
+          await manualDecryptUtxo(client, utxo);
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[Veil scan-decrypt-trace] failed:", err);
+    }
+  }
+
   debugLog("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
   if (isVeilDebugEnabled() && (client as any).fetchUtxoData) {
     const raw = await (client as any).fetchUtxoData(BigInt(0), BigInt(1_000_000), BigInt(25));
