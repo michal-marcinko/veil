@@ -27,6 +27,12 @@ import {
 import bs58 from "bs58";
 import { NETWORK, RPC_URL, RPC_WSS_URL, UMBRA_INDEXER_API } from "./constants";
 
+// VeilPay CPI single-popup path. When this flag is "false", payInvoice
+// reverts to the SDK's native two-tx orchestration. Default is enabled
+// (the env-var check inside payInvoiceCpi will cleanly fall back if
+// VEIL_PAY_PROGRAM_ID isn't set, so it's safe to leave on by default).
+const USE_VEIL_PAY_CPI = process.env.NEXT_PUBLIC_USE_VEIL_PAY_CPI !== "false";
+
 type UmbraClient = Awaited<ReturnType<typeof getUmbraClient>>;
 
 // Umbra's default CDN (CloudFront) serves no CORS headers. Route all
@@ -72,6 +78,20 @@ let cachedSignerAddress: string | null = null;
 // Fix: return the fully-decoded transaction (Phantom's modified
 // messageBytes + its signatures) as-is. Preserves any extra props from the
 // original for SDK compatibility.
+// Module-scoped popup counter, reset by `__veilResetPopupCounter()`. The
+// SDK reaches Phantom via Wallet Standard inside this function (NOT via
+// the React wallet adapter's signTransaction shim), so this is the only
+// place we can reliably count popups for diagnostics.
+let __veilPopupCount = 0;
+let __veilPopupSeqStart = 0;
+export function __veilResetPopupCounter(): void {
+  __veilPopupCount = 0;
+  __veilPopupSeqStart = Date.now();
+}
+export function __veilPopupCountSnapshot(): { count: number; sinceMs: number } {
+  return { count: __veilPopupCount, sinceMs: Date.now() - __veilPopupSeqStart };
+}
+
 function createFixedWalletStandardSigner(wallet: any, account: any) {
   const feats = wallet.features as any;
   const signTx = feats["solana:signTransaction"];
@@ -82,11 +102,43 @@ function createFixedWalletStandardSigner(wallet: any, account: any) {
   const encoder = getTransactionEncoder();
   const decoder = getTransactionDecoder();
 
+  // Diagnostic wrap around the Wallet Standard signing call. Every
+  // invocation here corresponds to ONE Phantom popup. Logs are gated
+  // behind NEXT_PUBLIC_VEIL_DEBUG so they don't ship to prod users.
+  const debug = typeof process !== "undefined" && process.env.NEXT_PUBLIC_VEIL_DEBUG === "1";
+  async function instrumentedSign(label: string, txCount: number, fn: () => Promise<any>) {
+    const n = ++__veilPopupCount;
+    const t = Date.now();
+    if (debug) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[Veil popup #${n}] ▶ OPENING — ${label}, ${txCount} tx${txCount === 1 ? "" : "s"} (wallet=${wallet.name})`,
+      );
+    }
+    try {
+      const result = await fn();
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.log(`[Veil popup #${n}] ✓ signed in ${Date.now() - t}ms`);
+      }
+      return result;
+    } catch (e) {
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.warn(`[Veil popup #${n}] ✗ rejected/failed in ${Date.now() - t}ms`, e);
+      }
+      throw e;
+    }
+  }
+
   return {
     address: account.address,
     async signTransaction(transaction: any) {
       const wireBytes = encoder.encode(transaction);
-      const [output] = await signTx.signTransaction({ account, transaction: wireBytes });
+      const outputs = await instrumentedSign("signTransaction", 1, () =>
+        signTx.signTransaction({ account, transaction: wireBytes }),
+      );
+      const [output] = outputs;
       const decoded: any = decoder.decode(output.signedTransaction);
       return {
         ...transaction,
@@ -99,7 +151,11 @@ function createFixedWalletStandardSigner(wallet: any, account: any) {
         account,
         transaction: encoder.encode(tx),
       }));
-      const outputs = await signTx.signTransaction(...inputs);
+      const outputs = await instrumentedSign(
+        "signTransactions (batched)",
+        transactions.length,
+        () => signTx.signTransaction(...inputs),
+      );
       return transactions.map((tx, i) => {
         const decoded: any = decoder.decode(outputs[i].signedTransaction);
         return {
@@ -110,7 +166,10 @@ function createFixedWalletStandardSigner(wallet: any, account: any) {
       });
     },
     async signMessage(message: Uint8Array) {
-      const [output] = await signMsg.signMessage({ account, message });
+      const outputs = await instrumentedSign("signMessage", 1, () =>
+        signMsg.signMessage({ account, message }),
+      );
+      const [output] = outputs;
       return { message, signature: output.signature, signer: account.address };
     },
   };
@@ -560,6 +619,37 @@ export interface PayInvoiceResult {
  * established off-chain when the recipient claims and acknowledges receipt.
  */
 export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
+  // Single-popup CPI path. Falls through to the SDK orchestration below if
+  // the VeilPay program ID isn't configured (VeilPayNotConfiguredError) or
+  // if the feature flag is explicitly off.
+  if (USE_VEIL_PAY_CPI) {
+    try {
+      const { payInvoiceCpi, VeilPayNotConfiguredError } = await import(
+        "./payInvoiceCpi"
+      );
+      try {
+        return await payInvoiceCpi(args);
+      } catch (err) {
+        if (err instanceof VeilPayNotConfiguredError) {
+          debugLog(
+            "[payInvoice] VEIL_PAY_PROGRAM_ID not set, using SDK fallback",
+          );
+        } else {
+          throw err;
+        }
+      }
+    } catch (importErr) {
+      // Bare import failure (e.g. constructed under SSR without env). Treat
+      // as unconfigured and fall through.
+      debugLog(
+        "[payInvoice] payInvoiceCpi import failed, using SDK fallback",
+        importErr,
+      );
+    }
+  }
+
+  // SDK orchestration fallback (legacy two-popup path). Kept verbatim so
+  // disabling the feature flag returns to the prior behavior bit-for-bit.
   const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver({
     assetProvider: proxiedAssetProvider(),
   });
@@ -620,7 +710,24 @@ export async function payInvoiceFromShielded(args: PayInvoiceArgs): Promise<PayI
   });
   const create = getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction(
     { client: args.client },
-    { zkProver } as any,
+    {
+      zkProver,
+      // Disable the rent-claim follow-up tx that fires AFTER MPC
+      // finalization. By default the SDK reclaims ~5000 lamports of rent
+      // from the computation account by posting a dedicated "claim rent"
+      // tx — and that tx requires its own user signature, surfacing as
+      // a third Phantom popup at the end of the pay flow.
+      //
+      // The check on the SDK side is `awaitCallback.reclaimComputationRent
+      // !== false` (sdk index.cjs:5847), so passing `false` here makes
+      // the SDK skip building/signing/submitting that final tx entirely.
+      //
+      // Cost: ~5000 lamports of unrecovered rent per payment (≈ $0.00 on
+      // devnet, fractions of a cent on mainnet). Worth it to drop a
+      // popup. If we ever need the rent back we can re-enable this and
+      // the third popup comes back.
+      arcium: { awaitComputationFinalization: { reclaimComputationRent: false } },
+    } as any,
   );
 
   const result = await create({
