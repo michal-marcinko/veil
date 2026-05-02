@@ -10,71 +10,118 @@ declare_id!("E2G6dN7yY8VQ2dFRgkvqskdAnPhJXkdorYP6BhKvfa8m");
 pub const UMBRA_PROGRAM_ID: Pubkey = pubkey!("DSuKkyqGVGgo4QtPABfxKJKygUDACbUhirnuv63mEpAJ");
 
 // 8-byte Anchor discriminator for CreatePublicStealthPoolDepositInputBuffer.
-// Source: @umbra-privacy/umbra-codama/dist/index.cjs line 24413
-//   var CREATE_PUBLIC_STEALTH_POOL_DEPOSIT_INPUT_BUFFER_DISCRIMINATOR =
-//       new Uint8Array([139, 135, 169, 216, 228, 15, 104, 98]);
+// Source: @umbra-privacy/umbra-codama/dist/index.cjs (CREATE_PUBLIC_STEALTH_POOL_DEPOSIT_INPUT_BUFFER_DISCRIMINATOR).
 // Independently verified via sha256("global:create_public_stealth_pool_deposit_input_buffer")[0..8].
 pub const CREATE_BUFFER_DISCRIMINATOR: [u8; 8] = [139, 135, 169, 216, 228, 15, 104, 98];
+
+// 8-byte Anchor discriminator for DepositIntoStealthPoolFromPublicBalance.
+// Source: @umbra-privacy/umbra-codama/dist/index.cjs line 31385:
+//   var DEPOSIT_INTO_STEALTH_POOL_FROM_PUBLIC_BALANCE_DISCRIMINATOR =
+//       new Uint8Array([232, 133, 25, 16, 203, 167, 3, 3]);
+// Independently verified via sha256("global:deposit_into_stealth_pool_from_public_balance")[0..8].
+pub const DEPOSIT_DISCRIMINATOR: [u8; 8] = [232, 133, 25, 16, 203, 167, 3, 3];
 
 #[program]
 pub mod veil_pay {
     use super::*;
 
-    /// Phase 0 probe: CPI into Umbra's CreatePublicStealthPoolDepositInputBuffer
-    /// with mock zero proof bytes. Expected to fail at Umbra's proof verification
-    /// (= CPI auth layer accepted us = GO). If it fails with a CPI-rejection error
-    /// (signer mismatch, cross-program-invocation denial) = NO-GO.
-    pub fn probe_create_buffer(
-        ctx: Context<ProbeCreateBuffer>,
-        _proof_account_offset: u128,
+    /// Single-popup private payment via two CPIs to Umbra in one tx.
+    ///
+    /// Args carry the ZK proof + commitments built off-chain. All Umbra accounts
+    /// (~21 total: 4 for create-buffer + 17 for deposit, with overlap) flow
+    /// through `ctx.remaining_accounts`.
+    pub fn pay_invoice(
+        ctx: Context<PayInvoice>,
+        create_buffer_data: Vec<u8>,
+        deposit_data: Vec<u8>,
+        create_buffer_account_count: u8,
     ) -> Result<()> {
-        msg!("veil_pay::probe_create_buffer — invoking Umbra create-buffer with mock data");
+        require!(create_buffer_data.len() >= 8, VeilPayError::InvalidInstructionData);
+        require!(deposit_data.len() >= 8, VeilPayError::InvalidInstructionData);
+        require!(
+            create_buffer_data[0..8] == CREATE_BUFFER_DISCRIMINATOR,
+            VeilPayError::DiscriminatorMismatch
+        );
+        require!(
+            deposit_data[0..8] == DEPOSIT_DISCRIMINATOR,
+            VeilPayError::DiscriminatorMismatch
+        );
 
-        // Build the CPI instruction manually. We can't use Anchor's CPI generator
-        // because we don't have Umbra's source crate.
-        let mut data = Vec::with_capacity(8 + 256);
-        data.extend_from_slice(&CREATE_BUFFER_DISCRIMINATOR);
-        // Umbra expects various fields here; for the probe we send mock bytes
-        // that will fail proof verification but exercise the auth path.
-        data.extend_from_slice(&[0u8; 256]);
+        let total_accounts = ctx.remaining_accounts.len();
+        require!(
+            (create_buffer_account_count as usize) <= total_accounts,
+            VeilPayError::AccountSliceOutOfBounds
+        );
 
-        let cpi_ix = Instruction {
-            program_id: UMBRA_PROGRAM_ID,
-            accounts: vec![
-                AccountMeta::new_readonly(ctx.accounts.depositor.key(), true),
-                AccountMeta::new(ctx.accounts.fee_payer.key(), true),
-                AccountMeta::new(ctx.accounts.proof_buffer.key(), false),
-                AccountMeta::new_readonly(anchor_lang::solana_program::system_program::ID, false),
-            ],
-            data,
-        };
+        let (create_buffer_accounts, deposit_accounts) = ctx
+            .remaining_accounts
+            .split_at(create_buffer_account_count as usize);
 
-        invoke(
-            &cpi_ix,
-            &[
-                ctx.accounts.depositor.to_account_info(),
-                ctx.accounts.fee_payer.to_account_info(),
-                ctx.accounts.proof_buffer.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.umbra_program.to_account_info(),
-            ],
+        msg!(
+            "veil_pay: CPI 1/2 - create proof buffer ({} accts)",
+            create_buffer_accounts.len()
+        );
+        invoke_with_accounts(
+            UMBRA_PROGRAM_ID,
+            create_buffer_data,
+            create_buffer_accounts,
+        )?;
+
+        msg!(
+            "veil_pay: CPI 2/2 - deposit into stealth pool ({} accts)",
+            deposit_accounts.len()
+        );
+        invoke_with_accounts(
+            UMBRA_PROGRAM_ID,
+            deposit_data,
+            deposit_accounts,
         )?;
 
         Ok(())
     }
 }
 
+fn invoke_with_accounts(
+    program_id: Pubkey,
+    data: Vec<u8>,
+    accounts: &[AccountInfo],
+) -> Result<()> {
+    let metas: Vec<AccountMeta> = accounts
+        .iter()
+        .map(|a| {
+            if a.is_writable {
+                AccountMeta::new(a.key(), a.is_signer)
+            } else {
+                AccountMeta::new_readonly(a.key(), a.is_signer)
+            }
+        })
+        .collect();
+
+    let ix = Instruction {
+        program_id,
+        accounts: metas,
+        data,
+    };
+
+    invoke(&ix, accounts)?;
+    Ok(())
+}
+
 #[derive(Accounts)]
-#[instruction(_proof_account_offset: u128)]
-pub struct ProbeCreateBuffer<'info> {
+pub struct PayInvoice<'info> {
+    /// The user paying. Must sign the outer tx; signature carries through CPI.
     pub depositor: Signer<'info>,
-    #[account(mut)]
-    pub fee_payer: Signer<'info>,
-    /// CHECK: This is the proof buffer PDA derived by Umbra. We pass it through
-    /// for CPI but don't validate the seeds ourselves — Umbra checks.
-    #[account(mut)]
-    pub proof_buffer: UncheckedAccount<'info>,
-    pub system_program: Program<'info, System>,
-    /// CHECK: Umbra program ID checked against our hardcoded const at CPI time.
+    /// CHECK: forwarded to Umbra; must equal UMBRA_PROGRAM_ID.
+    #[account(address = UMBRA_PROGRAM_ID)]
     pub umbra_program: UncheckedAccount<'info>,
+}
+
+#[error_code]
+pub enum VeilPayError {
+    #[msg("Instruction data must include the 8-byte discriminator")]
+    InvalidInstructionData,
+    #[msg("Instruction discriminator does not match expected Umbra instruction")]
+    DiscriminatorMismatch,
+    #[msg("Account slice count exceeds remaining_accounts length")]
+    AccountSliceOutOfBounds,
 }
