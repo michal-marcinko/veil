@@ -24,8 +24,11 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 
 ## Live demo
 
-- App: **https://veil.vercel.app** *(placeholder — replaces after Vercel deploy)*
-- Video: **https://youtu.be/REPLACE_ME** *(placeholder — replaces after video upload)*
+- App: **https://veil-app-205.netlify.app**
+- Repo: **https://github.com/michal-marcinko/veil**
+- Video: *coming soon*
+
+Connect Phantom on devnet with a small amount of wrapped SOL. The pay flow uses wSOL on devnet because Umbra hasn't initialized the USDC stealth pool there — see [`app/.env.example`](app/.env.example) for full notes. Mainnet supports USDC, USDT, wSOL, and UMBRA.
 
 ## Architecture
 
@@ -69,7 +72,7 @@ Outgoing payroll intentionally does not reuse the invoice PDA model. Payroll is 
 ## Quickstart
 
 ```bash
-git clone https://github.com/<org>/veil
+git clone https://github.com/michal-marcinko/veil
 cd veil
 npm install
 cd app && cp .env.example .env.local  # fill in env vars (see below)
@@ -101,10 +104,10 @@ Open http://localhost:3000 with Phantom on devnet.
 
 ## Links
 
-- Colosseum project page: https://arena.colosseum.org/projects/veil *(placeholder)*
-- Superteam Umbra track: https://earn.superteam.fun/listings/hackathon *(placeholder)*
-- Repository: https://github.com/<org>/veil *(placeholder)*
-- Demo video: https://youtu.be/REPLACE_ME *(placeholder)*
+- Live app: https://veil-app-205.netlify.app
+- Repository: https://github.com/michal-marcinko/veil
+- Superteam Umbra track: https://earn.superteam.fun/listings/hackathon/build-with-umbra-side-track
+- Demo video: *coming soon*
 
 ## License
 
