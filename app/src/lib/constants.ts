@@ -43,3 +43,29 @@ export const UMBRA_INDEXER_API =
   process.env.NEXT_PUBLIC_UMBRA_INDEXER_API || UMBRA_INDEXER_API_DEFAULT;
 export const UMBRA_RELAYER_API =
   process.env.NEXT_PUBLIC_UMBRA_RELAYER_API || UMBRA_RELAYER_API_DEFAULT;
+
+// VeilPay CPI wrapper — see programs/veil-pay/programs/veil-pay/src/lib.rs.
+// Optional: when unset, payInvoice falls back to the SDK's stock orchestration
+// (2 popups). When configured, the public-balance pay path routes through the
+// single-tx VeilPay program for a single Phantom popup with proper SOL preview.
+export const VEIL_PAY_PROGRAM_ID: PublicKey | null = (() => {
+  const raw = process.env.NEXT_PUBLIC_VEIL_PAY_PROGRAM_ID;
+  if (!raw) return null;
+  try {
+    return new PublicKey(raw);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[Veil] NEXT_PUBLIC_VEIL_PAY_PROGRAM_ID set but not a valid Pubkey — ignoring",
+    );
+    return null;
+  }
+})();
+
+// Umbra deposit program ID (used by VeilPay CPI for instruction routing in
+// the wrapper tx). Matches the value baked into our deployed `veil_pay`
+// crate. Devnet + mainnet share the same program ID per Umbra docs.
+export const UMBRA_PROGRAM_ID = new PublicKey(
+  process.env.NEXT_PUBLIC_UMBRA_PROGRAM_ID ||
+    "DSuKkyqGVGgo4QtPABfxKJKygUDACbUhirnuv63mEpAJ",
+);
