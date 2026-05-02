@@ -14,8 +14,13 @@
 # becomes irrelevant.
 
 [build]
+  # `npm run build` at the repo root forwards to `npm --workspace app run build`
+  # via the parent veil-monorepo package.json, which produces app/.next.
+  # Publish is resolved relative to the BUILD cwd (= /opt/build/repo on
+  # Netlify CI, NOT the directory containing netlify.toml), so we have to
+  # spell out the workspace prefix here.
   command = "npm run build"
-  publish = ".next"
+  publish = "app/.next"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
