@@ -10,7 +10,14 @@ import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/com
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice } from "@/lib/anchor";
-import { getOrCreateClient, ensureRegistered, payInvoice, payInvoiceFromShielded } from "@/lib/umbra";
+import {
+  getOrCreateClient,
+  ensureRegistered,
+  ensureReceiverKeyAligned,
+  payInvoice,
+  payInvoiceFromShielded,
+  debugDumpIndexerTail,
+} from "@/lib/umbra";
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
 import { downloadInvoicePdf } from "@/lib/pdfDownload";
@@ -34,6 +41,8 @@ export default function PayPage({ params }: { params: { id: string } }) {
   const [paid, setPaid] = useState(false);
   const [receiptUrl, setReceiptUrl] = useState<string | null>(null);
   const [receiptBuildError, setReceiptBuildError] = useState<string | null>(null);
+  const [generatingReceipt, setGeneratingReceipt] = useState(false);
+  const [paymentIntentSig, setPaymentIntentSig] = useState<string | null>(null);
   const [shielded, setShielded] = useState<ShieldedAvailability | null>(null);
   const [useShielded, setUseShielded] = useState(true); // default ON when available
 
@@ -111,6 +120,36 @@ export default function PayPage({ params }: { params: { id: string } }) {
       await ensureRegistered(client, (step, st) =>
         setRegSteps((p) => ({ ...p, [step]: st === "pre" ? "in_progress" : "done" })),
       );
+
+      // DIAGNOSTIC: log Bob's full key state at pay time so we can
+      // compare against the depositor pub that ends up on the UTXO.
+      // This is the only way to verify our hypothesis about where
+      // the on-chain depositor pub comes from.
+      try {
+        const { diagnoseUmbraReceiver } = await import("@/lib/umbra");
+        const diag = await diagnoseUmbraReceiver(client);
+        // eslint-disable-next-line no-console
+        console.log("[Veil pay diag] Bob's on-chain key state:", diag);
+        // eslint-disable-next-line no-console
+        console.log("[Veil pay diag] Bob expanded key state:", JSON.stringify(diag, null, 2));
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[Veil pay diag] failed:", e);
+      }
+
+      // One-time legacy-recovery: if Bob's on-chain X25519 pub doesn't
+      // match his now-stable persisted-seed derivation (because he
+      // registered under a previous, drifting session), rotate the
+      // on-chain key to align it. Without this, Alice cannot decrypt
+      // anything Bob encrypts — see ensureReceiverKeyAligned in umbra.ts.
+      const align = await ensureReceiverKeyAligned(client);
+      // eslint-disable-next-line no-console
+      console.log("[Veil pay diag] ensureReceiverKeyAligned result:", align);
+      if (align.rotated) {
+        setStatus(
+          "Refreshed your encryption key on-chain so the recipient can decrypt. One-time step.",
+        );
+      }
       setRegOpen(false);
 
       const invoicePda = new PublicKey(params.id);
@@ -129,40 +168,19 @@ export default function PayPage({ params }: { params: { id: string } }) {
         ? await payInvoiceFromShielded(payArgs)
         : await payInvoice(payArgs);
 
-      try {
-        // Hash metadata_uri concatenated with metadata_hash for tamper-evidence.
-        const invoice = await fetchInvoice(wallet as any, invoicePda);
-        const uriBytes = new TextEncoder().encode(invoice.metadataUri);
-        const hashBytes = new Uint8Array(invoice.metadataHash as any);
-        const combined = new Uint8Array(uriBytes.length + hashBytes.length);
-        combined.set(uriBytes, 0);
-        combined.set(hashBytes, uriBytes.length);
-        const invoiceHash = await sha256(combined);
-
-        // Solana block time — falls back to local clock if the RPC hasn't
-        // indexed the tx yet (typical within ~1s of confirmation).
-        const paymentIntentSig = payResult.createUtxoSignature;
-        const blockTime = await fetchTxBlockTime(paymentIntentSig);
-        const timestamp = blockTime ?? Math.floor(Date.now() / 1000);
-
-        const receipt = buildReceipt({
-          invoicePda: invoicePda.toBase58(),
-          payerPubkey: wallet.publicKey!.toBase58(),
-          markPaidTxSig: paymentIntentSig,
-          timestamp,
-          invoiceHash: bs58.encode(invoiceHash),
-        });
-        const signed: SignedReceipt = await signReceipt(receipt, wallet as any);
-        const blob = encodeReceipt(signed);
-        const url = `${window.location.origin}/receipt/${invoicePda.toBase58()}#${blob}`;
-        setReceiptUrl(url);
-      } catch (err: any) {
-        // Payment already landed on-chain — receipt failure is non-fatal.
+      if (process.env.NEXT_PUBLIC_VEIL_DEBUG === "1") {
         // eslint-disable-next-line no-console
-        console.error("[Veil receipt] build/sign failed:", err);
-        setReceiptBuildError(err.message ?? String(err));
+        console.log("[Veil pay diag] Umbra pay result:", payResult);
+        await debugDumpIndexerTail(client, 8);
       }
 
+      // Receipt generation moved out of the eager pay path — see
+      // `handleGenerateReceipt` below. Bob's pay flow now ends after the
+      // two on-chain transactions, no extra signMessage popup. The
+      // receipt is generated only when Bob clicks "Generate signed
+      // receipt" on the success card (most users never need it; it's
+      // for forwarding proof-of-payment to the recipient out-of-band).
+      setPaymentIntentSig(payResult.createUtxoSignature);
       setPaid(true);
     } catch (err: any) {
       // eslint-disable-next-line no-console
@@ -171,6 +189,48 @@ export default function PayPage({ params }: { params: { id: string } }) {
       setRegOpen(false);
     } finally {
       setPaying(false);
+    }
+  }
+
+  // Lazy receipt generation. Triggers the wallet's signMessage popup ONLY
+  // when Bob actually wants the receipt URL — most users never need it.
+  // Lifted out of `handlePay` to keep the pay path at 2 popups instead of 3
+  // (proof-account tx + deposit tx + previously the receipt sign).
+  async function handleGenerateReceipt() {
+    if (!wallet.publicKey || !paymentIntentSig) return;
+    setGeneratingReceipt(true);
+    setReceiptBuildError(null);
+    try {
+      const invoicePda = new PublicKey(params.id);
+      // Hash metadata_uri || metadata_hash so the receipt is tamper-evident
+      // against the on-chain anchor (verified by the receipt verifier).
+      const invoice = await fetchInvoice(wallet as any, invoicePda);
+      const uriBytes = new TextEncoder().encode(invoice.metadataUri);
+      const hashBytes = new Uint8Array(invoice.metadataHash as any);
+      const combined = new Uint8Array(uriBytes.length + hashBytes.length);
+      combined.set(uriBytes, 0);
+      combined.set(hashBytes, uriBytes.length);
+      const invoiceHash = await sha256(combined);
+
+      const blockTime = await fetchTxBlockTime(paymentIntentSig);
+      const timestamp = blockTime ?? Math.floor(Date.now() / 1000);
+
+      const receipt = buildReceipt({
+        invoicePda: invoicePda.toBase58(),
+        payerPubkey: wallet.publicKey.toBase58(),
+        markPaidTxSig: paymentIntentSig,
+        timestamp,
+        invoiceHash: bs58.encode(invoiceHash),
+      });
+      const signed: SignedReceipt = await signReceipt(receipt, wallet as any);
+      const blob = encodeReceipt(signed);
+      setReceiptUrl(`${window.location.origin}/receipt/${invoicePda.toBase58()}#${blob}`);
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error("[Veil receipt] build/sign failed:", err);
+      setReceiptBuildError(err.message ?? String(err));
+    } finally {
+      setGeneratingReceipt(false);
     }
   }
 
@@ -236,7 +296,7 @@ export default function PayPage({ params }: { params: { id: string } }) {
               </div>
             </div>
 
-            {receiptUrl && (
+            {receiptUrl ? (
               <div className="mt-5 pt-5 border-t border-sage/30">
                 <div className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim mb-2">
                   Receipt URL
@@ -263,12 +323,24 @@ export default function PayPage({ params }: { params: { id: string } }) {
                   it verifies after the recipient claims the UTXO and marks the invoice paid.
                 </div>
               </div>
-            )}
-
-            {receiptBuildError && !receiptUrl && (
-              <div className="mt-4 pt-4 border-t border-sage/30 text-[12px] text-muted leading-relaxed">
-                Payment confirmed, but the receipt couldn't be signed ({receiptBuildError}).
-                The recipient can still claim the UTXO and mark the invoice paid.
+            ) : (
+              <div className="mt-5 pt-5 border-t border-sage/30">
+                <button
+                  onClick={handleGenerateReceipt}
+                  disabled={generatingReceipt}
+                  className="text-[12px] font-mono tracking-[0.05em] uppercase px-3 py-1.5 border border-line rounded-[2px] text-ink hover:bg-line/30 disabled:opacity-60"
+                >
+                  {generatingReceipt ? "Generating…" : "Generate signed receipt"}
+                </button>
+                <div className="mt-3 text-[12px] text-muted leading-relaxed">
+                  Optional. Generates a sharable URL that cryptographically proves
+                  this wallet paid this invoice. One extra wallet signature.
+                </div>
+                {receiptBuildError && (
+                  <div className="mt-3 text-[12px] text-brick leading-relaxed">
+                    Receipt build failed: {receiptBuildError}
+                  </div>
+                )}
               </div>
             )}
           </div>

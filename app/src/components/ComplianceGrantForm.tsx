@@ -12,13 +12,21 @@ export interface ComplianceGrantFormValues {
 interface Props {
   onSubmit: (values: ComplianceGrantFormValues) => Promise<void>;
   submitting: boolean;
+  /**
+   * Audit URL to surface to Alice after a successful grant. Carries the
+   * 64-byte metadata master signature in the URL fragment, so it MUST be
+   * delivered out-of-band over a trusted channel (Signal, encrypted email).
+   * The on-chain grant proves authorization; this URL delivers the key.
+   */
+  auditUrl?: string | null;
 }
 
-export function ComplianceGrantForm({ onSubmit, submitting }: Props) {
+export function ComplianceGrantForm({ onSubmit, submitting, auditUrl }: Props) {
   const [receiverAddress, setReceiverAddress] = useState("");
   const [receiverX25519PubKey, setReceiverX25519PubKey] = useState("");
   const [note, setNote] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -29,8 +37,60 @@ export function ComplianceGrantForm({ onSubmit, submitting }: Props) {
     });
   }
 
+  async function handleCopy() {
+    if (!auditUrl) return;
+    try {
+      // Prefer the modern clipboard API; fall back to a hidden textarea so the
+      // copy still works in older browsers / non-secure contexts.
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(auditUrl);
+      } else if (typeof document !== "undefined") {
+        const ta = document.createElement("textarea");
+        ta.value = auditUrl;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "absolute";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Best-effort: clipboard failures shouldn't break the flow.
+    }
+  }
+
   return (
     <>
+      {auditUrl && (
+        <div className="mb-8 border border-sage/40 bg-sage/5 rounded-[3px] p-5 md:p-6 max-w-xl">
+          <span className="eyebrow text-sage">Audit URL</span>
+          <div className="mt-3 flex items-center gap-2">
+            <input
+              readOnly
+              value={auditUrl}
+              onFocus={(e) => e.currentTarget.select()}
+              onClick={(e) => e.currentTarget.select()}
+              className="flex-1 input-editorial font-mono text-[12px] select-all"
+              aria-label="Audit URL"
+            />
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="shrink-0 px-4 py-2 border border-line rounded-[3px] font-mono text-[11px] tracking-[0.12em] uppercase text-ink hover:bg-ink hover:text-paper transition-colors"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted">
+            Send this link to your auditor over a trusted channel (Signal,
+            encrypted email). The on-chain grant proves authorization; this URL
+            delivers the decryption key.
+          </p>
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="space-y-8">
         <Field label="Auditor Solana wallet address">
           <input

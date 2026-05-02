@@ -19,7 +19,8 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 - **Create** - Alice issues an invoice. Metadata (amounts, memo, line items) is AES-256-GCM encrypted client-side, uploaded to Arweave, and hash-anchored to an on-chain Anchor PDA.
 - **Pay** - Bob opens a shareable link, the UI wires his wallet, pays through Umbra's shielded pool, and can sign a receipt intent tied to the invoice PDA. Amount is hidden on-chain; counterparty linkage is broken by the mixer.
 - **Reconcile** - Alice's dashboard auto-claims incoming UTXOs, then marks pending invoices paid as the recipient/creator. CSV export is one click (feature pending - see roadmap).
-- **Audit** - Alice issues a scoped viewing key to her accountant's wallet. The accountant loads `/audit/<alice>`, sees exactly the invoices they're authorized to see - amounts decrypted, nothing else visible.
+- **Run private payroll** - An employer uploads `wallet,amount,memo`, sends Umbra payments to contractors, and signs one payroll packet for receipts, auditor review, and per-row selective disclosure.
+- **Audit / disclose** - Invoice compliance grants are wired through Umbra's x25519 grant primitives; payroll uses signed packets and one-row disclosure links so an accountant or recipient can verify exactly the data they were given.
 
 ## Live demo
 
@@ -63,6 +64,8 @@ The public receipt verifier checks two things only: the invoice PDA is currently
 
 Veil's invoice registry deliberately does not attempt to verify private Umbra payment contents on-chain - that would either leak data or require Umbra-side primitives outside the hackathon window. Instead, the recipient confirms receipt: only the invoice creator's wallet can mark an invoice paid, and only after their dashboard has scanned and claimed the incoming UTXO. This matches how every business invoice works - the seller acknowledges payment. Production roadmap: Umbra-side settlement Merkle proofs or a CPI hook from Umbra into our registry.
 
+Outgoing payroll intentionally does not reuse the invoice PDA model. Payroll is payer-initiated: the employer sends Umbra receiver-claimable UTXOs directly to contractors, then signs a single packet covering the batch. `/payroll/packet` verifies the full packet for auditors; `/disclose/payroll` verifies one selected row for selective disclosure.
+
 ## Quickstart
 
 ```bash
@@ -93,6 +96,7 @@ Open http://localhost:3000 with Phantom on devnet.
 - **B — Batch / payroll invoicing.** Paste a CSV, generate 20 private invoice links in one pass. One dashboard view for the whole batch. No more Gnosis Safe + Disperse.app + privacy leak.
 - **C — Pay from encrypted balance ("full shielding").** When Bob already holds Umbra balance, his payment happens entirely inside the shielded pool — no public deposit leg, no amount leak to any observer.
 - **D - Proof-of-payment receipts.** On successful payment, Bob receives a signed receipt artifact tied to the invoice PDA and his wallet. A public verifier page confirms the receipt signature and the invoice's paid status without revealing the amount or requiring Bob to be the `mark_paid` signer.
+- **E - Inverse private payroll.** Employers can run outgoing payroll through Umbra, compare public-token payroll against Veil's opaque Umbra transactions, sign a payroll packet, and create per-recipient disclosure links.
 - **Bugfixes / polish.** Dashboard BigInt fix; clickable invoice rows; deterministic wallet-signature key derivation for encrypted metadata.
 
 ## Links

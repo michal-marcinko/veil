@@ -13,9 +13,14 @@ interface DashboardInvoice {
 export function DashboardList({
   title,
   invoices,
+  labels,
 }: {
   title: string;
   invoices: DashboardInvoice[];
+  // Optional decrypted labels keyed by PDA. When present, the row shows
+  // "Acme Design · $4,200 USDC" instead of the truncated PDA. When absent
+  // (legacy invoice or label still loading) the row falls back to the PDA.
+  labels?: Map<string, { payer: string; amount: string }>;
 }) {
   if (invoices.length === 0) {
     return (
@@ -42,25 +47,41 @@ export function DashboardList({
         </span>
       </div>
       <ul className="border border-line rounded-[4px] bg-paper-3 divide-y divide-line">
-        {invoices.map((inv) => (
-          <li key={inv.pda}>
-            <Link
-              href={`/invoice/${inv.pda}`}
-              className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/40 transition-colors cursor-pointer"
-              aria-label={`Open invoice ${inv.pda}`}
-            >
-              <div className="flex items-baseline gap-5 min-w-0">
-                <span className="font-mono text-[11px] text-dim tnum shrink-0">
-                  {formatDate(inv.createdAt)}
-                </span>
-                <span className="font-mono text-[13px] text-ink truncate">
-                  {inv.pda.slice(0, 8)}…{inv.pda.slice(-4)}
-                </span>
-              </div>
-              <StatusBadge status={inv.status} />
-            </Link>
-          </li>
-        ))}
+        {invoices.map((inv) => {
+          const label = labels?.get(inv.pda);
+          return (
+            <li key={inv.pda}>
+              <Link
+                href={`/invoice/${inv.pda}`}
+                className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/40 transition-colors cursor-pointer"
+                aria-label={`Open invoice ${inv.pda}`}
+              >
+                <div className="flex items-baseline gap-5 min-w-0 flex-1">
+                  <span className="font-mono text-[11px] text-dim tnum shrink-0">
+                    {formatDate(inv.createdAt)}
+                  </span>
+                  {label ? (
+                    <div className="flex items-baseline gap-3 min-w-0 flex-1">
+                      <span className="text-[14px] text-ink truncate">{label.payer}</span>
+                      <span className="text-[12px] text-muted shrink-0 tnum">·</span>
+                      <span className="text-[13px] text-ink/80 tnum shrink-0">
+                        {label.amount}
+                      </span>
+                      <span className="font-mono text-[10.5px] text-dim tracking-[0.05em] truncate hidden md:inline">
+                        {inv.pda.slice(0, 6)}…{inv.pda.slice(-4)}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="font-mono text-[13px] text-ink truncate">
+                      {inv.pda.slice(0, 8)}…{inv.pda.slice(-4)}
+                    </span>
+                  )}
+                </div>
+                <StatusBadge status={inv.status} />
+              </Link>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

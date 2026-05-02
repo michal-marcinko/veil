@@ -12,7 +12,7 @@ import {
   type RegistrationStep,
   type StepStatus,
 } from "@/components/RegistrationModal";
-import { getOrCreateClient, ensureRegistered } from "@/lib/umbra";
+import { getOrCreateClient, ensureRegistered, ensureReceiverKeyAligned } from "@/lib/umbra";
 import { createInvoiceOnChain } from "@/lib/anchor";
 import { buildMetadata, validateMetadata } from "@/lib/types";
 import { encryptJson, generateKey, keyToBase58, sha256 } from "@/lib/encryption";
@@ -83,6 +83,9 @@ export default function PayrollNewPage() {
           [step]: status === "pre" ? "in_progress" : "done",
         }));
       });
+      // Align before creating batch pay links so every payer encrypts to the
+      // creator's current, persisted receiver key.
+      await ensureReceiverKeyAligned(client);
       setRegOpen(false);
     } catch (err: any) {
       setRegOpen(false);
@@ -290,11 +293,11 @@ function Frame({ heading, children }: { heading: string; children: React.ReactNo
             <a href="/create" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
               Create
             </a>
-            <a href="/payroll/new" className="hidden sm:inline-block px-3 py-2 text-[13px] text-ink">
-              Payroll
-            </a>
             <a href="/dashboard" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
-              Dashboard
+              Activity
+            </a>
+            <a href="/docs" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
+              Docs
             </a>
             <div className="ml-2">
               <ClientWalletMultiButton />

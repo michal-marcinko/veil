@@ -1,0 +1,21 @@
+# Netlify build config.
+#
+# Why we can't rely on Netlify's framework auto-detection: this site
+# was created via the API while the parent veil/ workspace package.json
+# was visible to Netlify, and framework detection landed on `unknown`.
+# Once stuck on `unknown`, Netlify never installs @netlify/plugin-nextjs
+# automatically, so deploys upload raw .next/ artifacts with no SSR
+# function or routing — every URL 404s.
+#
+# Fix: explicitly declare the plugin and pin the build command +
+# publish dir. With this config, the plugin runs on every deploy,
+# transforms .next/ into the proper Netlify bundle (functions for SSR,
+# static for prerendered pages), and the framework auto-detection
+# becomes irrelevant.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

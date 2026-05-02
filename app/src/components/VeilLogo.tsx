@@ -20,7 +20,7 @@ import { useEffect, useRef, useState } from "react";
  */
 
 const PRIMARY = "Veil";
-const SECONDARY = "Private invoicing";
+const SECONDARY = "private payments";
 
 const ERASE_MS = 28;
 const TYPE_MS = 58;

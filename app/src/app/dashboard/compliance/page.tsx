@@ -19,11 +19,14 @@ import {
   revokeComplianceGrant,
   type GrantWithStatus,
 } from "@/lib/umbra";
+import { getOrCreateMetadataMasterSig } from "@/lib/encryption";
+import { buildAuditUrl } from "@/lib/umbra-auditor";
 
 interface GrantResult {
   receiverAddress: string;
   nonce: bigint;
   signature: string;
+  auditUrl: string;
 }
 
 export default function CompliancePage() {
@@ -85,7 +88,31 @@ export default function CompliancePage() {
         nonce,
       });
 
-      setResult({ receiverAddress: values.receiverAddress, nonce, signature });
+      // Generate the audit URL Alice will share with Carol out-of-band.
+      // The on-chain grant above proves authorization; the URL fragment
+      // carries the metadata master signature so Carol can derive each
+      // per-invoice AES key. Fragments aren't transmitted to servers, so
+      // the key never hits Veil's infrastructure.
+      const granterWallet = wallet.publicKey?.toBase58();
+      if (!granterWallet) throw new Error("Wallet disconnected");
+      const masterSig = await getOrCreateMetadataMasterSig(
+        wallet as any,
+        granterWallet,
+      );
+      const origin =
+        typeof window !== "undefined" ? window.location.origin : "";
+      const auditUrl = buildAuditUrl({
+        origin,
+        granterWallet,
+        masterSig,
+      });
+
+      setResult({
+        receiverAddress: values.receiverAddress,
+        nonce,
+        signature,
+        auditUrl,
+      });
       await refreshGrants();
     } catch (err: any) {
       setError(err.message ?? String(err));
@@ -158,16 +185,16 @@ export default function CompliancePage() {
               <ResultRow label="Wallet" value={result.receiverAddress} />
               <ResultRow label="Nonce" value={result.nonce.toString()} />
               <ResultRow label="Signature" value={result.signature} />
-              <ResultRow
-                label="Audit URL"
-                value={`${typeof window !== "undefined" ? window.location.origin : ""}/audit/${wallet.publicKey?.toBase58()}`}
-              />
             </dl>
           </div>
         )}
 
         <div className="mt-10 pt-8 border-t border-line">
-          <ComplianceGrantForm onSubmit={handleGrant} submitting={submitting} />
+          <ComplianceGrantForm
+            onSubmit={handleGrant}
+            submitting={submitting}
+            auditUrl={result?.auditUrl ?? null}
+          />
         </div>
 
         <div className="mt-12 pt-8 border-t border-line">

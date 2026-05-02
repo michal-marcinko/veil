@@ -2,6 +2,7 @@
 
 import {
   getUserAccountX25519KeypairDeriver,
+  getMasterViewingKeyX25519KeypairDeriver,
   getAesDecryptor,
   getUmbraClient,
   getUserEncryptionKeyRotatorFunction,
@@ -193,6 +194,117 @@ function makeTolerantForwarder() {
   };
 }
 
+// localStorage-backed master-seed storage, scoped per wallet address.
+//
+// Why this exists: the SDK's default masterSeedStorage is a closure-only
+// in-memory cache (see node_modules/@umbra-privacy/sdk/dist/index.js
+// `getDefaultMasterSeedStorage`). Every page reload spins up a fresh
+// closure, so `getMasterSeed()` falls through to the wallet-signature-based
+// generator on every session. Phantom's `signMessage` is not guaranteed to
+// produce identical signatures across calls — and we observed it doesn't
+// (see decryption diagnostics: same wallet produced different X25519
+// pubkeys across sessions, breaking ECDH symmetry between the encrypter
+// and the decrypter). Persisting the seed in localStorage pins the
+// derivation, so the same wallet always derives the same X25519 keypair.
+//
+// Seed length is 64 bytes (U512). We store it base64-encoded under
+// `veil:umbra:masterSeed:<walletAddress>` so swapping wallets in the same
+// browser loads the right seed (or generates a fresh one for a new wallet
+// on first use). On corruption (wrong length, malformed base64, etc.) we
+// fall back to "doesn't exist" so the SDK regenerates from scratch.
+const MASTER_SEED_BYTE_LENGTH = 64;
+
+function masterSeedStorageKey(walletAddress: string): string {
+  return `veil:umbra:masterSeed:${walletAddress}`;
+}
+
+function createPersistentMasterSeedStorage(walletAddress: string) {
+  // Capture the storage key once so a later wallet swap can't accidentally
+  // load/store under the wrong namespace if the same closure gets reused.
+  const key = masterSeedStorageKey(walletAddress);
+  // In-memory cache. Without this, the SDK calls `load` on every internal
+  // `getMasterSeed()` (which runs many times per refresh — each scan,
+  // claim, balance query etc. derives keys), spamming the console and
+  // hammering localStorage with redundant reads.
+  let inMemoryCache: Uint8Array | null = null;
+
+  function safeStorage(): Storage | null {
+    try {
+      if (typeof window === "undefined" || !window.localStorage) return null;
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  return {
+    load: async (): Promise<{ exists: false } | { exists: true; seed: Uint8Array }> => {
+      // Hot path: in-memory cache (set on first load or first store).
+      // Silent — no log, no localStorage read.
+      if (inMemoryCache) {
+        return { exists: true, seed: inMemoryCache };
+      }
+
+      const storage = safeStorage();
+      if (!storage) return { exists: false };
+
+      let encoded: string | null;
+      try {
+        encoded = storage.getItem(key);
+      } catch {
+        return { exists: false };
+      }
+      if (!encoded) return { exists: false };
+
+      // Decode + length-check. Anything off → treat as missing AND wipe the
+      // bad entry so we don't keep retrying corrupt bytes every session.
+      try {
+        const binary = atob(encoded);
+        if (binary.length !== MASTER_SEED_BYTE_LENGTH) {
+          storage.removeItem(key);
+          return { exists: false };
+        }
+        const seed = new Uint8Array(MASTER_SEED_BYTE_LENGTH);
+        for (let i = 0; i < MASTER_SEED_BYTE_LENGTH; i++) {
+          seed[i] = binary.charCodeAt(i);
+        }
+        inMemoryCache = seed;
+        debugLog("[umbra master-seed] loaded persisted seed (first time this session)", {
+          walletAddress,
+          seedHead: bytesToBase58(seed.slice(0, 8)),
+        });
+        return { exists: true, seed };
+      } catch {
+        try {
+          storage.removeItem(key);
+        } catch {
+          /* ignore */
+        }
+        return { exists: false };
+      }
+    },
+    store: async (seed: Uint8Array): Promise<{ success: boolean }> => {
+      inMemoryCache = seed;
+      const storage = safeStorage();
+      if (!storage) return { success: false };
+      try {
+        let binary = "";
+        for (let i = 0; i < seed.length; i++) {
+          binary += String.fromCharCode(seed[i]);
+        }
+        storage.setItem(key, btoa(binary));
+        debugLog("[umbra master-seed] persisted new seed", {
+          walletAddress,
+          seedHead: bytesToBase58(seed.slice(0, 8)),
+        });
+        return { success: true };
+      } catch {
+        return { success: false };
+      }
+    },
+  };
+}
+
 export async function getOrCreateClient(walletCtx: any): Promise<UmbraClient> {
   const connectedAddress = walletCtx?.publicKey?.toBase58?.() ?? null;
   if (cachedClient && cachedSignerAddress === connectedAddress) {
@@ -200,6 +312,10 @@ export async function getOrCreateClient(walletCtx: any): Promise<UmbraClient> {
   }
 
   const signer = resolveWalletStandardSigner(walletCtx);
+
+  const masterSeedStorage = connectedAddress
+    ? createPersistentMasterSeedStorage(connectedAddress)
+    : undefined;
 
   const client = await getUmbraClient(
     {
@@ -209,7 +325,10 @@ export async function getOrCreateClient(walletCtx: any): Promise<UmbraClient> {
       rpcSubscriptionsUrl: RPC_WSS_URL,
       indexerApiEndpoint: UMBRA_INDEXER_API,
     },
-    { transactionForwarder: makeTolerantForwarder() as any },
+    {
+      transactionForwarder: makeTolerantForwarder() as any,
+      ...(masterSeedStorage ? { masterSeedStorage: masterSeedStorage as any } : {}),
+    },
   );
   cachedClient = client;
   cachedSignerAddress = connectedAddress;
@@ -240,6 +359,9 @@ export interface UmbraReceiverDiagnostics {
   derivedTokenX25519PublicKey: string | null;
   registeredTokenX25519PublicKey: string | null;
   tokenX25519Matches: boolean | null;
+  derivedMasterViewingKeyX25519PublicKey: string | null;
+  registeredMasterViewingKeyX25519PublicKey: string | null;
+  masterViewingKeyX25519Matches: boolean | null;
 }
 
 export async function diagnoseUmbraReceiver(client: UmbraClient): Promise<UmbraReceiverDiagnostics> {
@@ -249,6 +371,7 @@ export async function diagnoseUmbraReceiver(client: UmbraClient): Promise<UmbraR
 
   let userAccountPda: string | null = null;
   let registeredTokenKey: Uint8Array | null = null;
+  let registeredMvkKey: Uint8Array | null = null;
 
   if (queryResult.state === "exists") {
     const pda = await findEncryptedUserAccountPda(
@@ -263,14 +386,22 @@ export async function diagnoseUmbraReceiver(client: UmbraClient): Promise<UmbraR
       registeredTokenKey = new Uint8Array(
         Array.from(decoded.data.x25519PublicKeyForTokenEncryption.first),
       );
+      registeredMvkKey = new Uint8Array(
+        Array.from(decoded.data.x25519PublicKeyForMasterViewingKeyEncryption.first),
+      );
     }
   }
 
   let derivedTokenKey: Uint8Array | null = null;
+  let derivedMvkKey: Uint8Array | null = null;
   if (queryResult.state === "exists") {
-    const derive = getUserAccountX25519KeypairDeriver({ client } as any);
-    const keypair = await derive();
-    derivedTokenKey = new Uint8Array(keypair.x25519Keypair.publicKey);
+    const deriveToken = getUserAccountX25519KeypairDeriver({ client } as any);
+    const tokenKeypair = await deriveToken();
+    derivedTokenKey = new Uint8Array(tokenKeypair.x25519Keypair.publicKey);
+
+    const deriveMvk = getMasterViewingKeyX25519KeypairDeriver({ client } as any);
+    const mvkKeypair = await deriveMvk();
+    derivedMvkKey = new Uint8Array(mvkKeypair.x25519Keypair.publicKey);
   }
 
   return {
@@ -285,6 +416,10 @@ export async function diagnoseUmbraReceiver(client: UmbraClient): Promise<UmbraR
     registeredTokenX25519PublicKey: bytesToBase58(registeredTokenKey),
     tokenX25519Matches:
       queryResult.state === "exists" ? bytesMatch(derivedTokenKey, registeredTokenKey) : null,
+    derivedMasterViewingKeyX25519PublicKey: bytesToBase58(derivedMvkKey),
+    registeredMasterViewingKeyX25519PublicKey: bytesToBase58(registeredMvkKey),
+    masterViewingKeyX25519Matches:
+      queryResult.state === "exists" ? bytesMatch(derivedMvkKey, registeredMvkKey) : null,
   };
 }
 
@@ -292,6 +427,52 @@ export async function repairUmbraReceiverKey(client: UmbraClient): Promise<strin
   const register = getUserRegistrationFunction({ client });
   const rotate = getUserEncryptionKeyRotatorFunction(register);
   return (await rotate()) as unknown as string[];
+}
+
+/**
+ * One-shot legacy-recovery: if this wallet's on-chain registered X25519
+ * pubkey doesn't match the current (now-stable, persisted-seed-backed)
+ * derivation, rotate the on-chain key once so the two align.
+ *
+ * Why this matters in the pay flow specifically:
+ *   - Bob's encrypt path (sdk index.js:9077) uses his CURRENTLY-DERIVED
+ *     X25519 private key for ECDH(bobPriv, alicePub).
+ *   - Alice's decrypt path (sdk index.js:1067) uses Bob's REGISTERED
+ *     on-chain pubkey (returned by the indexer as
+ *     `depositorX25519PublicKey`) for ECDH(alicePriv, bobPubFromChain).
+ *   - These produce equal shared secrets ONLY IF Bob's currently-derived
+ *     priv corresponds to Bob's on-chain registered pub. If Bob registered
+ *     under a previous (drifted, pre-localStorage-fix) session, his
+ *     on-chain pub is stale — Alice's AES-GCM decrypt fails with
+ *     "invalid ghash tag" and the UTXO is silently dropped.
+ *
+ * The rotate is a one-time operation: once executed, Bob's on-chain pub
+ * matches his persisted-seed derivation, and every future session stays
+ * aligned without further rotation.
+ *
+ * NOTE on shielded balances: rotating orphans any pre-existing shielded
+ * UTXOs encrypted under Bob's previous key. Acceptable for the demo (Bob
+ * is a fresh payer with a public-balance flow), but production should
+ * drain shielded balances before calling this.
+ *
+ * Returns `{ rotated: false }` if keys already aligned (no on-chain tx),
+ * or `{ rotated: true, signatures }` if the rotate happened.
+ */
+export async function ensureReceiverKeyAligned(
+  client: UmbraClient,
+): Promise<{ rotated: false } | { rotated: true; signatures: string[] }> {
+  const diag = await diagnoseUmbraReceiver(client);
+  if (diag.tokenX25519Matches !== false) {
+    // `true` means aligned; `null` means no account yet (caller should
+    // have run ensureRegistered first). Either way, nothing to do here.
+    return { rotated: false };
+  }
+  debugLog("[umbra key-align] mismatch detected, rotating on-chain key", {
+    derived: diag.derivedTokenX25519PublicKey,
+    registered: diag.registeredTokenX25519PublicKey,
+  });
+  const signatures = await repairUmbraReceiverKey(client);
+  return { rotated: true, signatures };
 }
 
 export async function ensureRegistered(
@@ -464,11 +645,42 @@ import {
   getReceiverClaimableUtxoToEncryptedBalanceClaimerFunction,
   getUmbraRelayer,
   getEncryptedBalanceQuerierFunction,
+  getEncryptedBalanceToPublicBalanceDirectWithdrawerFunction,
 } from "@umbra-privacy/sdk";
 import {
   getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver,
 } from "@umbra-privacy/web-zk-prover";
 import { UMBRA_RELAYER_API } from "./constants";
+
+function writeU128Le(value: bigint, out: Uint8Array, offset: number) {
+  let remaining = value;
+  for (let i = 0; i < 16; i++) {
+    out[offset + i] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+}
+
+function addressFromLowHigh(low: bigint | null | undefined, high: bigint | null | undefined) {
+  if (low == null || high == null) return null;
+  const bytes = new Uint8Array(32);
+  writeU128Le(low, bytes, 0);
+  writeU128Le(high, bytes, 16);
+  return bs58.encode(bytes);
+}
+
+function describeIndexedUtxo(utxo: any) {
+  const h1 = utxo?.h1Components;
+  return {
+    senderAddress: addressFromLowHigh(h1?.senderAddressLow, h1?.senderAddressHigh),
+    mintAddress: addressFromLowHigh(h1?.mintAddressLow, h1?.mintAddressHigh),
+    depositorX25519PublicKey: bytesToBase58(
+      utxo?.depositorX25519PublicKey ? new Uint8Array(utxo.depositorX25519PublicKey) : null,
+    ),
+    eventType: utxo?.eventType,
+    slot: utxo?.slot,
+    timestamp: utxo?.timestamp,
+  };
+}
 
 /**
  * Scan for claimable UTXOs sent to the current client's wallet.
@@ -520,6 +732,7 @@ export async function dumpRecentIndexerUtxos(client: UmbraClient, lookbackCount 
         insertionIndex: (utxo as any).insertionIndex,
         insertionIndexType: typeof (utxo as any).insertionIndex,
         absoluteIndex: (utxo as any).absoluteIndex,
+        ...describeIndexedUtxo(utxo),
         depositorX25519PublicKeyLen: (utxo as any).depositorX25519PublicKey?.length,
         aesEncryptedDataLen: (utxo as any).aesEncryptedData?.length,
       });
@@ -528,6 +741,10 @@ export async function dumpRecentIndexerUtxos(client: UmbraClient, lookbackCount 
     // eslint-disable-next-line no-console
     console.error("[Veil dump] failed:", err);
   }
+}
+
+export async function debugDumpIndexerTail(client: UmbraClient, lookbackCount = 10) {
+  await dumpRecentIndexerUtxos(client, lookbackCount);
 }
 
 // Mirrors SDK's AES domain separator constants (line ~1039 of index.js)
@@ -572,6 +789,8 @@ export async function manualDecryptUtxo(client: UmbraClient, utxo: any) {
     const keypair: any = await derive();
     const alicePriv = new Uint8Array(keypair.x25519Keypair.privateKey);
     const alicePub = new Uint8Array(keypair.x25519Keypair.publicKey);
+    // eslint-disable-next-line no-console
+    console.log(`[manual decrypt #${idx}] context:`, describeIndexedUtxo(utxo));
     // eslint-disable-next-line no-console
     console.log(`[manual decrypt #${idx}] alice priv:${bytesPreview(alicePriv)} pub:${bytesPreview(alicePub)}`);
 
@@ -644,40 +863,20 @@ export async function manualDecryptUtxo(client: UmbraClient, utxo: any) {
 }
 
 export async function scanClaimableUtxos(client: UmbraClient) {
-  await dumpRecentIndexerUtxos(client, 5);
-
-  // Manually attempt decrypt of last 3 UTXOs to find the silent failure stage
-  if (isVeilDebugEnabled()) {
-    try {
-      const fetcher = (client as any).fetchUtxoData;
-      if (fetcher) {
-        const peek = await fetcher(BigInt(0), BigInt(2 ** 20 - 1), 1);
-        const total = (peek as any).totalCount;
-        const totalNum = typeof total === "bigint" ? total : BigInt(total ?? 0);
-        const start = totalNum > 3n ? totalNum - 3n : BigInt(0);
-        const tail = await fetcher(start, BigInt(2 ** 20 - 1), 5);
-        const items = (tail as any).items;
-        const entries = items instanceof Map ? Array.from(items.values()) : Object.values(items ?? {});
-        for (const utxo of entries) {
-          await manualDecryptUtxo(client, utxo);
-        }
-      }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[Veil scan-decrypt-trace] failed:", err);
-    }
-  }
-
-  debugLog("[Veil scanClaimableUtxos] scanning under signer:", (client as any)?.signer?.address);
-  if (isVeilDebugEnabled() && (client as any).fetchUtxoData) {
-    const raw = await (client as any).fetchUtxoData(BigInt(0), BigInt(1_000_000), BigInt(25));
-    debugLog("[Veil scanClaimableUtxos] raw indexer window:", {
-      items: raw.items?.size ?? 0,
-      totalCount: raw.totalCount,
-      hasMore: raw.hasMore,
-      nextCursor: raw.nextCursor?.toString?.() ?? raw.nextCursor,
-    });
-  }
+  // NOTE: we removed the manualDecryptUtxo loop that sampled the tail of
+  // the global indexer. That was deeply misleading — the global pool
+  // contains random other devnet users' deposits whose `depositorX25519
+  // PublicKey` is THEIR pub, not ours. Trying to decrypt those with our
+  // private key correctly fails with "invalid ghash tag" — that error
+  // never indicated a bug in our code or the SDK.
+  //
+  // The actual claimable scan below (`getClaimableUtxoScannerFunction`)
+  // iterates the full tree and bucketizes only UTXOs whose AES decrypt
+  // succeeds under our key AND whose domain separator matches one of the
+  // four claim types. If that returns 0/0/0/0 it means the indexer has
+  // no UTXO addressed to us in the scanned window — either the deposit
+  // hasn't reached the indexer yet (sync lag) or the destination address
+  // on the deposit doesn't match our wallet.
   const scan = getClaimableUtxoScannerFunction({ client });
   // treeIndex 0, startInsertionIndex 0, endInsertionIndex 1_000_000.
   // The SDK's U32 type is a branded bigint (per
@@ -694,17 +893,107 @@ export async function scanClaimableUtxos(client: UmbraClient) {
   //   - publicReceived    : public-balance UTXOs from others via public ATA
   //   - selfBurnable      : encrypted-balance UTXOs you sent yourself
   //   - publicSelfBurnable: public-balance UTXOs you sent yourself
+  // Watermark-based incremental scan. The SDK exposes
+  // `nextScanStartIndex` on every scan result, computed as
+  // `lastSeenInsertionIndex + 1` over the entire window we just walked
+  // (sdk index.js:1234). Saving it and passing it back as
+  // startInsertionIndex on the next call means each subsequent scan
+  // returns ONLY UTXOs newer than what we've already processed — the
+  // already-claimed ones simply don't appear, so no 409 round-trips.
+  //
+  // Storage key is per-wallet so wallet swaps don't leak watermarks.
+  // If localStorage has no entry, we start from 0 (full scan).
+  const signerAddr = (client as any)?.signer?.address as string | undefined;
+  const watermarkKey = signerAddr ? `veil:scanWatermark:${signerAddr}` : null;
+  const startIndex = loadScanWatermark(watermarkKey);
   const result = await scan(
     BigInt(0) as any,
-    BigInt(0) as any,
+    startIndex as any,
     BigInt(1_000_000) as any,
   );
+  // Persist the new watermark even when the scan returned nothing —
+  // we still walked the indexer up to nextScanStartIndex, so we know
+  // there's nothing new to look at below it. If `nextScanStartIndex`
+  // is missing (older SDK shape), advance to the highest insertion
+  // index we observed across all four buckets.
+  const nextStart =
+    (result as any)?.nextScanStartIndex ??
+    highestInsertionIndex(result) + 1n;
+  if (watermarkKey && typeof nextStart === "bigint" && nextStart > startIndex) {
+    saveScanWatermark(watermarkKey, nextStart);
+  }
+  // Single compact scan log: walked range + non-empty buckets only.
+  if (isVeilDebugEnabled()) {
+    const buckets: string[] = [];
+    if (result.received.length) buckets.push(`received=${result.received.length}`);
+    if (result.publicReceived.length) buckets.push(`publicReceived=${result.publicReceived.length}`);
+    if (result.selfBurnable.length) buckets.push(`selfBurnable=${result.selfBurnable.length}`);
+    if (result.publicSelfBurnable.length) buckets.push(`publicSelfBurnable=${result.publicSelfBurnable.length}`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[Veil scan] ${startIndex.toString()} → ${nextStart.toString()} ${
+        buckets.length ? buckets.join(" ") : "no new claimable UTXOs"
+      }`,
+    );
+  }
   return {
     received: result.received,
     publicReceived: result.publicReceived,
     selfBurnable: result.selfBurnable,
     publicSelfBurnable: result.publicSelfBurnable,
   };
+}
+
+function loadScanWatermark(key: string | null): bigint {
+  if (!key || typeof window === "undefined") return 0n;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return 0n;
+    const parsed = BigInt(raw);
+    return parsed >= 0n ? parsed : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+function saveScanWatermark(key: string, value: bigint): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, value.toString());
+  } catch {
+    /* best-effort */
+  }
+}
+
+function highestInsertionIndex(result: any): bigint {
+  let max = -1n;
+  for (const bucket of [
+    result?.received,
+    result?.publicReceived,
+    result?.selfBurnable,
+    result?.publicSelfBurnable,
+  ]) {
+    if (!Array.isArray(bucket)) continue;
+    for (const u of bucket) {
+      const idx = u?.insertionIndex;
+      if (typeof idx === "bigint" && idx > max) max = idx;
+    }
+  }
+  return max < 0n ? 0n : max;
+}
+
+/**
+ * Resets the scan watermark for the connected wallet. The next scan will
+ * start from absolute index 0 again — useful if a previous claim flow
+ * crashed mid-way and Alice has unclaimed UTXOs below the watermark.
+ */
+export function resetScanWatermark(walletAddress: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(`veil:scanWatermark:${walletAddress}`);
+  } catch {
+    /* best-effort */
+  }
 }
 
 export interface ScanSummary {
@@ -746,9 +1035,21 @@ export async function claimUtxos(args: ClaimArgs) {
     assetProvider: proxiedAssetProvider(),
   });
   const relayer = getUmbraRelayer({ apiEndpoint: UMBRA_RELAYER_API } as any);
+  // The claimer reads fetchBatchMerkleProof FROM deps, not from the client
+  // (sdk index.js:2496 — `const fetchBatchMerkleProof = deps.fetchBatchMerkleProof;`).
+  // The client object exposes the function at `client.fetchBatchMerkleProof`
+  // when an indexer endpoint is configured (sdk index.js:707-784); we pull it
+  // off the client and forward it explicitly. Without this, the claim throws
+  // "fetchBatchMerkleProof is not a function" on the first claimable UTXO.
+  const fetchBatchMerkleProof = (args.client as any).fetchBatchMerkleProof;
+  if (!fetchBatchMerkleProof) {
+    throw new Error(
+      "Umbra client has no fetchBatchMerkleProof — was indexerApiEndpoint set when getUmbraClient was called?",
+    );
+  }
   const claim = getReceiverClaimableUtxoToEncryptedBalanceClaimerFunction(
     { client: args.client },
-    { zkProver, relayer } as any,
+    { zkProver, relayer, fetchBatchMerkleProof } as any,
   );
   return claim(args.utxos as any);
 }
@@ -776,6 +1077,52 @@ export async function getEncryptedBalance(
     }
   }
   return 0n;
+}
+
+/**
+ * Move tokens from Alice's encrypted (shielded) balance back to her public
+ * wallet's ATA. This is the inverse of `payInvoice`'s receiver flow — it
+ * "withdraws" shielded SOL/USDC into the user's regular Solana wallet
+ * where it can be spent normally.
+ *
+ * Mechanics:
+ *   - Submits a `withdraw_from_shared_balance_into_public_balance_v11`
+ *     instruction to the Umbra program (sdk index.js:10472).
+ *   - The instruction queues an MPC computation; the result is returned via
+ *     a callback transaction handled by Arcium's MXE cluster.
+ *   - The `callbackSignature` (when present) is the on-chain confirmation
+ *     that the public balance has been credited.
+ *
+ * Returns `{ queueSignature, callbackSignature?, callbackElapsedMs?,
+ * rentClaimSignature?, rentClaimError? }` from the SDK.
+ *
+ * Notes:
+ *   - `amount` is in base units (lamports for wSOL, micro-USDC for USDC).
+ *   - Throws `EncryptedWithdrawalError` (re-exported from SDK) on validation
+ *     or transaction failure. Bubble those up to the UI layer.
+ *   - Protocol fee (35 bps, see https://docs.umbraprivacy.com/pricing)
+ *     is deducted from the withdrawn amount on-chain — the user receives
+ *     `amount - floor(amount * 35 / 16384)`.
+ */
+export async function withdrawShielded(
+  client: UmbraClient,
+  mint: string,
+  amount: bigint,
+): Promise<{
+  queueSignature: string;
+  callbackSignature?: string;
+  callbackElapsedMs?: number;
+}> {
+  const withdraw = getEncryptedBalanceToPublicBalanceDirectWithdrawerFunction({ client });
+  const destinationAddress = (client as any).signer.address as string;
+  const result = await withdraw(destinationAddress as any, mint as any, amount as any);
+  return {
+    queueSignature: String((result as any).queueSignature),
+    callbackSignature: (result as any).callbackSignature
+      ? String((result as any).callbackSignature)
+      : undefined,
+    callbackElapsedMs: (result as any).callbackElapsedMs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -936,74 +1283,6 @@ export async function revokeComplianceGrant(
     args.grant.nonce,
   );
   return signature;
-}
-
-// ---------------------------------------------------------------------------
-// readScopedInvoice — auditor-side re-encryption wrapper
-//
-// Per @umbra-privacy/sdk 2.1.1, getSharedCiphertextReencryptorForUserGrantFunction
-// returns a fire-and-forget handler signature; the actual MPC callback that
-// surfaces plaintext lands later via the Arcium queue. End-to-end plaintext
-// retrieval is a deliberate follow-up — this wrapper returns
-// `{ handlerSignature, pending: true }` and the UI displays a pending state.
-// ---------------------------------------------------------------------------
-
-import { getSharedCiphertextReencryptorForUserGrantFunction } from "@umbra-privacy/sdk";
-
-export interface ReadScopedInvoiceArgs {
-  client: UmbraClient;
-  /** Granter's MVK X25519 public key (32 bytes). */
-  granterX25519PubKey: Uint8Array;
-  /** Receiver (auditor) X25519 public key (32 bytes). */
-  receiverX25519PubKey: Uint8Array;
-  /** Grant nonce — must match the nonce used when the grant was created. */
-  grantNonce: bigint;
-  /** Input nonce — the nonce under which the invoice ciphertexts were encrypted. */
-  inputNonce: bigint;
-  /** 1–6 shared-mode ciphertexts (32 bytes each) to re-encrypt. */
-  ciphertexts: Uint8Array[];
-  __reencryptorOverride?: (
-    granterX25519: Uint8Array,
-    receiverX25519: Uint8Array,
-    grantNonce: bigint,
-    inputNonce: bigint,
-    ciphertexts: Uint8Array[],
-  ) => Promise<string>;
-}
-
-export interface ReadScopedInvoiceResult {
-  /** Handler transaction signature — the MPC callback is still pending. */
-  handlerSignature: string;
-  /** Always true in this SDK version — plaintext retrieval is a follow-up. */
-  pending: true;
-}
-
-export async function readScopedInvoice(
-  args: ReadScopedInvoiceArgs,
-): Promise<ReadScopedInvoiceResult> {
-  if (args.ciphertexts.length === 0) {
-    throw new Error("readScopedInvoice: need at least one ciphertext");
-  }
-  if (args.ciphertexts.length > 6) {
-    throw new Error(
-      `readScopedInvoice: SDK accepts at most 6 ciphertexts per call (got ${args.ciphertexts.length})`,
-    );
-  }
-  const reencrypt = args.__reencryptorOverride
-    ?? ((g, r, gn, inN, cts) => {
-      const fn = getSharedCiphertextReencryptorForUserGrantFunction({ client: args.client });
-      return fn(g as any, r as any, gn as any, inN as any, cts as any) as unknown as Promise<string>;
-    });
-
-  const handlerSignature = await reencrypt(
-    args.granterX25519PubKey,
-    args.receiverX25519PubKey,
-    args.grantNonce,
-    args.inputNonce,
-    args.ciphertexts,
-  );
-
-  return { handlerSignature, pending: true };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,15 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { BN } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 
 vi.mock("@solana/wallet-adapter-react", () => ({
-  useWallet: () => ({
-    connected: true,
-    publicKey: new PublicKey("11111111111111111111111111111112"),
-    signMessage: vi.fn(),
-    signTransaction: vi.fn(),
-  }),
+  useWallet: (() => {
+    const publicKey = new PublicKey("11111111111111111111111111111112");
+    return () => ({
+      connected: true,
+      publicKey,
+      signMessage: vi.fn(),
+      signTransaction: vi.fn(),
+    });
+  })(),
 }));
 
 vi.mock("@/components/ClientWalletMultiButton", () => ({
@@ -43,7 +46,14 @@ vi.mock("@/lib/anchor", () => ({
 vi.mock("@/lib/umbra", () => ({
   getOrCreateClient: vi.fn(async () => ({ signer: { address: "fake" } })),
   isFullyRegistered: vi.fn(async () => true),
-  scanClaimableUtxos: vi.fn(async () => ({ received: [], publicReceived: [] })),
+  diagnoseUmbraReceiver: vi.fn(async () => ({ tokenX25519Matches: true })),
+  repairUmbraReceiverKey: vi.fn(async () => []),
+  scanClaimableUtxos: vi.fn(async () => ({
+    received: [],
+    publicReceived: [],
+    selfBurnable: [],
+    publicSelfBurnable: [],
+  })),
   claimUtxos: vi.fn(async () => undefined),
   getEncryptedBalance: vi.fn(async () => 1_500_000n), // 1.5 USDC in micros as bigint
 }));
@@ -61,7 +71,9 @@ describe("Dashboard page", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Your invoices/i)).toBeInTheDocument();
+      // Page was renamed Dashboard → Activity; the subheading is
+      // "Your private payment activity." in the Invoices tab default.
+      expect(screen.getByText(/Your private payment activity/i)).toBeInTheDocument();
     });
 
     await waitFor(() => {
@@ -97,6 +109,21 @@ describe("Dashboard page", () => {
         name: /Open invoice 11111111111111111111111111111113/i,
       });
       expect(link).toHaveAttribute("href", "/invoice/11111111111111111111111111111113");
+    });
+  });
+
+  it("lets the creator manually confirm a pending invoice", async () => {
+    const anchor = await import("@/lib/anchor");
+    render(<DashboardPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Confirm paid/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirm paid/i }));
+
+    await waitFor(() => {
+      expect(anchor.markPaidOnChain).toHaveBeenCalled();
     });
   });
 });

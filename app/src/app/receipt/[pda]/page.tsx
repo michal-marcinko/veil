@@ -8,6 +8,7 @@ import {
   type SignedReceipt,
 } from "@/lib/receipt";
 import { fetchInvoicePublic } from "@/lib/anchor";
+import { explorerTxUrl as buildExplorerTxUrl } from "@/lib/explorer";
 import { VeilLogo } from "@/components/VeilLogo";
 
 type VerifyState =
@@ -16,9 +17,9 @@ type VerifyState =
   | { kind: "error"; reason: string };
 
 function explorerTxUrl(sig: string): string {
-  // Devnet by default — a `?cluster=devnet` query string makes the link work
-  // regardless of which cluster the user's Solana Explorer remembers.
-  return `https://explorer.solana.com/tx/${sig}?cluster=devnet`;
+  // Cluster suffix is derived from NEXT_PUBLIC_SOLANA_NETWORK so the link
+  // stays correct on mainnet (no suffix) and devnet alike.
+  return buildExplorerTxUrl(sig);
 }
 
 function formatTimestamp(unixSeconds: number): string {

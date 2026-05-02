@@ -2,6 +2,19 @@
 
 Target: 75 seconds total. Recorded at 1080p, two Phantom wallets (Alice + Bob) preloaded on devnet, a third wallet (Carol) for the auditor cameo. Screen recording at 30fps. Voiceover recorded separately, aligned on edit.
 
+## Recommended WOW cut
+
+Lead with `/payroll/outgoing`, not the invoice form. The fastest judge-facing story is:
+
+1. Employer uploads a `wallet,amount,memo` payroll CSV.
+2. Veil shows the explorer comparison: normal payroll exposes sender, receiver, amount; Veil payroll emits opaque Umbra transactions.
+3. Employer runs private payroll through Umbra.
+4. Employer signs one payroll packet.
+5. Open `/payroll/packet#...` to show full accountant reveal.
+6. Open `/disclose/payroll#...` to show one-row selective disclosure.
+
+Use the invoice flow only as a secondary product breadth shot if the recording has time.
+
 ## Shot list
 
 | # | Time | Screen | Voiceover | Cursor / action |

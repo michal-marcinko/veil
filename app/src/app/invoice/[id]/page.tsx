@@ -6,7 +6,13 @@ import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { PublicKey } from "@solana/web3.js";
 import { InvoiceView } from "@/components/InvoiceView";
-import { decryptJson, sha256, deriveKeyFromWalletSignature } from "@/lib/encryption";
+import {
+  decryptJson,
+  sha256,
+  deriveKeyFromWalletSignature,
+  getOrCreateMetadataMasterSig,
+  deriveKeyFromMasterSig,
+} from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice } from "@/lib/anchor";
 import { downloadInvoicePdf } from "@/lib/pdfDownload";
@@ -36,9 +42,6 @@ export default function InvoiceCreatorPage({ params }: { params: { id: string } 
           return;
         }
 
-        setStatus("Awaiting wallet signature to derive decryption key…");
-        const key = await deriveKeyFromWalletSignature(wallet as any, invoicePda.toBase58());
-
         setStatus("Fetching encrypted metadata…");
         const ciphertext = await fetchCiphertext(invoice.metadataUri);
         const computedHash = await sha256(ciphertext);
@@ -50,8 +53,30 @@ export default function InvoiceCreatorPage({ params }: { params: { id: string } 
           return;
         }
 
-        setStatus("Decrypting…");
-        const md = (await decryptJson(ciphertext, key)) as InvoiceMetadata;
+        // Cached metadata master sig (one Phantom popup ever per wallet).
+        // Used for invoices created after we shipped the cached-master-sig
+        // flow. Older invoices were keyed by per-PDA signMessage — those
+        // still work via the legacy fallback below.
+        setStatus("Deriving decryption key…");
+        let md: InvoiceMetadata | null = null;
+        try {
+          const masterSig = await getOrCreateMetadataMasterSig(
+            wallet as any,
+            wallet.publicKey.toBase58(),
+          );
+          const key = await deriveKeyFromMasterSig(masterSig, invoicePda.toBase58());
+          md = (await decryptJson(ciphertext, key)) as InvoiceMetadata;
+        } catch {
+          // Decryption failure most likely means this invoice predates the
+          // cached master-sig migration. Fall back to the legacy per-PDA
+          // sign — one extra Phantom popup, but only for old invoices.
+          setStatus("Awaiting wallet signature (legacy invoice key)…");
+          const legacyKey = await deriveKeyFromWalletSignature(
+            wallet as any,
+            invoicePda.toBase58(),
+          );
+          md = (await decryptJson(ciphertext, legacyKey)) as InvoiceMetadata;
+        }
         setMetadata(md);
         setStatus("done");
       } catch (err: any) {

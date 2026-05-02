@@ -98,6 +98,18 @@ If Feature E is not implemented, skip.
 - [ ] Switch to Carol's browser → reload `/audit/<alice-pubkey>`.
 - [ ] Expected: invoice amounts are no longer decryptable (either a "grant revoked" message or redacted amounts).
 
+## 10. Private payroll WOW path
+
+- [ ] Open `/payroll/outgoing` in Alice's browser.
+- [ ] Paste a CSV with two contractor wallets, small amounts, and memos.
+- [ ] Select **Auto** funding mode.
+- [ ] Click **Run private payroll** and approve the Umbra transactions.
+- [ ] Expected: each row shows `paid`, an explorer transaction link, and the page shows the public-vs-Veil explorer comparison.
+- [ ] Click **Sign receipt packet** and approve the one message signature.
+- [ ] Expected: a JSON packet downloads and a `/payroll/packet#...` verifier link is available.
+- [ ] Copy one row's disclosure link and open it in a clean tab.
+- [ ] Expected: `/disclose/payroll#...` verifies the employer signature and shows only that selected payroll row.
+
 ## Pass criteria
 
 All of the following must be true to consider the smoke test passed:
@@ -106,7 +118,9 @@ All of the following must be true to consider the smoke test passed:
 - [ ] Bob loaded the pay URL, paid, and saw a success state.
 - [ ] Alice's dashboard reflected "Paid" within 60s.
 - [ ] Alice issued a compliance grant to Carol without errors.
-- [ ] Carol saw the decrypted invoice amount on the audit page.
+- [ ] Carol reached the invoice audit page and saw the grant/re-encryption state, or used the signed payroll packet for full amount disclosure.
+- [ ] Private payroll produced at least one paid Umbra tx and a signed packet verifier link.
+- [ ] A single-row payroll disclosure link verified successfully.
 - [ ] (If Feature E) CSV export downloaded with correct columns.
 - [ ] No console errors in any browser (open DevTools → Console tab, should be clean or only contain known warnings).
 

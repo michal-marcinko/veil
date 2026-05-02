@@ -156,7 +156,7 @@ export default function BatchDashboardPage() {
 
       <div className="mt-10 pt-8 border-t border-line">
         <a href="/dashboard" className="btn-quiet">
-          ← Back to dashboard
+          ← Back to activity
         </a>
       </div>
     </Shell>
@@ -210,11 +210,11 @@ function Shell({ children }: { children: React.ReactNode }) {
             <a href="/create" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
               Create
             </a>
-            <a href="/payroll/new" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
-              Payroll
-            </a>
             <a href="/dashboard" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
-              Dashboard
+              Activity
+            </a>
+            <a href="/docs" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
+              Docs
             </a>
             <div className="ml-2">
               <ClientWalletMultiButton />

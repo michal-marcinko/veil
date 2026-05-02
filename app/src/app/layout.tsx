@@ -3,9 +3,13 @@ import type { Metadata } from "next";
 import { VeilWalletProvider } from "@/components/WalletProvider";
 
 export const metadata: Metadata = {
-  title: "Veil — Private invoicing on Solana",
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ??
+      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000"),
+  ),
+  title: "Veil — Private payments on Solana",
   description:
-    "Business-grade confidentiality for Solana payments. Amounts hidden via Umbra + Arcium MPC, counterparty unlinkability through ZK mixer, selective disclosure for auditors.",
+    "Private invoices, private payroll, and selective auditor access for Solana businesses. Settles on Solana via Umbra's encrypted UTXO pool.",
   openGraph: {
     title: "Veil — Private invoicing on Solana",
     description:
