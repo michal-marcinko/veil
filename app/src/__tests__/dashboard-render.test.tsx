@@ -63,6 +63,16 @@ import DashboardPage from "@/app/dashboard/page";
 describe("Dashboard page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The editorial redesign persists the receipt-textarea draft to
+    // localStorage per wallet; clear it so prior tests don't bleed
+    // state into later ones.
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.clear();
+      } catch {
+        // ignore
+      }
+    }
   });
 
   it("renders the happy path without throwing BigInt/number mixing errors", async () => {
@@ -71,9 +81,11 @@ describe("Dashboard page", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      // Page was renamed Dashboard → Activity; the subheading is
-      // "Your private payment activity." in the Invoices tab default.
-      expect(screen.getByText(/Your private payment activity/i)).toBeInTheDocument();
+      // Page was renamed Dashboard → Activity; the editorial-ledger
+      // redesign (2026-05-04) uses Boska "Activity" as the H1 and a
+      // subtitle of "Your private payment ledger — read directly from
+      // Solana." Either marker confirms the page rendered.
+      expect(screen.getByText(/Your private payment ledger/i)).toBeInTheDocument();
     });
 
     await waitFor(() => {
@@ -97,10 +109,12 @@ describe("Dashboard page", () => {
   it("renders the row date without throwing when createdAt is an anchor BN", async () => {
     render(<DashboardPage />);
     await waitFor(() => {
-      // 1713657600 → 2024-04-20 (or similar) — assert *some* YYYY-MM-DD string
-      // appears in a row, which can only happen if Number(BN) conversion worked.
-      const dateRe = /\d{4}-\d{2}-\d{2}/;
-      expect(screen.getByText(dateRe)).toBeInTheDocument();
+      // The editorial redesign (2026-05-04) renders dates as "Apr 21"
+      // (or "Apr 21 '25" for off-year). 1713657600 → 2024-04-21 UTC →
+      // "Apr 21 '24". Match a 3-letter month + 1-2 digit day, which can
+      // only render if Number(BN) conversion worked end-to-end.
+      const dateRe = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/;
+      expect(screen.getAllByText(dateRe).length).toBeGreaterThan(0);
     });
   });
 
@@ -122,14 +136,23 @@ describe("Dashboard page", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Your private payment activity/i)).toBeInTheDocument();
+      expect(screen.getByText(/Your private payment ledger/i)).toBeInTheDocument();
     });
 
     const confirmButton = screen.queryByRole("button", { name: /^Confirm paid$/i });
     expect(confirmButton).toBeNull();
 
-    // Receipt-import UI replaces it.
-    expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
+    // Receipt-import UI replaces it. After the editorial-ledger redesign
+    // (2026-05-04) the apply-receipt UI lives in a slide-over panel —
+    // open it by clicking the toolbar "Bind receipt" trigger first.
+    const trigger = await screen.findByRole("button", {
+      name: /Open the apply-receipt panel/i,
+    });
+    fireEvent.click(trigger);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
+    });
     expect(
       screen.getByPlaceholderText(/https:\/\/veil\.app\/receipt/i),
     ).toBeInTheDocument();
@@ -138,17 +161,35 @@ describe("Dashboard page", () => {
   it("Apply receipt button is disabled until the textarea has input", async () => {
     render(<DashboardPage />);
 
+    // Open the slide-over so the inner Apply receipt button + textarea
+    // become discoverable to RTL queries (closed panels set aria-hidden
+    // on the wrapper which masks descendants from getByRole).
+    const trigger = await screen.findByRole("button", {
+      name: /Open the apply-receipt panel/i,
+    });
+    fireEvent.click(trigger);
+
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
     });
 
     const button = screen.getByRole("button", { name: /Apply receipt/i });
+    // Hydrated draft from a previous test run can pollute localStorage —
+    // explicitly clear the textarea to assert the disabled-when-empty
+    // contract reliably.
+    const textarea = screen.getByPlaceholderText(/https:\/\/veil\.app\/receipt/i);
+    fireEvent.change(textarea, { target: { value: "" } });
     expect(button).toBeDisabled();
   });
 
   it("rejects malformed receipt input with a Receipt error chip", async () => {
     const anchor = await import("@/lib/anchor");
     render(<DashboardPage />);
+
+    const trigger = await screen.findByRole("button", {
+      name: /Open the apply-receipt panel/i,
+    });
+    fireEvent.click(trigger);
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();

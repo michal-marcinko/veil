@@ -4,8 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
-import { DashboardList } from "@/components/DashboardList";
 import { ClaimProgressModal } from "@/components/ClaimProgressModal";
+import { InvoiceRow } from "@/components/InvoiceRow";
+import {
+  DateGroupHeader,
+  bucketByCreatedAt,
+  DATE_BUCKET_ORDER,
+} from "@/components/DateGroupHeader";
+import { SlideOverPanel } from "@/components/SlideOverPanel";
 import { fetchInvoicesByCreator, markPaidOnChain } from "@/lib/anchor";
 import {
   sha256,
@@ -38,6 +44,12 @@ import {
 import bs58 from "bs58";
 
 type DashboardTab = "invoices" | "payroll";
+
+// localStorage key for the apply-receipt textarea draft. Per-wallet so a
+// draft from another wallet doesn't leak. The slide-over hydrates from
+// this on open and writes back on every change — never lose progress
+// when the user closes the panel mid-paste.
+const RECEIPT_DRAFT_STORAGE_PREFIX = "veil:receiptDraft:";
 
 // Storage convention for signed payroll packets. Codex's
 // /payroll/outgoing flow currently emits a verifier URL hash + a JSON/PDF
@@ -165,6 +177,7 @@ export default function DashboardPage() {
   const [invoices, setInvoices] = useState<any[]>([]);
   const [balance, setBalance] = useState<bigint | null>(null);
   const [loading, setLoading] = useState(false);
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
   const [repairingReceiverKey, setRepairingReceiverKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -207,6 +220,10 @@ export default function DashboardPage() {
   const [receiptInput, setReceiptInput] = useState("");
   const [applyingReceipt, setApplyingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  // Slide-over visibility. Opens via the trigger button or the per-row
+  // "bind receipt" hover action; closes via backdrop click + ESC + the
+  // close button + a successful apply.
+  const [receiptPanelOpen, setReceiptPanelOpen] = useState(false);
 
   // Claim-progress modal state. Shown the moment we discover N
   // claimable UTXOs and are about to walk through them sequentially.
@@ -257,6 +274,7 @@ export default function DashboardPage() {
       console.error("[Veil dashboard] fetchInvoicesByCreator failed:", invoicesResult.reason);
       setError(`Invoice list: ${(invoicesResult.reason as any)?.message ?? invoicesResult.reason}`);
       setLoading(false);
+      setHasFetchedOnce(true);
       return;
     }
     if (clientResult.status === "rejected") {
@@ -264,12 +282,14 @@ export default function DashboardPage() {
       console.error("[Veil dashboard] umbra client init failed:", clientResult.reason);
       setError(`Umbra: ${(clientResult.reason as any)?.message ?? clientResult.reason}`);
       setLoading(false);
+      setHasFetchedOnce(true);
       return;
     }
 
     const all = invoicesResult.value;
     const client = clientResult.value;
     setInvoices(all.map((a: any) => ({ pda: a.publicKey, account: a.account })));
+    setHasFetchedOnce(true);
     // Background label decryption — never blocks the spinner.
     void loadInvoiceLabels(all);
 
@@ -697,6 +717,17 @@ export default function DashboardPage() {
 
       setMatchedReceiptCount((c) => c + 1);
       setReceiptInput("");
+      // Clear the persisted draft on successful apply.
+      try {
+        if (typeof window !== "undefined" && wallet.publicKey) {
+          window.localStorage.removeItem(
+            `${RECEIPT_DRAFT_STORAGE_PREFIX}${wallet.publicKey.toBase58()}`,
+          );
+        }
+      } catch {
+        // localStorage unavailable — ignore
+      }
+      setReceiptPanelOpen(false);
       setNotice(
         claimMatched
           ? `Receipt applied — invoice marked Paid (claim signature matched).`
@@ -736,6 +767,21 @@ export default function DashboardPage() {
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, [wallet.publicKey]);
+
+  // Hydrate the receipt-apply textarea draft from localStorage on
+  // wallet change. Per-wallet so a draft from another wallet doesn't
+  // leak. Writes back happen inside the textarea onChange.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!wallet.publicKey) return;
+    try {
+      const key = `${RECEIPT_DRAFT_STORAGE_PREFIX}${wallet.publicKey.toBase58()}`;
+      const draft = window.localStorage.getItem(key);
+      if (draft) setReceiptInput(draft);
+    } catch {
+      // localStorage unavailable / blocked — silently ignore.
+    }
   }, [wallet.publicKey]);
 
   const payrollRunSummaries = useMemo<PayrollRunSummary[]>(() => {
@@ -836,7 +882,7 @@ export default function DashboardPage() {
       <Shell>
         <div className="max-w-lg reveal">
           <span className="eyebrow">Activity</span>
-          <h1 className="mt-4 font-sans font-medium text-ink text-[40px] md:text-[48px] leading-[1.05] tracking-[-0.03em]">
+          <h1 className="mt-4 font-display text-ink text-[44px] md:text-[56px] leading-[1.02] tracking-[-0.02em]">
             Connect to view your activity.
           </h1>
           <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
@@ -851,6 +897,44 @@ export default function DashboardPage() {
     );
   }
 
+  // Open the slide-over with the receipt input prefilled / hydrated.
+  // Per-row "bind receipt" hover action is the entry from a specific
+  // pending invoice; the standalone trigger button opens the panel
+  // empty (or with the persisted draft).
+  function openReceiptPanel(prefillPda?: string) {
+    setReceiptError(null);
+    if (prefillPda && receiptInput.trim() === "") {
+      // Tiny convenience: drop the PDA into the textarea as a hint.
+      // The receipt parser ignores it (a bare PDA is not a valid
+      // receipt), but it gives the user a concrete starting point.
+      setReceiptInput(`# Pasting receipt for invoice ${prefillPda}\n`);
+    }
+    setReceiptPanelOpen(true);
+  }
+
+  function onReceiptInputChange(value: string) {
+    setReceiptInput(value);
+    try {
+      if (typeof window !== "undefined" && wallet.publicKey) {
+        window.localStorage.setItem(
+          `${RECEIPT_DRAFT_STORAGE_PREFIX}${wallet.publicKey.toBase58()}`,
+          value,
+        );
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handlePasteFromClipboard() {
+    try {
+      const text = await navigator.clipboard?.readText();
+      if (text) onReceiptInputChange(text);
+    } catch {
+      setReceiptError("Clipboard read blocked — paste manually with ⌘V / Ctrl+V.");
+    }
+  }
+
   return (
     <Shell pendingCount={pendingInvoices.length}>
       <ClaimProgressModal
@@ -859,12 +943,80 @@ export default function DashboardPage() {
         total={claimModal.total}
         errorMessage={claimModal.error}
       />
+
+      {/* Apply-receipt slide-over panel. Always mounted so its textarea
+          + apply button are findable in tests; transformed off-screen
+          when closed. */}
+      <SlideOverPanel
+        open={receiptPanelOpen}
+        onClose={() => setReceiptPanelOpen(false)}
+        title="Apply payer receipt"
+        subtitle="Paste the signed receipt URL or blob your payer generated. We verify the ed25519 signature locally before submitting on-chain."
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+              Receipt
+            </span>
+            <button
+              type="button"
+              onClick={handlePasteFromClipboard}
+              className="font-sans text-[12px] text-gold hover:text-ink transition-colors"
+            >
+              Paste from clipboard
+            </button>
+          </div>
+          <textarea
+            value={receiptInput}
+            onChange={(e) => onReceiptInputChange(e.target.value)}
+            placeholder="https://veil.app/receipt/<pda>#<blob>  —  or just the blob"
+            rows={8}
+            className="w-full font-mono text-[12px] bg-paper-3 border border-line rounded-[3px] p-3 text-ink placeholder:text-dim resize-y focus:outline-none focus:border-ink min-h-[180px]"
+            disabled={applyingReceipt}
+          />
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-sans text-[11.5px] tracking-[0.08em] text-ink/40 uppercase">
+              {pendingInvoices.length} pending invoice
+              {pendingInvoices.length === 1 ? "" : "s"}
+            </span>
+            <button
+              type="button"
+              onClick={handleApplyReceipt}
+              disabled={applyingReceipt || receiptInput.trim().length === 0}
+              className="btn-ghost text-[13px] px-5 py-2 shrink-0 disabled:opacity-40"
+            >
+              {applyingReceipt ? "Verifying…" : "Apply receipt"}
+            </button>
+          </div>
+          {receiptError && (
+            <div className="flex items-start gap-3 border-l-2 border-brick pl-3 py-1.5">
+              <span className="mono-chip text-brick shrink-0 pt-0.5">
+                Receipt
+              </span>
+              <span className="text-[12.5px] text-ink leading-relaxed flex-1">
+                {receiptError}
+              </span>
+            </div>
+          )}
+          <p className="mt-2 text-[12px] text-ink/50 leading-[1.55]">
+            The receipt cryptographically binds one specific payment to one
+            specific invoice. Drafts are saved automatically — close this
+            panel without losing your work.
+          </p>
+        </div>
+      </SlideOverPanel>
+
+      {/* Page header — Boska serif on the H1 ONLY (per editorial spec).
+          Section sub-headers below use Switzer with letter-spacing. */}
       <div className="flex items-baseline justify-between mb-10 reveal">
         <div>
           <span className="eyebrow">Activity</span>
-          <h1 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
-            Your private payment activity.
+          <h1 className="mt-3 font-display text-ink text-[44px] md:text-[60px] leading-[1.0] tracking-[-0.02em]">
+            Activity
           </h1>
+          <p className="mt-3 text-[14.5px] text-ink/55 max-w-lg leading-[1.5]">
+            Your private payment ledger — read directly from Solana.
+          </p>
         </div>
         <button
           onClick={refresh}
@@ -911,10 +1063,12 @@ export default function DashboardPage() {
             <div className="mb-10 border border-line bg-paper-3 rounded-[4px] p-6 md:p-7 reveal">
               <div className="flex items-baseline justify-between gap-6">
                 <div>
-                  <span className="eyebrow">Private {PAYMENT_SYMBOL} balance</span>
-                  <div className="mt-3 font-sans tnum text-ink text-[32px] md:text-[40px] font-medium tracking-[-0.02em] leading-none">
+                  <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+                    Private {PAYMENT_SYMBOL} balance
+                  </span>
+                  <div className="mt-3 font-sans tabular-nums tracking-tight text-ink text-[32px] md:text-[40px] font-medium leading-none">
                     {formatBigintAmount(balance, PAYMENT_DECIMALS)}
-                    <span className="ml-3 font-mono text-[12px] text-muted tracking-[0.14em] uppercase">
+                    <span className="ml-3 font-sans text-[12px] tracking-[0.14em] text-ink/45 uppercase">
                       {PAYMENT_SYMBOL}
                     </span>
                   </div>
@@ -987,13 +1141,13 @@ export default function DashboardPage() {
           {incoming.length > 0 && (
             <div className="mb-5 flex flex-col sm:flex-row gap-3 sm:items-center max-w-3xl">
               <label className="flex items-center gap-2 shrink-0">
-                <span className="font-mono text-[10.5px] tracking-[0.12em] uppercase text-dim">
+                <span className="font-sans text-[10.5px] tracking-[0.18em] uppercase text-ink/45">
                   Status
                 </span>
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                  className="font-mono text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink focus:outline-none focus:border-ink cursor-pointer tracking-[0.04em]"
+                  className="font-sans text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink focus:outline-none focus:border-ink cursor-pointer"
                   aria-label="Filter invoices by status"
                 >
                   <option value="all">All</option>
@@ -1007,7 +1161,7 @@ export default function DashboardPage() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search by description, recipient, or PDA prefix"
-                className="flex-1 font-mono text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink placeholder:text-dim focus:outline-none focus:border-ink"
+                className="flex-1 font-sans text-[13px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink placeholder:text-dim focus:outline-none focus:border-ink"
                 aria-label="Search invoices"
               />
               {(statusFilter !== "all" || searchQuery) && (
@@ -1022,79 +1176,79 @@ export default function DashboardPage() {
                   Clear
                 </button>
               )}
+              {pendingInvoices.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => openReceiptPanel()}
+                  className="btn-ghost text-[12px] px-3 py-1.5 shrink-0"
+                  aria-label="Open the apply-receipt panel"
+                >
+                  Bind receipt
+                </button>
+              )}
             </div>
           )}
 
-          {/* List body. When the user is browsing flat-filter (no status
-              filter, no search) AND the paid pile is large, we split out
-              Pending vs Paid and collapse Paid behind a "Show all"
-              expander to keep the page short. Otherwise a single sorted
-              list does the job — the filter chips already make the
-              status visible per row. */}
+          {/* List body. */}
           {(() => {
+            // Initial-fetch skeleton (NN/G recommends skeleton over
+            // spinner for content lists). Renders ~3 placeholder rows
+            // matching the editorial-row layout while invoices load.
+            if (loading && !hasFetchedOnce) {
+              return <LedgerSkeleton />;
+            }
+
             const isFlatBrowse =
               statusFilter === "all" && searchQuery.trim() === "";
             const shouldSplit =
               isFlatBrowse && paidInvoices.length > PAID_COLLAPSE_THRESHOLD;
+
+            if (incoming.length === 0) {
+              return <LedgerEmptyState kind="zero" />;
+            }
+
+            if (
+              filteredInvoices.length === 0 &&
+              !shouldSplit
+            ) {
+              return (
+                <LedgerEmptyState
+                  kind="filtered"
+                  onClear={() => {
+                    setStatusFilter("all");
+                    setSearchQuery("");
+                  }}
+                />
+              );
+            }
+
             if (!shouldSplit) {
               const titleBase =
                 statusFilter === "all"
                   ? "Invoices you created"
                   : `${statusFilter[0].toUpperCase()}${statusFilter.slice(1)} invoices`;
-              // When the user has narrowed the list to zero, show a
-              // search/filter-aware empty state (DashboardList's default
-              // empty state pitches "Create your first invoice", which
-              // is wrong here — the user has 30 invoices, just none
-              // match their query).
-              if (
-                incoming.length > 0 &&
-                filteredInvoices.length === 0
-              ) {
-                return (
-                  <div>
-                    <div className="flex items-baseline justify-between mb-4">
-                      <span className="eyebrow">{titleBase}</span>
-                      <span className="font-mono text-[11px] text-dim tnum">
-                        00 / {String(incoming.length).padStart(2, "0")}
-                      </span>
-                    </div>
-                    <div className="border border-dashed border-line rounded-[4px] p-10 text-center">
-                      <p className="text-[14px] text-muted">
-                        No invoices match your filters.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setStatusFilter("all");
-                          setSearchQuery("");
-                        }}
-                        className="mt-3 btn-quiet text-[12px]"
-                      >
-                        Clear filters
-                      </button>
-                    </div>
-                  </div>
-                );
-              }
               return (
-                <DashboardList
+                <LedgerSection
                   title={titleBase}
                   invoices={filteredInvoices}
                   labels={labels}
+                  onBindReceipt={(pda) => openReceiptPanel(pda)}
                 />
               );
             }
+
             // Split view: Pending up top, Paid collapsed by default.
             const nonPaidPending = incoming.filter(
               (i) => i.status !== "paid",
             );
             const visiblePaid = showAllPaid ? paidInvoices : [];
             return (
-              <div className="space-y-10">
-                <DashboardList
-                  title={`Pending (${pendingInvoices.length})`}
+              <div className="space-y-12">
+                <LedgerSection
+                  title={`Pending · ${pendingInvoices.length}`}
                   invoices={nonPaidPending}
                   labels={labels}
+                  onBindReceipt={(pda) => openReceiptPanel(pda)}
                 />
                 <div>
                   {showAllPaid ? (
@@ -1109,17 +1263,18 @@ export default function DashboardPage() {
                           Hide
                         </button>
                       </div>
-                      <DashboardList
-                        title={`Paid (${paidInvoices.length})`}
+                      <LedgerSection
+                        title={`Paid · ${paidInvoices.length}`}
                         invoices={visiblePaid}
                         labels={labels}
+                        onBindReceipt={(pda) => openReceiptPanel(pda)}
                       />
                     </>
                   ) : (
                     <>
                       <div className="flex items-baseline justify-between mb-4">
-                        <span className="eyebrow">
-                          Paid ({paidInvoices.length})
+                        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+                          Paid · {paidInvoices.length}
                         </span>
                         <button
                           type="button"
@@ -1145,61 +1300,12 @@ export default function DashboardPage() {
             );
           })()}
 
-          {pendingInvoices.length > 0 && (
-            <div className="mt-10 border border-gold/30 bg-gold/5 rounded-[4px] p-5 max-w-3xl">
-              <div className="flex items-start justify-between gap-6">
-                <div className="flex-1">
-                  <span className="eyebrow">Apply payer receipt</span>
-                  <p className="mt-2 text-[13.5px] leading-relaxed text-ink/75">
-                    To mark a Pending invoice Paid, paste the signed receipt
-                    URL or blob your payer generated on the pay page. The
-                    receipt cryptographically binds one specific payment to
-                    one specific invoice — this dashboard verifies the
-                    payer&apos;s ed25519 signature before submitting on-chain.
-                  </p>
-                </div>
-              </div>
-              <div className="mt-4 flex flex-col gap-3">
-                <textarea
-                  value={receiptInput}
-                  onChange={(e) => setReceiptInput(e.target.value)}
-                  placeholder="https://veil.app/receipt/<pda>#<blob>  —  or just the blob"
-                  rows={3}
-                  className="w-full font-mono text-[12px] bg-paper border border-line rounded-[3px] p-3 text-ink placeholder:text-dim resize-y focus:outline-none focus:border-ink"
-                  disabled={applyingReceipt}
-                />
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-[11.5px] font-mono tracking-[0.08em] text-dim uppercase">
-                    {pendingInvoices.length} invoice
-                    {pendingInvoices.length === 1 ? "" : "s"} pending
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleApplyReceipt}
-                    disabled={applyingReceipt || receiptInput.trim().length === 0}
-                    className="btn-ghost text-[12px] px-4 py-2 shrink-0 disabled:opacity-40"
-                  >
-                    {applyingReceipt ? "Verifying…" : "Apply receipt"}
-                  </button>
-                </div>
-                {receiptError && (
-                  <div className="flex items-start gap-3 border-l-2 border-brick pl-3 py-1.5">
-                    <span className="mono-chip text-brick shrink-0 pt-0.5">
-                      Receipt
-                    </span>
-                    <span className="text-[12.5px] text-ink leading-relaxed flex-1">
-                      {receiptError}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
           {batchList.length > 0 && (
             <div className="mt-14">
               <div className="flex items-baseline justify-between mb-6 border-b border-line pb-3">
-                <span className="eyebrow">Invoice batches</span>
+                <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+                  Invoice batches
+                </span>
                 <div className="flex items-center gap-4">
                   <a href="/payroll/outgoing" className="btn-quiet text-[12px]">
                     Run private payroll
@@ -1209,16 +1315,19 @@ export default function DashboardPage() {
                   </a>
                 </div>
               </div>
-              <ul className="divide-y divide-line/60">
+              <ul className="divide-y divide-ink/5">
                 {batchList.map((b) => (
-                  <li key={b.batchId} className="py-4 grid grid-cols-[1fr_auto_auto] gap-4 items-baseline">
+                  <li
+                    key={b.batchId}
+                    className="py-4 grid grid-cols-[1fr_auto_auto] gap-4 items-baseline"
+                  >
                     <a
                       href={`/payroll/${b.batchId}`}
                       className="font-mono text-[13px] text-ink hover:text-gold transition-colors truncate"
                     >
                       {b.batchId}
                     </a>
-                    <span className="font-mono text-[12px] text-dim tabular-nums">
+                    <span className="font-sans text-[12px] text-ink/45 tabular-nums">
                       {b.count} invoice{b.count === 1 ? "" : "s"}
                     </span>
                     <a href={`/payroll/${b.batchId}`} className="btn-quiet text-[12px]">
@@ -1248,19 +1357,185 @@ export default function DashboardPage() {
   );
 }
 
+/**
+ * Ledger section — title + grouped editorial rows.
+ *
+ * Rows are bucketed by createdAt into Today/Yesterday/This week/...
+ * with sticky DateGroupHeader for each non-empty bucket. Stagger
+ * fade-up on initial mount (animation-delay per index, capped at
+ * 600ms).
+ */
+function LedgerSection({
+  title,
+  invoices,
+  labels,
+  onBindReceipt,
+}: {
+  title: string;
+  invoices: Array<{
+    pda: string;
+    status: string;
+    createdAt: number;
+  }>;
+  labels: Map<string, { payer: string; amount: string; description: string }>;
+  onBindReceipt: (pda: string) => void;
+}) {
+  // Bucket the (already sorted DESC by createdAt) list. Empty buckets
+  // are skipped at render time but the order is fixed by
+  // DATE_BUCKET_ORDER.
+  const buckets = new Map<string, typeof invoices>();
+  for (const inv of invoices) {
+    const key = bucketByCreatedAt(inv.createdAt);
+    const arr = buckets.get(key) ?? [];
+    arr.push(inv);
+    buckets.set(key, arr);
+  }
+  let runningIndex = 0;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-4">
+        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+          {title}
+        </span>
+        <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
+          {String(invoices.length).padStart(2, "0")}
+        </span>
+      </div>
+      <ul className="divide-y divide-ink/5">
+        {DATE_BUCKET_ORDER.flatMap((bucketLabel) => {
+          const rows = buckets.get(bucketLabel);
+          if (!rows || rows.length === 0) return [];
+          const elements = [
+            <DateGroupHeader
+              key={`hdr-${bucketLabel}`}
+              label={bucketLabel}
+              count={`${String(rows.length).padStart(2, "0")}`}
+            />,
+            ...rows.map((inv) => {
+              const idx = runningIndex++;
+              const delay = Math.min(idx * 50, 600);
+              return (
+                <InvoiceRow
+                  key={inv.pda}
+                  pda={inv.pda}
+                  status={inv.status}
+                  createdAt={inv.createdAt}
+                  label={labels.get(inv.pda)}
+                  animationDelayMs={delay}
+                  onBindReceipt={onBindReceipt}
+                />
+              );
+            }),
+          ];
+          return elements;
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Editorial empty state — Boska italic centered, "No invoices match
+ * your filters." or "No invoices yet." NO cartoonish illustration.
+ */
+function LedgerEmptyState({
+  kind,
+  onClear,
+}: {
+  kind: "zero" | "filtered";
+  onClear?: () => void;
+}) {
+  if (kind === "zero") {
+    return (
+      <div className="border border-dashed border-line rounded-[4px] py-16 px-8 text-center max-w-2xl mx-auto">
+        <p className="font-display italic text-ink/80 text-[24px] leading-[1.3]">
+          A blank page.
+        </p>
+        <p className="mt-3 text-[14px] text-ink/55 leading-relaxed max-w-md mx-auto">
+          You haven&apos;t created any invoices yet. The first one shows up
+          here the moment it lands on Solana.
+        </p>
+        <a href="/create" className="mt-6 inline-block btn-quiet text-[13px]">
+          Create your first invoice →
+        </a>
+      </div>
+    );
+  }
+  return (
+    <div className="border border-dashed border-line rounded-[4px] py-14 px-8 text-center max-w-2xl mx-auto">
+      <p className="font-display italic text-ink/80 text-[22px] leading-[1.3]">
+        No invoices match your filters.
+      </p>
+      <p className="mt-3 text-[13.5px] text-ink/55 leading-relaxed max-w-md mx-auto">
+        Try a different status or clear the search to see everything again.
+      </p>
+      {onClear && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-5 btn-quiet text-[13px]"
+        >
+          Clear filters →
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Loading skeleton — three placeholder rows matching the editorial-row
+ * layout. bg-paper-2 + animate-pulse. Holds the layout open during the
+ * initial fetch so the page doesn't reflow when invoices arrive.
+ */
+function LedgerSkeleton() {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-4">
+        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/30">
+          Loading
+        </span>
+        <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/25">
+          ··
+        </span>
+      </div>
+      <ul className="divide-y divide-ink/5">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <li key={i} className="px-4 py-3">
+            <div className="hidden sm:grid sm:grid-cols-[88px_1fr_140px_auto_auto] sm:items-center sm:gap-5">
+              <div className="skeleton-bar h-[12px] w-[60px]" />
+              <div className="skeleton-bar h-[14px] w-[55%]" />
+              <div className="skeleton-bar h-[10px] w-[100px]" />
+              <div className="skeleton-bar h-[14px] w-[80px] justify-self-end" />
+              <div className="skeleton-bar h-[12px] w-[70px]" />
+            </div>
+            <div className="sm:hidden flex flex-col gap-2">
+              <div className="skeleton-bar h-[14px] w-[60%]" />
+              <div className="skeleton-bar h-[12px] w-[40%]" />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function PayrollRunsView({ runs }: { runs: PayrollRunSummary[] }) {
   if (runs.length === 0) {
     return (
       <div className="reveal">
         <div className="flex items-baseline justify-between mb-4">
-          <span className="eyebrow">Outgoing payroll runs</span>
-          <span className="font-mono text-[11px] text-dim tnum">00</span>
+          <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+            Outgoing payroll runs
+          </span>
+          <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
+            00
+          </span>
         </div>
-        <div className="border border-dashed border-line rounded-[4px] p-12 text-center max-w-2xl">
-          <p className="font-sans text-ink text-[18px] leading-[1.45] tracking-[-0.01em] max-w-md mx-auto">
+        <div className="border border-dashed border-line rounded-[4px] py-16 px-8 text-center max-w-2xl mx-auto">
+          <p className="font-display italic text-ink/80 text-[22px] leading-[1.3]">
             No payroll runs yet.
           </p>
-          <p className="mt-2 text-[13.5px] text-muted leading-relaxed max-w-md mx-auto">
+          <p className="mt-3 text-[13.5px] text-ink/55 leading-relaxed max-w-md mx-auto">
             Sign your first batch in Create &rarr; Payroll. Once signed, every
             run shows up here with its disclosure links and settlement status.
           </p>
@@ -1275,8 +1550,10 @@ function PayrollRunsView({ runs }: { runs: PayrollRunSummary[] }) {
   return (
     <div className="reveal">
       <div className="flex items-baseline justify-between mb-4">
-        <span className="eyebrow">Outgoing payroll runs</span>
-        <span className="font-mono text-[11px] text-dim tnum">
+        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
+          Outgoing payroll runs
+        </span>
+        <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
           {String(runs.length).padStart(2, "0")}
         </span>
       </div>
@@ -1307,18 +1584,18 @@ function PayrollRunRow({ run }: { run: PayrollRunSummary }) {
         aria-label={`Open payroll run ${packet.batchId}`}
       >
         <div className="flex items-baseline gap-5 min-w-0 flex-1">
-          <span className="font-mono text-[11px] text-dim tnum shrink-0">
+          <span className="font-sans tabular-nums text-[12px] text-ink/45 shrink-0 tracking-tight">
             {dateLabel}
           </span>
           <div className="flex items-baseline gap-3 min-w-0 flex-1">
-            <span className="font-mono text-[13px] text-ink truncate">
+            <span className="font-mono text-[12px] text-ink/55 truncate">
               {batchShort}
             </span>
-            <span className="text-[12px] text-muted shrink-0 tnum">·</span>
-            <span className="text-[13px] text-ink/80 tnum shrink-0">
+            <span className="text-[12px] text-ink/40 shrink-0">·</span>
+            <span className="font-sans tabular-nums tracking-tight text-[15px] text-ink shrink-0">
               {totalDisplay}
             </span>
-            <span className="font-mono text-[10.5px] text-dim tracking-[0.05em] truncate hidden md:inline">
+            <span className="font-sans text-[10.5px] text-ink/40 tracking-tight truncate hidden md:inline">
               {recipients} recipient{recipients === 1 ? "" : "s"} · {run.paid} paid
               {run.failed > 0 ? ` · ${run.failed} failed` : ""}
             </span>
@@ -1378,7 +1655,7 @@ function Shell({
 }) {
   return (
     <main className="min-h-screen relative pb-32">
-      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+      <nav className="sticky top-0 z-20 backdrop-blur-sm bg-paper/80 border-b border-line">
         <div className="max-w-[1400px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
           <VeilLogo tagline="activity" />
           <div className="flex items-center gap-1 md:gap-2">
