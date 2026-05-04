@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * Detect Mac after mount. SSR returns null so we don't hydrate a wrong
@@ -70,6 +71,15 @@ interface Props {
 }
 
 export function CanvasBar({ state, formId = "canvas-form" }: Props) {
+  // Render via portal to document.body. Without this, an ancestor with
+  // a `transform` property (e.g. CreatePageInner's .form-reveal section,
+  // which animates translateY + scale) becomes the containing block for
+  // our position:fixed bar, anchoring it inside the section instead of
+  // to the viewport. Portaling to body keeps the bar pinned to the
+  // viewport regardless of where in the DOM tree it's mounted.
+  const [container, setContainer] = useState<HTMLElement | null>(null);
+  useEffect(() => setContainer(document.body), []);
+
   // Keyboard handlers — scoped to component mount lifetime, which
   // unmounts on route change (Next.js page transition).
   useEffect(() => {
@@ -100,7 +110,7 @@ export function CanvasBar({ state, formId = "canvas-form" }: Props) {
     return () => window.removeEventListener("keydown", handleKey);
   }, [state, formId]);
 
-  return (
+  const bar = (
     <div
       data-testid="canvas-bar"
       data-state={state.kind}
@@ -115,6 +125,14 @@ export function CanvasBar({ state, formId = "canvas-form" }: Props) {
       </div>
     </div>
   );
+
+  // SSR + pre-effect: render nothing, avoiding the hydration mismatch
+  // that would result from rendering in place on server then portaling
+  // on client. One render cycle late on first load is negligible — this
+  // is a sticky footer, not a hero element.
+  if (!container) return null;
+
+  return createPortal(bar, container);
 }
 
 function ComposeContent({
