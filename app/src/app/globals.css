@@ -412,6 +412,43 @@
       animation: none !important;
     }
   }
+
+  /* ─── Gift recipient surface ───────────────────────────────────────
+     Slightly warmer treatment than the rest of the app: gold-leaf gradient
+     halo around the amount, soft confetti drift on success. Editorial-
+     celebratory, not crypto-bro confetti — long durations, low opacity,
+     small particle count. The recipient page IS the moment of delight,
+     so we let ourselves be a touch more expressive here than anywhere
+     else. */
+
+  .gift-halo {
+    background: radial-gradient(
+      ellipse at 30% 20%,
+      rgba(106, 36, 32, 0.08) 0%,
+      rgba(106, 36, 32, 0.02) 40%,
+      transparent 70%
+    );
+  }
+
+  /* Slow ascending drift used for the four gold dots on the success
+     state. Each dot gets a different animation-delay (inline) so they
+     don't pulse in lockstep. */
+  @keyframes gift-drift {
+    0%   { transform: translateY(0) translateX(0); opacity: 0; }
+    20%  { opacity: 0.7; }
+    50%  { transform: translateY(-22px) translateX(8px); opacity: 0.6; }
+    100% { transform: translateY(-44px) translateX(-2px); opacity: 0; }
+  }
+  .gift-drift {
+    animation: gift-drift 4.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .gift-drift {
+      animation: none !important;
+      opacity: 0.4;
+    }
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────
