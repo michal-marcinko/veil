@@ -272,6 +272,24 @@ export default function PayrollNewPage() {
 
   return (
     <Frame heading="New payroll batch">
+      {/*
+        Claim-link awareness banner. /payroll/new publishes invoice
+        PDAs for each recipient — they have to follow the per-row link
+        and pay it. The newer /payroll/outgoing flow does the inverse
+        (Veil sends Umbra payments OUT to recipients) and now supports
+        unregistered recipients via one-shot claim links. We surface
+        the link here so finance teams onboarding contractors who
+        don't yet have an Umbra account land on the right flow.
+      */}
+      <div className="mb-8 max-w-3xl border border-line bg-paper-3 rounded-[3px] p-4 text-[13px] leading-relaxed">
+        <span className="mono-chip text-sage">New</span>{" "}
+        <span className="text-ink/80">
+          Sending payouts to recipients who&apos;ve never used Umbra?{" "}
+        </span>
+        <a href="/payroll/outgoing" className="underline text-ink hover:text-sage">
+          Use outgoing payroll with claim links →
+        </a>
+      </div>
       <PayrollCsvUploader
         onSubmit={handleSubmit}
         submitting={submitting}
