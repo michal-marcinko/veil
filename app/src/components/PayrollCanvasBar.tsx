@@ -121,7 +121,7 @@ function ComposeBar({
   return (
     <>
       <span className="canvas-bar-meta hidden sm:inline-flex">
-        Private payroll · Umbra
+        Encrypts · Anchors · Umbra
       </span>
       <div className="ml-auto flex items-center gap-3 md:gap-5">
         <span
