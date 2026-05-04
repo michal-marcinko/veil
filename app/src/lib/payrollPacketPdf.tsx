@@ -91,11 +91,39 @@ const styles = StyleSheet.create({
   },
 });
 
-export function PayrollPacketPdfDocument({ signed }: { signed: SignedPayrollPacket }) {
+/**
+ * Optional supplementary data: a per-row map of claim URLs that were
+ * generated during the run for unregistered recipients. Keyed by row
+ * index because URLs aren't part of the signed packet (they belong to
+ * the private off-band hand-off, not the auditable disclosure).
+ *
+ * When present, the PDF appends a final page listing every claim URL
+ * so the employer has a single archival document to file or print.
+ */
+export type PayrollPacketClaimUrls = Readonly<Record<number, string>>;
+
+export interface PayrollPacketPdfProps {
+  signed: SignedPayrollPacket;
+  /**
+   * Optional per-row claim URLs. When provided, the PDF appends a
+   * "Claim links" page with the URLs spelled out — the employer can
+   * print + manually distribute, or archive alongside the signed
+   * packet. Excluded from the signed payload because URLs contain
+   * private-key material in the fragment (see payroll-claim-links.ts).
+   */
+  claimUrls?: PayrollPacketClaimUrls;
+}
+
+export function PayrollPacketPdfDocument({ signed, claimUrls }: PayrollPacketPdfProps) {
   const packet = signed.packet;
   const paid = packet.rows.filter((row) => row.status === "paid").length;
   const failed = packet.rows.length - paid;
   const total = packet.rows.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+  const claimEntries = claimUrls
+    ? Object.entries(claimUrls)
+        .map(([k, v]) => ({ index: Number(k), url: v }))
+        .sort((a, b) => a.index - b.index)
+    : [];
 
   return (
     <Document
@@ -151,6 +179,43 @@ export function PayrollPacketPdfDocument({ signed }: { signed: SignedPayrollPack
           Payer signature: {signed.signature}
         </Text>
       </Page>
+
+      {claimEntries.length > 0 && (
+        <Page size="A4" style={styles.page}>
+          <Text style={styles.eyebrow}>Claim links</Text>
+          <Text style={styles.title}>One-shot links per unregistered recipient</Text>
+          <Text style={styles.subtitle}>
+            These URLs let the recipient claim funds without registering with
+            Umbra in advance. The fragment after `#` contains a one-time
+            private key — anyone with the URL can claim. Treat them like
+            bearer tokens: send privately, never paste into a public channel.
+            Each URL is single-use; once claimed, the shadow account is empty.
+          </Text>
+          <View style={styles.table}>
+            <View style={styles.row}>
+              <Text style={[styles.headerCell, { width: "6%" }]}>#</Text>
+              <Text style={[styles.headerCell, { width: "29%" }]}>Recipient</Text>
+              <Text style={[styles.headerCell, styles.lastCell, { width: "65%" }]}>
+                Claim URL
+              </Text>
+            </View>
+            {claimEntries.map(({ index, url }) => {
+              const row = packet.rows[index];
+              return (
+                <View key={`claim-${index}`} style={styles.row}>
+                  <Text style={[styles.cell, { width: "6%" }]}>{index + 1}</Text>
+                  <Text style={[styles.cell, { width: "29%" }]}>
+                    {row ? truncate(row.recipient) : "(unknown row)"}
+                  </Text>
+                  <Text style={[styles.cell, styles.lastCell, { width: "65%" }]}>
+                    {url}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </Page>
+      )}
     </Document>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import {
@@ -35,6 +35,19 @@ import {
   downloadPayrollPacketJson,
   downloadPayrollPacketPdf,
 } from "@/lib/payrollPacketDownload";
+import {
+  buildShadowClient,
+  checkRecipientsRegistration,
+  depositToShadow,
+  fundShadowAccount,
+  generateClaimUrl,
+  generateEphemeralKeypair,
+  registerShadowAccount,
+  rowsToClaimLinkCsv,
+  SHADOW_FUNDING_LAMPORTS,
+  type ClaimLinkRow,
+  type RegistrationStatus,
+} from "@/lib/payroll-claim-links";
 
 /**
  * PayrollFlow — self-contained outgoing-payroll experience.
@@ -55,6 +68,20 @@ type RunMode = "auto" | "shielded" | "public";
 
 interface PayrollRunRow extends PayrollPacketRow {
   amountDisplay: string;
+  /** Set when this row was paid via the claim-link path. The URL must be
+   *  shared with the recipient (downloadable CSV or PDF). */
+  claimUrl?: string;
+  /** Set when this row used the claim-link path — surfaced in the
+   *  ledger so the employer knows extra setup happened. */
+  registrationStatus?: RegistrationStatus;
+}
+
+interface RegistrationDetectionResult {
+  /** Aligned 1:1 with parsed.rows. */
+  rowStatuses: RegistrationStatus[];
+  /** Indexes of rows that need claim links. */
+  unregisteredIndexes: number[];
+  unknownIndexes: number[];
 }
 
 const SAMPLE_CSV =
@@ -64,6 +91,7 @@ const SAMPLE_CSV =
 
 export function PayrollFlow() {
   const wallet = useWallet();
+  const { connection } = useConnection();
 
   const [companyName, setCompanyName] = useState("");
   const [csvText, setCsvText] = useState("");
@@ -84,6 +112,13 @@ export function PayrollFlow() {
     commitment: "pending",
   });
 
+  // Registration-detection state. Populated by handleDetectRegistration
+  // (called after CSV is valid, before payroll run starts). Lets us
+  // show the per-row status BEFORE the employer commits to the run, so
+  // the cost of unregistered recipients (≈ 0.01 SOL each) is upfront.
+  const [detection, setDetection] = useState<RegistrationDetectionResult | null>(null);
+  const [detecting, setDetecting] = useState(false);
+
   const parsed = useMemo(() => parsePayrollCsv(csvText), [csvText]);
   const total = useMemo(() => {
     let sum = 0n;
@@ -93,6 +128,49 @@ export function PayrollFlow() {
     }
     return sum;
   }, [parsed.rows]);
+
+  /**
+   * Read-only on-chain query: which recipients are already Umbra-
+   * registered, and which need a claim link? Cheap (no popups, just RPC
+   * reads). Result drives the inline preview status chips and the
+   * "extra setup cost" disclosure.
+   */
+  async function handleDetectRegistration() {
+    if (!wallet.publicKey || parsed.rows.length === 0) return;
+    setDetecting(true);
+    setError(null);
+    try {
+      // Re-uses the user's already-loaded Umbra client. The querier
+      // accepts any address — we don't need to spin up another client
+      // per recipient.
+      const client = await getOrCreateClient(wallet as any);
+      const results = await checkRecipientsRegistration(
+        client,
+        parsed.rows.map((r) => r.wallet),
+      );
+      const rowStatuses = results.map((r) => r.status);
+      const unregisteredIndexes: number[] = [];
+      const unknownIndexes: number[] = [];
+      rowStatuses.forEach((status, idx) => {
+        if (status === "unregistered") unregisteredIndexes.push(idx);
+        if (status === "unknown") unknownIndexes.push(idx);
+      });
+      setDetection({ rowStatuses, unregisteredIndexes, unknownIndexes });
+    } catch (err: any) {
+      setError(`Registration detection failed: ${err.message ?? String(err)}`);
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  // Whenever the CSV changes the previous detection is stale.
+  // We invalidate eagerly via this callback rather than useEffect
+  // so the user can't accidentally re-use a cached detection over
+  // a different recipient set.
+  function onCsvTextChange(next: string) {
+    setCsvText(next);
+    setDetection(null);
+  }
 
   async function runPayroll() {
     if (!wallet.publicKey) {
@@ -146,7 +224,57 @@ export function PayrollFlow() {
       for (let i = 0; i < parsed.rows.length; i++) {
         const row = parsed.rows[i];
         const prepared = prepareRow(row, i);
-        setRows([...resultRows, { ...prepared, status: "paid", txSignature: null, error: null }]);
+        const status = detection?.rowStatuses[i];
+
+        // Branch A: recipient is unregistered → claim-link path. We
+        // generate a one-shot shadow account, fund it, register it,
+        // deposit the payout, then bake the URL into the run result.
+        // The sender pays for everything; the recipient just clicks.
+        if (status === "unregistered") {
+          setRows([
+            ...resultRows,
+            { ...prepared, status: "paid", txSignature: null, error: null, registrationStatus: "unregistered" },
+          ]);
+          try {
+            const claimResult = await sendViaClaimLink({
+              prepared,
+              payerClient: client,
+              payerWallet: wallet,
+              connection,
+              companyName,
+              batchId,
+              rowIndex: i,
+            });
+            resultRows.push({
+              ...prepared,
+              status: "paid",
+              mode: "public",
+              txSignature: claimResult.depositSignature,
+              error: null,
+              claimUrl: claimResult.claimUrl,
+              registrationStatus: "unregistered",
+            });
+          } catch (err: any) {
+            resultRows.push({
+              ...prepared,
+              status: "failed",
+              mode: "public",
+              txSignature: null,
+              error: `Claim-link path failed: ${err.message ?? String(err)}`,
+              registrationStatus: "unregistered",
+            });
+          }
+          setRows([...resultRows]);
+          continue;
+        }
+
+        // Branch B: recipient is registered (or detection wasn't run / was
+        // "unknown" — we optimistically attempt direct send, the SDK will
+        // throw if the recipient really has no account).
+        setRows([
+          ...resultRows,
+          { ...prepared, status: "paid", txSignature: null, error: null, registrationStatus: status },
+        ]);
         try {
           const payResult = useShieldedForRun
             ? await payInvoiceFromShielded({
@@ -167,6 +295,7 @@ export function PayrollFlow() {
             mode: useShieldedForRun ? "shielded" : "public",
             txSignature: payResult.createUtxoSignature,
             error: null,
+            registrationStatus: status,
           });
         } catch (err: any) {
           resultRows.push({
@@ -175,6 +304,7 @@ export function PayrollFlow() {
             mode: useShieldedForRun ? "shielded" : "public",
             txSignature: null,
             error: err.message ?? String(err),
+            registrationStatus: status,
           });
         }
         setRows([...resultRows]);
@@ -189,7 +319,12 @@ export function PayrollFlow() {
         symbol: PAYMENT_SYMBOL,
         decimals: PAYMENT_DECIMALS,
         createdAt: new Date().toISOString(),
-        rows: resultRows.map(({ amountDisplay, ...row }) => row),
+        // Strip the run-only fields (amountDisplay, claimUrl,
+        // registrationStatus) before signing the packet — the canonical
+        // PayrollPacketRow shape is fixed by the verifier on the
+        // disclosure side, and adding fields here would invalidate
+        // existing receipts.
+        rows: resultRows.map(({ amountDisplay, claimUrl, registrationStatus, ...row }) => row),
       };
       setPacket(nextPacket);
       setNotice("Payroll run complete. Sign one packet to create receipts and disclosure links.");
@@ -199,6 +334,71 @@ export function PayrollFlow() {
     } finally {
       setRunning(false);
     }
+  }
+
+  /**
+   * Claim-link path: register a one-shot shadow account, fund it,
+   * deposit the payout into its encrypted balance, and return the URL
+   * Bob will click. Wraps the helpers in payroll-claim-links.ts so the
+   * sequencing + error reporting lives close to the run loop.
+   *
+   * Throws if any sub-step fails. The caller catches and marks the row
+   * as failed in the run ledger.
+   */
+  async function sendViaClaimLink(args: {
+    prepared: PayrollRunRow;
+    payerClient: any;
+    payerWallet: any;
+    connection: any;
+    companyName: string;
+    batchId: string;
+    rowIndex: number;
+  }): Promise<{ claimUrl: string; depositSignature: string; shadowAddress: string }> {
+    const ephemeral = generateEphemeralKeypair();
+
+    // Step 1: fund the shadow with enough SOL to cover its own rent
+    // + register/deposit/withdraw fees. Single Phantom popup for Alice.
+    await fundShadowAccount({
+      payerWallet: args.payerWallet,
+      shadowAddress: ephemeral.address,
+      lamports: SHADOW_FUNDING_LAMPORTS,
+      connection: args.connection,
+    });
+
+    // Step 2: build an in-memory Umbra client signed by the ephemeral
+    // keypair, then run registration. No popups (the SDK uses the
+    // shadow's keypair directly).
+    const shadowClient = await buildShadowClient(ephemeral.privateKey);
+    await registerShadowAccount({ shadowClient });
+
+    // Step 3: deposit Alice's USDC into the shadow's encrypted balance.
+    // Signer = Alice (her ATA pays); destination = shadow. ONE Phantom
+    // popup for Alice (the deposit tx).
+    const deposit = await depositToShadow({
+      payerClient: args.payerClient,
+      shadowAddress: ephemeral.address,
+      mint: USDC_MINT.toBase58(),
+      amount: BigInt(args.prepared.amount),
+    });
+
+    // Step 4: build the URL Bob will click. Include the amount + sender
+    // in the fragment so the claim page renders something meaningful
+    // before Bob connects a wallet.
+    const claimUrl = generateClaimUrl({
+      baseUrl: typeof window !== "undefined" ? window.location.origin : "",
+      batchId: args.batchId,
+      row: args.rowIndex,
+      ephemeralPrivateKey: ephemeral.privateKey,
+      metadata: {
+        amount: args.prepared.amountDisplay.replace(` ${PAYMENT_SYMBOL}`, ""),
+        symbol: PAYMENT_SYMBOL,
+        sender: args.companyName || args.payerWallet.publicKey.toBase58(),
+        mint: USDC_MINT.toBase58(),
+        amountBaseUnits: args.prepared.amount,
+      },
+    });
+
+    return { claimUrl, depositSignature: deposit.depositSignature, shadowAddress: ephemeral.address };
   }
 
   function prepareRow(row: PayrollRow, index: number): PayrollRunRow {
@@ -235,7 +435,35 @@ export function PayrollFlow() {
       setSignedPacket(signed);
       setPacketUrl(url);
       downloadPayrollPacketJson(signed);
-      await downloadPayrollPacketPdf(signed);
+      // If any rows used the claim-link path, build a fresh PDF that
+      // includes a "Claim links" appendix. We bypass the standard
+      // downloader (downloadPayrollPacketPdf) when claim URLs exist
+      // so we can pass them through to the PDF document — the standard
+      // downloader doesn't accept claim URLs as a parameter.
+      const claimUrls: Record<number, string> = {};
+      rows.forEach((r, idx) => {
+        if (r.claimUrl) claimUrls[idx] = r.claimUrl;
+      });
+      const hasClaimUrls = Object.keys(claimUrls).length > 0;
+      if (hasClaimUrls) {
+        const [{ pdf }, { PayrollPacketPdfDocument }] = await Promise.all([
+          import("@react-pdf/renderer"),
+          import("@/lib/payrollPacketPdf"),
+        ]);
+        const pdfBlob = await pdf(
+          PayrollPacketPdfDocument({ signed, claimUrls }),
+        ).toBlob();
+        const pdfUrl = URL.createObjectURL(pdfBlob);
+        const a = document.createElement("a");
+        a.href = pdfUrl;
+        a.download = `${signed.packet.batchId}-veil-payroll-packet.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(pdfUrl);
+      } else {
+        await downloadPayrollPacketPdf(signed);
+      }
     } catch (err: any) {
       setError(err.message ?? String(err));
     } finally {
@@ -247,6 +475,38 @@ export function PayrollFlow() {
     await navigator.clipboard.writeText(text);
     setCopied(key);
     setTimeout(() => setCopied(null), 1800);
+  }
+
+  /**
+   * Download a CSV of every claim link in the run. Lets the employer
+   * hand-deliver the URLs through whatever channel they prefer (their
+   * payroll portal, BambooHR, manual emails). Empty rows in the
+   * `claim_url` column correspond to recipients who were already
+   * registered and got paid directly — included so the file matches
+   * the run ledger 1:1 (same ordering as the input CSV).
+   */
+  function downloadClaimLinksCsv() {
+    const claimRows: ClaimLinkRow[] = rows.map((row) => ({
+      recipient: row.recipient,
+      amount: row.amountDisplay,
+      status: row.error
+        ? "failed"
+        : row.claimUrl
+          ? "claim-link"
+          : "direct",
+      claimUrl: row.claimUrl,
+      error: row.error ?? undefined,
+    }));
+    const csv = rowsToClaimLinkCsv(claimRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "veil-payroll-claim-links.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   /* ─────────────────────────────── render ─────────────────────────────── */
@@ -304,7 +564,7 @@ export function PayrollFlow() {
           <label className="mono-chip">CSV — wallet,amount,memo</label>
           <textarea
             value={csvText}
-            onChange={(e) => setCsvText(e.target.value)}
+            onChange={(e) => onCsvTextChange(e.target.value)}
             rows={11}
             className="input-editorial font-mono text-[13px] resize-y"
             placeholder={SAMPLE_CSV}
@@ -316,7 +576,7 @@ export function PayrollFlow() {
             </span>
             <button
               type="button"
-              onClick={() => setCsvText(SAMPLE_CSV)}
+              onClick={() => onCsvTextChange(SAMPLE_CSV)}
               className="btn-quiet"
             >
               Load sample
@@ -395,6 +655,41 @@ export function PayrollFlow() {
           </p>
         </div>
 
+        {/* Registration detection — read-only on-chain probe per row.
+            Cheap (no popups) and gives the employer an honest cost
+            estimate BEFORE they kick off the run. The "Detect" button
+            is intentionally manual — auto-detect on every keystroke
+            would hammer the RPC for half-typed CSVs. */}
+        <div className="border border-line bg-paper-3 rounded-[3px] p-5">
+          <div className="flex items-baseline justify-between gap-4 mb-3">
+            <span className="eyebrow">Recipient registration</span>
+            <button
+              type="button"
+              onClick={handleDetectRegistration}
+              disabled={detecting || parsed.rows.length === 0}
+              className="btn-quiet text-[11px]"
+            >
+              {detecting
+                ? "Checking..."
+                : detection
+                  ? "Re-check"
+                  : "Check who needs claim links"}
+            </button>
+          </div>
+          {!detection && (
+            <p className="text-[13px] text-ink/70 leading-relaxed">
+              Recipients without an existing Umbra registration will be paid
+              via a one-shot claim link. Click above to see who needs one.
+            </p>
+          )}
+          {detection && (
+            <RegistrationSummary
+              detection={detection}
+              rows={parsed.rows}
+            />
+          )}
+        </div>
+
         {error && (
           <div className="flex items-start gap-4 border-l-2 border-brick pl-4 py-2">
             <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
@@ -436,18 +731,29 @@ export function PayrollFlow() {
         <ExplorerComparison />
 
         <div className="mt-8 border border-line bg-paper-3 rounded-[4px]">
-          <div className="px-5 md:px-6 py-4 border-b border-line flex items-baseline justify-between gap-4">
+          <div className="px-5 md:px-6 py-4 border-b border-line flex items-baseline justify-between gap-4 flex-wrap">
             <span className="eyebrow">Run ledger</span>
-            {packet && (
-              <button
-                type="button"
-                onClick={signPacket}
-                disabled={signingPacket}
-                className="btn-ghost px-4 py-2 text-[12px]"
-              >
-                {signingPacket ? "Signing..." : "Sign receipt packet"}
-              </button>
-            )}
+            <div className="flex items-baseline gap-3">
+              {rows.some((r) => r.claimUrl) && (
+                <button
+                  type="button"
+                  onClick={downloadClaimLinksCsv}
+                  className="btn-ghost px-4 py-2 text-[12px]"
+                >
+                  Download claim links (CSV)
+                </button>
+              )}
+              {packet && (
+                <button
+                  type="button"
+                  onClick={signPacket}
+                  disabled={signingPacket}
+                  className="btn-ghost px-4 py-2 text-[12px]"
+                >
+                  {signingPacket ? "Signing..." : "Sign receipt packet"}
+                </button>
+              )}
+            </div>
           </div>
 
           {rows.length === 0 ? (
@@ -481,6 +787,9 @@ export function PayrollFlow() {
                             {row.amountDisplay}
                           </span>
                           <span className="mono-chip text-dim">{row.mode}</span>
+                          {row.claimUrl && (
+                            <span className="mono-chip text-sage">claim-link</span>
+                          )}
                         </div>
                         <div className="mt-1 text-[12.5px] text-muted truncate">
                           {row.memo || "No memo"}
@@ -491,7 +800,7 @@ export function PayrollFlow() {
                       </div>
                       <StatusBadge status={row.status} />
                     </div>
-                    {(row.txSignature || disclosureUrl) && (
+                    {(row.txSignature || disclosureUrl || row.claimUrl) && (
                       <div className="mt-3 flex flex-wrap gap-4 pl-10">
                         {row.txSignature && (
                           <a
@@ -512,6 +821,17 @@ export function PayrollFlow() {
                             {copied === `disclosure-${idx}`
                               ? "Copied disclosure"
                               : "Copy disclosure link"}
+                          </button>
+                        )}
+                        {row.claimUrl && (
+                          <button
+                            type="button"
+                            onClick={() => copyText(`claim-${idx}`, row.claimUrl!)}
+                            className="btn-quiet text-[12px]"
+                          >
+                            {copied === `claim-${idx}`
+                              ? "Copied claim URL"
+                              : "Copy claim URL"}
                           </button>
                         )}
                       </div>
@@ -614,6 +934,102 @@ function Row({ label, value }: { label: string; value: string }) {
       <dd className="text-ink font-mono truncate">{value}</dd>
     </div>
   );
+}
+
+/**
+ * Per-row registration summary with an honest cost estimate. Shows
+ * up after the user clicks "Check who needs claim links". The
+ * lamports → SOL conversion uses the `SHADOW_FUNDING_LAMPORTS`
+ * constant directly so the number Alice sees matches the number we
+ * actually transfer.
+ */
+function RegistrationSummary({
+  detection,
+  rows,
+}: {
+  detection: RegistrationDetectionResult;
+  rows: PayrollRow[];
+}) {
+  const unregisteredCount = detection.unregisteredIndexes.length;
+  const unknownCount = detection.unknownIndexes.length;
+  const registeredCount =
+    detection.rowStatuses.filter((s) => s === "registered").length;
+  const extraSolPerRow = Number(SHADOW_FUNDING_LAMPORTS) / 1e9;
+  const totalExtraSol = (extraSolPerRow * unregisteredCount).toFixed(3);
+
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3 mb-4 text-[12.5px]">
+        <SummaryStat label="Ready" count={registeredCount} tone="sage" />
+        <SummaryStat label="Need claim link" count={unregisteredCount} tone="gold" />
+        {unknownCount > 0 && (
+          <SummaryStat label="Unknown" count={unknownCount} tone="dim" />
+        )}
+      </div>
+      {unregisteredCount > 0 && (
+        <p className="text-[12.5px] text-ink/70 leading-relaxed mb-3">
+          {unregisteredCount} recipient{unregisteredCount === 1 ? "" : "s"} will
+          get a claim link. Each adds about{" "}
+          <span className="font-mono">{extraSolPerRow.toFixed(3)} SOL</span> for
+          the shadow account&apos;s rent + tx fees{" "}
+          (<span className="font-mono">~{totalExtraSol} SOL</span> total).
+          They click the link, connect a wallet, and the funds land directly.
+        </p>
+      )}
+      <ul className="divide-y divide-line text-[12.5px]">
+        {rows.map((row, idx) => {
+          const status = detection.rowStatuses[idx];
+          return (
+            <li
+              key={`${row.wallet}-${idx}`}
+              className="py-2 flex items-baseline justify-between gap-3"
+            >
+              <span className="font-mono text-ink truncate">
+                {row.wallet.slice(0, 6)}…{row.wallet.slice(-4)}
+              </span>
+              <span className="text-dim">{row.amount}</span>
+              <RegistrationChip status={status} />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function SummaryStat({
+  label,
+  count,
+  tone,
+}: {
+  label: string;
+  count: number;
+  tone: "sage" | "gold" | "dim";
+}) {
+  const cls =
+    tone === "sage"
+      ? "border-sage/40 bg-sage/5 text-sage"
+      : tone === "gold"
+        ? "border-gold/40 bg-gold/5 text-gold-dim"
+        : "border-line bg-paper text-dim";
+  return (
+    <div className={`border rounded-[2px] px-3 py-2 ${cls}`}>
+      <div className="font-mono text-[10px] tracking-[0.12em] uppercase opacity-80">
+        {label}
+      </div>
+      <div className="text-[18px] font-medium mt-0.5">{count}</div>
+    </div>
+  );
+}
+
+function RegistrationChip({ status }: { status: RegistrationStatus }) {
+  if (status === "registered") {
+    return <span className="mono-chip text-sage">ready</span>;
+  }
+  if (status === "unregistered") {
+    return <span className="mono-chip text-gold-dim">claim link</span>;
+  }
+  return <span className="mono-chip text-dim">unknown</span>;
 }
 
 function StatusBadge({ status }: { status: PayrollPacketRow["status"] }) {
