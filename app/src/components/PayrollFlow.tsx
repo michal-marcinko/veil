@@ -937,13 +937,29 @@ export function PayrollFlow() {
       )}
 
       {/* Success layout — replaces the form when packet is ready. Pairs
-          with the run ledger + collapsible explainer below. */}
-      {inSuccessState && (
-        <SuccessHero
-          paymentCount={rows.filter((r) => r.status === "paid").length}
-          totalDisplay={totalDisplay}
-        />
-      )}
+          with the run ledger + collapsible explainer below. Counts and
+          totals reflect only SETTLED payments (status === 'paid');
+          failures are surfaced separately so the hero doesn't lie. */}
+      {inSuccessState && (() => {
+        const settled = rows.filter((r) => r.status === "paid");
+        const failed = rows.filter((r) => r.status === "failed");
+        const settledTotalMicros = settled.reduce(
+          (sum, r) => sum + BigInt(r.amount),
+          0n,
+        );
+        const settledTotalDisplay = `${formatPayrollAmount(
+          settledTotalMicros,
+          PAYMENT_DECIMALS,
+        )} ${PAYMENT_SYMBOL}`;
+        return (
+          <SuccessHero
+            settledCount={settled.length}
+            failedCount={failed.length}
+            totalCount={rows.length}
+            settledTotalDisplay={settledTotalDisplay}
+          />
+        );
+      })()}
 
       {/* Inline run ledger — always mounted (compose: empty placeholder
           rows; running: fills as txs settle; success: full receipt). */}
@@ -1351,26 +1367,55 @@ function StatusBadge({ status }: { status: PayrollPacketRow["status"] }) {
 }
 
 function SuccessHero({
-  paymentCount,
-  totalDisplay,
+  settledCount,
+  failedCount,
+  totalCount,
+  settledTotalDisplay,
 }: {
-  paymentCount: number;
-  totalDisplay: string;
+  settledCount: number;
+  failedCount: number;
+  totalCount: number;
+  settledTotalDisplay: string;
 }) {
+  // "Partial" mode: at least one row settled but at least one failed.
+  // Eyebrow shifts to gold (warn, not error) and the body explicitly
+  // says "X of N settled" so the user can't misread the success state
+  // as "everything went through."
+  const partial = failedCount > 0 && settledCount > 0;
+  const allFailed = settledCount === 0 && failedCount > 0;
+
   return (
     <div className="flex flex-col items-center justify-center text-center pt-4 md:pt-6 pb-8">
       <VeilDescentMark size={144} variant="batch" />
-      <div className="mt-8 eyebrow text-sage">
-        ✓ Payroll signed · packet ready
+      <div
+        className={`mt-8 eyebrow ${
+          allFailed ? "text-brick" : partial ? "text-gold" : "text-sage"
+        }`}
+      >
+        {allFailed
+          ? "Payroll signed · all payments failed"
+          : partial
+            ? `Payroll signed · ${settledCount} of ${totalCount} settled`
+            : "✓ Payroll signed · packet ready"}
       </div>
       <div className="mt-3 font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
-        <span className="tnum">{paymentCount}</span>
-        <span className="text-muted"> payment{paymentCount === 1 ? "" : "s"} · </span>
-        <span className="tnum">{totalDisplay}</span>
+        <span className="tnum">{settledCount}</span>
+        <span className="text-muted">
+          {" "}
+          payment{settledCount === 1 ? "" : "s"} settled ·{" "}
+        </span>
+        <span className="tnum">{settledTotalDisplay}</span>
       </div>
+      {failedCount > 0 && (
+        <p className="mt-3 text-[13.5px] text-brick">
+          {failedCount} payment{failedCount === 1 ? "" : "s"} failed — see the
+          run ledger below for per-row error details.
+        </p>
+      )}
       <p className="mt-4 text-[14px] leading-[1.55] text-muted max-w-[480px]">
-        Each contractor was paid through Umbra. The packet below verifies the
-        whole batch; per-row disclosure links reveal exactly one entry.
+        {allFailed
+          ? "The packet still records every attempt with its error reason. Failed rows can be retried independently."
+          : "Each settled contractor was paid through Umbra. The packet verifies the whole batch; per-row disclosure links reveal exactly one entry."}
       </p>
     </div>
   );
