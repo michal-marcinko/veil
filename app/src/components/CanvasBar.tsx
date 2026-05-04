@@ -60,8 +60,13 @@ export type CanvasBarState =
       onCopy: () => void;
       /** Used when shareUrl is null — e.g. before a packet is signed. */
       fallbackMeta?: string;
-      /** Optional ghost buttons before the Dashboard link (e.g. "Claim links"). */
+      /** Optional ghost buttons before the trailing nav link. */
       extras?: Array<{ label: string; onClick: () => void }>;
+      /** Trailing nav link on the right of the bar.
+       *  Defaults to {label:"Dashboard", href:"/dashboard"} — products
+       *  override to "All products"/"/products" so the user lands where
+       *  they expect after publishing. */
+      nav?: { label: string; href: string };
     };
 
 interface Props {
@@ -174,6 +179,12 @@ function PublishingContent({
 }: {
   state: Extract<CanvasBarState, { kind: "publishing" }>;
 }) {
+  // Build the meta line cleanly — empty stepCounter (e.g. single-step
+  // flows like product publishing) shouldn't render a leading dot.
+  const walletLine = state.awaitingWallet ? "Waiting on wallet" : "In progress";
+  const metaLine = state.stepCounter
+    ? `${state.stepCounter} · ${walletLine}`
+    : walletLine;
   return (
     <>
       <span className="canvas-bar-pulse" aria-hidden />
@@ -182,7 +193,7 @@ function PublishingContent({
           {state.stepLabel}
         </div>
         <div className="font-mono text-[10.5px] text-muted tracking-[0.16em] uppercase">
-          {state.stepCounter} · {state.awaitingWallet ? "Waiting on wallet" : "In progress"}
+          {metaLine}
         </div>
       </div>
     </>
@@ -234,10 +245,10 @@ function SuccessContent({
       ))}
 
       <a
-        href="/dashboard"
+        href={state.nav?.href ?? "/dashboard"}
         className="btn-ghost !px-5 !py-2.5 !rounded-full hidden sm:inline-flex shrink-0"
       >
-        Dashboard
+        {state.nav?.label ?? "Dashboard"}
       </a>
     </>
   );
