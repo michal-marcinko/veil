@@ -744,25 +744,10 @@ export default function DashboardPage() {
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [payrollRuns]);
 
-  if (!wallet.connected) {
-    return (
-      <Shell>
-        <div className="max-w-lg reveal">
-          <span className="eyebrow">Activity</span>
-          <h1 className="mt-4 font-sans font-medium text-ink text-[40px] md:text-[48px] leading-[1.05] tracking-[-0.03em]">
-            Connect to view your activity.
-          </h1>
-          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
-            Your activity reads directly from Solana using the wallet you connect.
-            Nothing is synced to a server.
-          </p>
-          <div className="mt-8">
-            <ClientWalletMultiButton />
-          </div>
-        </div>
-      </Shell>
-    );
-  }
+  // NOTE: All `useMemo` calls below MUST stay above the `if (!wallet.connected)`
+  // early return. Moving them below violates Rules of Hooks (different render
+  // paths call different numbers of hooks → "Rendered more hooks than during
+  // the previous render" runtime error on wallet connect/disconnect).
 
   // Stable sort by createdAt DESC. Memoized so a re-render that
   // doesn't change the underlying invoice list never reshuffles the
@@ -841,6 +826,30 @@ export default function DashboardPage() {
   // they personally claimed (rare: receipt for a UTXO claimed in an
   // older session that was outside the in-session set).
   const unmatchedClaims = Math.max(0, claimedCount - matchedReceiptCount);
+
+  // Wallet-disconnected guard. MUST come AFTER all useMemo/useState/useEffect
+  // hooks above so React's hook-call order stays stable across renders
+  // (connect/disconnect would otherwise flip the hook count and trigger
+  // "Rendered more hooks than during the previous render").
+  if (!wallet.connected) {
+    return (
+      <Shell>
+        <div className="max-w-lg reveal">
+          <span className="eyebrow">Activity</span>
+          <h1 className="mt-4 font-sans font-medium text-ink text-[40px] md:text-[48px] leading-[1.05] tracking-[-0.03em]">
+            Connect to view your activity.
+          </h1>
+          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
+            Your activity reads directly from Solana using the wallet you connect.
+            Nothing is synced to a server.
+          </p>
+          <div className="mt-8">
+            <ClientWalletMultiButton />
+          </div>
+        </div>
+      </Shell>
+    );
+  }
 
   return (
     <Shell pendingCount={pendingInvoices.length}>
