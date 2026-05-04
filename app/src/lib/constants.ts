@@ -8,12 +8,18 @@ export const INVOICE_REGISTRY_PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_INVOICE_REGISTRY_PROGRAM_ID || "54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo",
 );
 
-// Devnet default: Circle's devnet USDC. Override with NEXT_PUBLIC_PAYMENT_MINT
-// if Umbra's shielded pool for this mint isn't live on devnet — the documented
-// fallback is wSOL (So11111111111111111111111111111111111111112).
-// Mainnet USDC is EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v.
+// Default mint: wSOL (So11111111111111111111111111111111111111112).
+// Why not devnet USDC? Circle's devnet USDC mint
+// (4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU) is NOT registered in
+// Umbra's devnet stealth pool — depositing fails with Anchor error 3012
+// (AccountNotInitialized on `fee_schedule`). wSOL works because its mint
+// is the same address on every cluster and Umbra has it initialized on
+// devnet. This default also matches `app/.env.example`.
+//
+// Override with NEXT_PUBLIC_PAYMENT_MINT to point at a different mint
+// (e.g. mainnet USDC: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v).
 export const USDC_MINT = new PublicKey(
-  process.env.NEXT_PUBLIC_PAYMENT_MINT || "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  process.env.NEXT_PUBLIC_PAYMENT_MINT || "So11111111111111111111111111111111111111112",
 );
 
 // wSOL: 9 decimals; USDC (devnet + mainnet): 6 decimals.

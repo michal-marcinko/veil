@@ -17,7 +17,7 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 ## What Veil does
 
 - **Create** - Alice issues an invoice. Metadata (amounts, memo, line items) is AES-256-GCM encrypted client-side, uploaded to Arweave, and hash-anchored to an on-chain Anchor PDA.
-- **Pay** - Bob opens a shareable link, the UI wires his wallet, pays through Umbra's shielded pool, and can sign a receipt intent tied to the invoice PDA. Amount is hidden on-chain; counterparty linkage is broken by the mixer.
+- **Pay** - Bob opens a shareable link, the UI wires his wallet, pays through Umbra's shielded pool in a single popup (via the VeilPay CPI wrapper), and can sign a receipt intent tied to the invoice PDA. Amount is hidden on-chain; counterparty linkage is broken by the mixer.
 - **Reconcile** - Alice's dashboard auto-claims incoming UTXOs, then marks pending invoices paid as the recipient/creator. CSV export is one click (feature pending - see roadmap).
 - **Run private payroll** - An employer uploads `wallet,amount,memo`, sends Umbra payments to contractors, and signs one payroll packet for receipts, auditor review, and per-row selective disclosure.
 - **Audit / disclose** - Invoice compliance grants are wired through Umbra's x25519 grant primitives; payroll uses signed packets and one-row disclosure links so an accountant or recipient can verify exactly the data they were given.
@@ -26,13 +26,28 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 
 - App: **https://veil-app-205.netlify.app**
 - Repo: **https://github.com/michal-marcinko/veil**
-- Video: *coming soon*
+- Video: *Demo video shipping with submission*
 
-Connect Phantom on devnet with a small amount of wrapped SOL. The pay flow uses wSOL on devnet because Umbra hasn't initialized the USDC stealth pool there — see [`app/.env.example`](app/.env.example) for full notes. Mainnet supports USDC, USDT, wSOL, and UMBRA.
+Connect any Solana wallet on devnet with a small amount of wrapped SOL. The pay flow uses wSOL on devnet because Umbra hasn't initialized the USDC stealth pool there — see [`app/.env.example`](app/.env.example) for full notes. Mainnet supports USDC, USDT, wSOL, and UMBRA.
+
+### Wallet compatibility
+
+Veil works with any Solana wallet. We recommend **Solflare** for the cleanest UX on devnet because Phantom routes through Blowfish, which currently doesn't simulate unverified ZK programs on devnet — we've requested Blowfish review for our mainnet launch. Phantom still works (you'll just see a "Failed to simulate" warning before signing); Solflare uses raw RPC `simulateTransaction` and previews the transaction correctly.
 
 ## Architecture
 
-Veil is a Next.js 14 frontend over a minimal Anchor registry program, coupled client-side to Umbra's encrypted-balance + mixer SDK. The program stores only tamper-evident invoice state (hash of ciphertext, Arweave URI, status). Real invoice content lives encrypted on Arweave. Payments flow through Umbra UTXOs. Compliance grants are Umbra-native x25519 viewing keys scoped by mint + time range.
+Veil is a Next.js 14 frontend over two minimal Anchor programs (an invoice registry and a single-popup pay wrapper called VeilPay), coupled client-side to Umbra's encrypted-balance + mixer SDK. The registry stores only tamper-evident invoice state (hash of ciphertext, Arweave URI, status). Real invoice content lives encrypted on Arweave. Payments flow through Umbra UTXOs. Compliance grants are Umbra-native x25519 viewing keys scoped by mint + time range.
+
+**VeilPay** is a thin CPI wrapper at `programs/veil-pay/` that bundles Umbra's `create_buffer` + `deposit` instructions into a single transaction so the payer signs **one** Phantom/Solflare popup instead of two. Combined with an Address Lookup Table holding 13 static accounts, the pay tx fits comfortably under Solana's 1232-byte cap.
+
+### Deployed program IDs (devnet)
+
+| Program | Address |
+|---|---|
+| Invoice registry | `54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo` |
+| VeilPay (CPI wrapper) | `E2G6dN7yY8VQ2dFRgkvqskdAnPhJXkdorYP6BhKvfa8m` |
+| VeilPay ALT | `5MKHHKbHTZNqTtd9zTg59rWv5hbLKofj26Jv8LNMtket` |
+| Umbra deposit program | `DSuKkyqGVGgo4QtPABfxKJKygUDACbUhirnuv63mEpAJ` |
 
 ```
    Alice (payee)                                               Bob (payer)
@@ -45,8 +60,8 @@ Veil is a Next.js 14 frontend over a minimal Anchor registry program, coupled cl
         |                          shareable URL ─────────────────►|
         |                                                          |
         |                                                          | 4. fetch+decrypt metadata
-        |                                                          | 5. pay via Umbra UTXO
-        |                                                          |    (shielded pool)
+        |                                                          | 5. pay via VeilPay CPI
+        |                                                          |    (single popup → Umbra UTXO)
         |                                                          | 6. signed receipt intent
         | 7. scan + auto-claim UTXO                                |
         | 8. mark_paid as creator                                  |
@@ -79,7 +94,7 @@ cd app && cp .env.example .env.local  # fill in env vars (see below)
 cd .. && npm run dev
 ```
 
-Open http://localhost:3000 with Phantom on devnet.
+Open http://localhost:3000 with any Solana wallet on devnet (Solflare recommended — see [Wallet compatibility](#wallet-compatibility) above).
 
 ### Required env vars (`app/.env.local`)
 
@@ -88,8 +103,10 @@ Open http://localhost:3000 with Phantom on devnet.
 | `NEXT_PUBLIC_SOLANA_NETWORK` | `devnet` or `mainnet` | `devnet` |
 | `NEXT_PUBLIC_RPC_URL` | Solana RPC endpoint | `https://api.devnet.solana.com` |
 | `NEXT_PUBLIC_RPC_WSS_URL` | Solana RPC WebSocket | `wss://api.devnet.solana.com` |
-| `NEXT_PUBLIC_INVOICE_REGISTRY_PROGRAM_ID` | Deployed Anchor program ID | `54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo` |
-| `NEXT_PUBLIC_PAYMENT_MINT` | Mint used for invoices | Devnet USDC or wSOL |
+| `NEXT_PUBLIC_INVOICE_REGISTRY_PROGRAM_ID` | Invoice registry program ID | `54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo` |
+| `NEXT_PUBLIC_VEIL_PAY_PROGRAM_ID` | VeilPay CPI wrapper program ID | `E2G6dN7yY8VQ2dFRgkvqskdAnPhJXkdorYP6BhKvfa8m` |
+| `NEXT_PUBLIC_VEILPAY_ALT_ADDRESS` | Address Lookup Table for the pay tx | `5MKHHKbHTZNqTtd9zTg59rWv5hbLKofj26Jv8LNMtket` |
+| `NEXT_PUBLIC_PAYMENT_MINT` | Mint used for invoices (devnet defaults to wSOL — Umbra hasn't initialized USDC's stealth pool there) | `So11111111111111111111111111111111111111112` |
 | `BUNDLR_PRIVATE_KEY` | Server-side key for Arweave uploads | *(no default — required)* |
 | `BUNDLR_NODE_URL` | Bundlr node URL | `https://node1.bundlr.network` |
 
@@ -107,7 +124,7 @@ Open http://localhost:3000 with Phantom on devnet.
 - Live app: https://veil-app-205.netlify.app
 - Repository: https://github.com/michal-marcinko/veil
 - Superteam Umbra track: https://earn.superteam.fun/listings/hackathon/build-with-umbra-side-track
-- Demo video: *coming soon*
+- Demo video: *Demo video shipping with submission*
 
 ## License
 
