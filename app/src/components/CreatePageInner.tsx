@@ -362,25 +362,27 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
                 deepens from line-2 to ink. Hidden in invoice success
                 state since the page is committed at that point. */}
             {!inSuccessState && (
-              <button
-                type="button"
-                onClick={handleBackToPicker}
-                aria-label="Back to picker — choose Invoice or Payroll"
-                className="canvas-back-arrow inline-flex items-center justify-center"
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  className="w-10 h-10 md:w-12 md:h-12"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={handleBackToPicker}
+                  aria-label="Back to picker — choose Invoice or Payroll"
+                  className="canvas-back-arrow inline-flex items-center justify-center"
                 >
-                  <path d="M6 15l6-6 6 6" />
-                </svg>
-              </button>
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="w-10 h-10 md:w-12 md:h-12"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <path d="M6 15l6-6 6 6" />
+                  </svg>
+                </button>
+              </div>
             )}
 
             {/* Compose-state eyebrow lives INSIDE the form (above the
