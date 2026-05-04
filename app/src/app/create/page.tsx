@@ -6,7 +6,13 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { PublicKey } from "@solana/web3.js";
-import { InvoiceForm, type InvoiceFormValues } from "@/components/InvoiceForm";
+import {
+  InvoiceForm,
+  type InvoiceFormValues,
+  computeSubtotalMicros,
+  formatSubtotal,
+} from "@/components/InvoiceForm";
+import { InvoiceCanvasBar, type CanvasBarState } from "@/components/InvoiceCanvasBar";
 import {
   RegistrationModal,
   type RegistrationStep,
@@ -28,59 +34,72 @@ import { uploadCiphertext } from "@/lib/arweave";
 import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
 /**
- * /create flow — picker stays anchored at the top; selecting Invoice or
- * Payroll spawns the matching form below and the page smooth-scrolls down
- * to it. Selecting "Choose differently" smooth-scrolls back up before
- * unmounting the form, so the user never sees an abrupt swap mid-scroll.
+ * /create — Document Canvas redesign (2026-05-04).
  *
- * Both modes inline now: invoice renders the form/wallet-gate/success
- * branches owned by this page; payroll delegates to <PayrollFlow />,
- * which is fully self-contained (its own wallet gate, registration modal,
- * success states, and internal heading). The /payroll/outgoing route
- * still works as a deep-link standalone and reuses the same component.
- *
- * Animation register is Apple-style ease-out-expo (cubic-bezier(0.16, 1,
- * 0.3, 1)) over 700ms — long enough to read as cinematic, short enough
- * not to drag. `prefers-reduced-motion` short-circuits to instant
- * presentation.
+ * Picker stays anchored at top while composing. After successful publish
+ * (`result !== null`) the picker + "Choose differently" fade out so the
+ * user's eye lands on the success state. The sticky <InvoiceCanvasBar>
+ * persists across all states — never unmounts — which is what keeps
+ * "the modal" mounted continuously through every Phantom popup.
  */
 
 type Mode = "invoice" | "payroll" | null;
 
 const SCROLL_BACK_MS = 900;
 
-export default function CreatePage() {
+const EMPTY_FORM: InvoiceFormValues = {
+  creatorDisplayName: "",
+  payerDisplayName: "",
+  payerWallet: "",
+  lineItems: [{ description: "", quantity: "1", unitPrice: "" }],
+  notes: "",
+  dueDate: "",
+};
+
+type PublishStep = 1 | 2 | 3;
+
+interface InvoiceResult {
+  url: string;
+  payerName: string;
+  formattedAmount: string;
+}
+
+interface CreatePageProps {
+  /** Test-only: force-render at a specific state for jsdom renders. */
+  __forceState?: "success";
+}
+
+export default function CreatePage({ __forceState }: CreatePageProps = {}) {
   const wallet = useWallet();
 
-  const [mode, setMode] = useState<Mode>(null);
-  // Drives the exit animation when going back to the picker. We add this
-  // class to the form section before unmounting so it fades + drifts down
-  // gracefully instead of popping out of existence after the smooth-scroll.
+  const [mode, setMode] = useState<Mode>(__forceState === "success" ? "invoice" : null);
   const [formExiting, setFormExiting] = useState(false);
-  // Anchor for the smooth scroll-down on mode select.
   const formRef = useRef<HTMLElement>(null);
-  // Pending unmount timer — held so we can cancel it if the user
-  // re-engages mid-exit (clicks a mode card during the 900ms back window).
-  // Without this, the original timeout fires after their new selection and
-  // wipes it out by setting mode back to null.
   const exitTimeoutRef = useRef<number | null>(null);
-
-  // Always clear the unmount timer on component unmount so we don't run
-  // setState on an unmounted tree.
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       if (exitTimeoutRef.current !== null) {
         window.clearTimeout(exitTimeoutRef.current);
       }
-    };
-  }, []);
+    },
+    [],
+  );
+
+  // Form state lifted into the page so the canvas bar can read live subtotal.
+  const [values, setValues] = useState<InvoiceFormValues>(EMPTY_FORM);
 
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<{
-    url: string;
-    payerName: string;
-    formattedAmount: string;
-  } | null>(null);
+  const [publishStep, setPublishStep] = useState<PublishStep>(1);
+  const [awaitingWallet, setAwaitingWallet] = useState(false);
+  const [result, setResult] = useState<InvoiceResult | null>(
+    __forceState === "success"
+      ? {
+          url: "https://veil.app/pay/CXfe1JwAXzSjvMKdFWgVkNE37vUdmwAW5aDfU6zbSNDW#8Mkfdk3G15PWkTk4F1QyMho2FCuVvGVFAiZJVzCiTmPt",
+          payerName: "Globex Corp.",
+          formattedAmount: "5,800.00 USDC",
+        }
+      : null,
+  );
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [regOpen, setRegOpen] = useState(false);
@@ -91,26 +110,16 @@ export default function CreatePage() {
   });
 
   function handleSelectMode(next: "invoice" | "payroll") {
-    // If the user clicked back and is now re-engaging mid-exit, cancel
-    // the pending unmount and clear the exit class so the reveal can
-    // resume. The form is still mounted at this point — we just need to
-    // halt the disappearance.
     if (exitTimeoutRef.current !== null) {
       window.clearTimeout(exitTimeoutRef.current);
       exitTimeoutRef.current = null;
       setFormExiting(false);
     }
-
-    // Re-clicking the active mode card just re-scrolls to the form rather
-    // than remounting (which would lose in-progress state).
     if (mode === next) {
       formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
     setMode(next);
-    // Two RAF beats so the form section has actually painted before we
-    // ask the browser to scroll to it. Without this we sometimes scroll
-    // before the element exists in the layout tree.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -119,37 +128,36 @@ export default function CreatePage() {
   }
 
   function handleBackToPicker() {
-    // Run the exit animation (fade + drift down) AND smooth-scroll up in
-    // parallel. Unmount after both should be done. Without the exit class
-    // the form pops out of existence at the unmount tick, which reads as
-    // jank — especially if the scroll is still in flight.
     setFormExiting(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
-    // Held in a ref so handleSelectMode can cancel it if the user
-    // re-engages with a card during the back animation.
     exitTimeoutRef.current = window.setTimeout(() => {
       setMode(null);
       setFormExiting(false);
       setError(null);
       setResult(null);
       setCopied(false);
+      setValues(EMPTY_FORM);
       exitTimeoutRef.current = null;
     }, SCROLL_BACK_MS);
   }
 
-  async function handleSubmit(values: InvoiceFormValues) {
+  async function handleSubmit() {
     if (!wallet.publicKey || !wallet.signMessage) {
       setError("Connect wallet first");
       return;
     }
     setSubmitting(true);
+    setPublishStep(1);
+    setAwaitingWallet(false);
     setError(null);
 
     try {
       const parsedItems = values.lineItems.map((li, i) => {
         const unitPriceMicros = parseAmountToBaseUnits(li.unitPrice, PAYMENT_DECIMALS);
         if (unitPriceMicros == null) {
-          throw new Error(`Line ${i + 1}: enter a valid ${PAYMENT_SYMBOL} amount (e.g. 100.00).`);
+          throw new Error(
+            `Line ${i + 1}: enter a valid ${PAYMENT_SYMBOL} amount (e.g. 100.00).`,
+          );
         }
         const qty = Number.parseInt(li.quantity, 10);
         if (!Number.isFinite(qty) || qty <= 0) {
@@ -171,11 +179,12 @@ export default function CreatePage() {
           [step]: status === "pre" ? "in_progress" : "done",
         }));
       });
-      // Align before publishing a pay link. If the creator registered under
-      // an old drifting seed, payers would encrypt to a stale on-chain key and
-      // the creator's dashboard could never decrypt/claim the incoming UTXO.
       await ensureReceiverKeyAligned(client);
       setRegOpen(false);
+
+      // Step 1: encrypt + upload (one wallet popup for master sig on first run).
+      setPublishStep(1);
+      setAwaitingWallet(true);
 
       const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const subtotal = parsedItems.reduce((sum, li) => sum + li.totalMicros, 0n);
@@ -208,21 +217,22 @@ export default function CreatePage() {
       });
       validateMetadata(md);
 
-      // One-time-per-wallet master signature is cached in localStorage —
-      // see encryption.ts `getOrCreateMetadataMasterSig`. After Alice's
-      // first invoice this is a no-op (no Phantom popup), so creating
-      // subsequent invoices is just one signTransaction popup for the
-      // on-chain create. The per-invoice key is HKDF'd from (masterSig,
-      // PDA) and remains the deterministic unlock the re-open flow uses.
       const masterSig = await getOrCreateMetadataMasterSig(
         wallet as any,
         wallet.publicKey.toBase58(),
       );
+      setAwaitingWallet(false);
+
+      // Step 2: encrypt + upload.
+      setPublishStep(2);
       const key = await deriveKeyFromMasterSig(masterSig, pda.toBase58());
       const ciphertext = await encryptJson(md, key);
       const { uri } = await uploadCiphertext(ciphertext);
       const hash = await sha256(ciphertext);
 
+      // Step 3: anchor on Solana — second wallet popup.
+      setPublishStep(3);
+      setAwaitingWallet(true);
       const restrictedPayer = values.payerWallet ? new PublicKey(values.payerWallet) : null;
       await createInvoiceOnChain(wallet as any, {
         nonce,
@@ -232,6 +242,7 @@ export default function CreatePage() {
         restrictedPayer,
         expiresAt: null,
       });
+      setAwaitingWallet(false);
 
       const url = `${window.location.origin}/pay/${pda.toBase58()}#${keyToBase58(key)}`;
       setResult({
@@ -239,14 +250,13 @@ export default function CreatePage() {
         payerName: values.payerDisplayName,
         formattedAmount: formatTotalForDisplay(subtotal, PAYMENT_DECIMALS, PAYMENT_SYMBOL),
       });
-      // After a successful publish, scroll back into view so the user sees
-      // the success summary even if they had scrolled past the form.
       requestAnimationFrame(() => {
         formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     } catch (err: any) {
       setError(err.message ?? String(err));
       setRegOpen(false);
+      setAwaitingWallet(false);
     } finally {
       setSubmitting(false);
     }
@@ -254,59 +264,111 @@ export default function CreatePage() {
 
   async function handleCopy() {
     if (!result) return;
-    await navigator.clipboard.writeText(result.url);
+    try {
+      await navigator.clipboard.writeText(result.url);
+    } catch {
+      // jsdom and some non-secure contexts have no clipboard. Silently
+      // skip — the visual feedback still flips.
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2200);
   }
+
+  // Live subtotal feeds the canvas bar in compose state.
+  const subtotalMicros = computeSubtotalMicros(values);
+  const canSubmit = !submitting && wallet.connected && subtotalMicros > 0n;
+
+  // Build the canvas bar state for whatever phase we're in. The
+  // *invoice* mode only renders the bar; payroll has its own primary
+  // action inside <PayrollFlow />.
+  let canvasState: CanvasBarState | null = null;
+  if (mode === "invoice") {
+    if (result) {
+      canvasState = {
+        kind: "success",
+        payUrl: result.url,
+        copied,
+        onCopy: handleCopy,
+      };
+    } else if (submitting) {
+      const stepLabels: Record<PublishStep, string> = {
+        1: "Encrypting metadata",
+        2: "Uploading to Arweave",
+        3: "Anchoring on Solana",
+      };
+      canvasState = {
+        kind: "publishing",
+        step: publishStep,
+        stepLabel: stepLabels[publishStep],
+        awaitingWallet,
+      };
+    } else if (wallet.connected) {
+      canvasState = {
+        kind: "compose",
+        subtotalDisplay: formatSubtotal(subtotalMicros),
+        canSubmit,
+      };
+    }
+  }
+
+  // True while the canvas-bar success state is active. Used to fade out
+  // the picker + "Choose differently" link.
+  const inSuccessState = mode === "invoice" && !!result;
 
   /* ─────────────────────────────── render ─────────────────────────────── */
 
   return (
     <Frame>
-      {/* Accessibility-only heading. The two card titles below ("Invoice"
-          and "Payroll") already frame the choice visually. */}
       <h1 className="sr-only">Compose a payment</h1>
 
-      {/* Picker — anchored at the top. Stays mounted while the form
-          spawns below for either mode. */}
-      <section className="max-w-[1400px] mx-auto px-6 md:px-8 pt-24 md:pt-32 pb-16 md:pb-24">
-        <CreateModeSelector onSelect={handleSelectMode} />
-      </section>
+      {/* Picker — anchored at top. Hidden during invoice success state. */}
+      {!inSuccessState && (
+        <section
+          className={[
+            "max-w-[1400px] mx-auto px-6 md:px-8 pt-24 md:pt-32 pb-16 md:pb-24",
+            "transition-opacity duration-300",
+          ].join(" ")}
+        >
+          <CreateModeSelector onSelect={handleSelectMode} />
+        </section>
+      )}
 
-      {/* Form — spawns below for both invoice and payroll modes. The page
-          smooth-scrolls down to this section after it mounts. */}
       {mode !== null && (
         <section
           ref={formRef}
           className={[
-            "form-reveal border-t border-line scroll-mt-24",
+            "form-reveal scroll-mt-24",
+            !inSuccessState ? "border-t border-line" : "",
             formExiting ? "is-exiting" : "",
+            submitting ? "canvas-page-fade" : "",
           ]
             .filter(Boolean)
             .join(" ")}
           aria-label={mode === "invoice" ? "Create invoice" : "Run payroll"}
         >
           <div className="max-w-[1400px] mx-auto px-6 md:px-8 pt-12 md:pt-16">
-            <button
-              type="button"
-              onClick={handleBackToPicker}
-              className="inline-flex items-center gap-2 font-mono text-[12.5px] tracking-[0.04em] text-muted hover:text-ink transition-colors"
-            >
-              <span aria-hidden>↑</span> Choose differently
-            </button>
+            {/* Choose differently — hidden in invoice success state */}
+            {!inSuccessState && (
+              <button
+                type="button"
+                onClick={handleBackToPicker}
+                className="inline-flex items-center gap-2 font-mono text-[12.5px] tracking-[0.04em] text-muted hover:text-ink transition-colors"
+              >
+                <span aria-hidden>↑</span> Choose differently
+              </button>
+            )}
 
             {mode === "invoice" && (
-              <div className="mt-8 max-w-3xl">
-                <span className="eyebrow">New invoice</span>
-                <h2 className="mt-3 font-display font-medium text-ink text-[40px] md:text-[52px] leading-[1.03] tracking-[-0.025em]">
-                  {result ? "Invoice sent" : "Create invoice"}
-                </h2>
+              <div className={inSuccessState ? "mt-2" : "mt-8"}>
+                <span className={inSuccessState ? "eyebrow text-sage" : "eyebrow"}>
+                  {inSuccessState ? "✓ Published privately · Just now" : "New invoice"}
+                </span>
               </div>
             )}
           </div>
 
           {mode === "invoice" ? (
-            <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
+            <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-8 md:mt-10 pb-32">
               <div className="max-w-3xl">
                 {!wallet.connected ? (
                   <div className="max-w-lg">
@@ -315,31 +377,21 @@ export default function CreatePage() {
                     </p>
                     <ClientWalletMultiButton />
                   </div>
-                ) : result ? (
-                  <SuccessView
-                    result={result}
-                    copied={copied}
-                    onCopy={handleCopy}
-                    onSendAnother={() => {
-                      setResult(null);
-                      setCopied(false);
-                    }}
-                  />
                 ) : (
                   <InvoiceForm
+                    values={values}
+                    onChange={(partial) =>
+                      setValues((prev) => ({ ...prev, ...partial }))
+                    }
                     onSubmit={handleSubmit}
-                    submitting={submitting}
                     errorMessage={error}
                     onDismissError={() => setError(null)}
                   />
                 )}
+                {result && <SuccessSummary result={result} />}
               </div>
             </div>
           ) : (
-            // Payroll: <PayrollFlow /> owns its own heading, wallet gate,
-            // form, registration modal, and success states. We only render
-            // the back button above it — no eyebrow/h2, since that would
-            // double-stack with the component's internal heading.
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
               <PayrollFlow />
             </div>
@@ -347,22 +399,11 @@ export default function CreatePage() {
         </section>
       )}
 
+      {/* Canvas bar — invoice mode only. Persists across all states. */}
+      {canvasState && <InvoiceCanvasBar state={canvasState} formId="invoice-form" />}
+
       <RegistrationModal open={regOpen} steps={regSteps} />
 
-      {/*
-        Form-reveal animation. The arriving section starts 40px below its
-        final position with opacity 0 and lands via cubic-bezier(0.16, 1,
-        0.3, 1) — Apple's "ease-out-expo" — over 700ms. The curve lingers
-        at the end so the form reads as "settling in" rather than snapping.
-        prefers-reduced-motion users get the final state instantly.
-      */}
-      {/*
-        Use dangerouslySetInnerHTML to bypass React's HTML-entity escaping
-        for the CSS body. Without it, characters like " ' < inside the CSS
-        comments get encoded to &quot; &#x27; &lt; on the server but render
-        as raw on the client, triggering a hydration mismatch warning. CSS
-        does not need HTML entity encoding inside <style> tags.
-      */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -371,32 +412,15 @@ export default function CreatePage() {
           transform: translateY(40px);
           animation: form-reveal-anim 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
-        /*
-          Exit pair to the reveal: runs when the user clicks the back
-          button. From state matches the post-reveal resting position so
-          the handoff is seamless; to state fades out and drifts down
-          24px. Curve mirrors the reveal so the section leaves with the
-          same character it arrived. 600ms exit is shorter than 900ms
-          unmount delay, so the section is fully invisible before unmount.
-        */
         .form-reveal.is-exiting {
           animation: form-exit-anim 600ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
         }
         @keyframes form-reveal-anim {
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+          to { opacity: 1; transform: translateY(0); }
         }
         @keyframes form-exit-anim {
-          from {
-            opacity: 1;
-            transform: translateY(0);
-          }
-          to {
-            opacity: 0;
-            transform: translateY(24px);
-          }
+          from { opacity: 1; transform: translateY(0); }
+          to { opacity: 0; transform: translateY(24px); }
         }
         @media (prefers-reduced-motion: reduce) {
           .form-reveal,
@@ -412,10 +436,6 @@ export default function CreatePage() {
     </Frame>
   );
 }
-
-/* ─────────────────────────────────────────────────────────────────────
-   Layout shell — nav identical to the homepage spec.
-   ───────────────────────────────────────────────────────────────────── */
 
 function Frame({ children }: { children: React.ReactNode }) {
   return (
@@ -448,102 +468,34 @@ function Frame({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </nav>
-
       {children}
     </main>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────────────
-   Success view — rendered inside the form section after a successful
-   publish. Extracted so the conditional render inside CreatePage stays
-   readable.
-   ───────────────────────────────────────────────────────────────────── */
-
-function SuccessView({
-  result,
-  copied,
-  onCopy,
-  onSendAnother,
-}: {
-  result: { url: string; payerName: string; formattedAmount: string };
-  copied: boolean;
-  onCopy: () => void;
-  onSendAnother: () => void;
-}) {
+/**
+ * Success summary rendered above the sticky bar — describes what was
+ * shipped, with the recipient name and amount. The bar itself holds the
+ * pay link + Copy button.
+ */
+function SuccessSummary({ result }: { result: InvoiceResult }) {
   return (
-    <div className="max-w-2xl">
-      {/* Headline summary — what was created, for whom */}
-      <div className="flex items-baseline gap-2 mb-3">
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 14 14"
-          fill="none"
-          className="text-sage shrink-0 translate-y-[1px]"
-        >
-          <path
-            d="M3 7.5l3 3 5-6"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-        <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-sage">
-          Published privately
-        </span>
-      </div>
+    <div className="max-w-2xl mt-10">
       <h3 className="font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
         <span className="tnum">{result.formattedAmount}</span>
         <span className="text-muted"> requested from </span>
         <span>{result.payerName}</span>
       </h3>
-      <p className="mt-5 text-[14px] leading-[1.55] text-ink/70 max-w-[520px]">
-        Send this link to your client. Only their wallet (or yours, via your dashboard) can
-        open it — the amount and details are encrypted, the chain only sees an anchor hash.
+      <p className="mt-4 text-[14px] leading-[1.55] text-ink/70 max-w-[520px]">
+        Send the link below to your client. Only their wallet (or yours via
+        the dashboard) can open it — the chain only sees an anchor hash.
       </p>
-
-      {/* Shareable link */}
-      <div className="mt-9">
-        <span className="eyebrow">Pay link</span>
-        <div className="mt-3 border border-line bg-paper-3 rounded-[3px] p-4 font-mono text-[12.5px] text-ink break-all">
-          {result.url}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="mt-7 flex flex-wrap items-center gap-3">
-        <button onClick={onCopy} className="btn-primary">
-          {copied ? (
-            <span>Copied ✓</span>
-          ) : (
-            <span>
-              Copy link <span aria-hidden>→</span>
-            </span>
-          )}
-        </button>
-        <a href="/dashboard" className="btn-ghost">
-          View dashboard
-        </a>
-        <button onClick={onSendAnother} className="btn-quiet">
-          + Send another
-        </button>
-      </div>
     </div>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────────────
-   Helpers (unchanged from the prior version of this file).
-   ───────────────────────────────────────────────────────────────────── */
+/* ──────────────── helpers (unchanged from the prior version) ──────────────── */
 
-/**
- * Format a base-units bigint as a human "$X,XXX.XX SYMBOL" string for the
- * "Invoice sent" success summary. Trims trailing fractional zeros down to
- * a 2-digit minimum so $4,200.00 stays $4,200.00 but $4,200.5000 reads
- * $4,200.50, matching the on-screen InvoiceView formatting.
- */
 function formatTotalForDisplay(units: bigint, decimals: number, symbol: string): string {
   const divisor = 10n ** BigInt(decimals);
   const whole = units / divisor;
@@ -563,5 +515,5 @@ function parseAmountToBaseUnits(value: string, decimals: number): bigint | null 
   if (!match) return null;
   const whole = BigInt(match[1]);
   const fraction = (match[2] ?? "").padEnd(decimals, "0").slice(0, decimals);
-  return whole * (10n ** BigInt(decimals)) + BigInt(fraction);
+  return whole * 10n ** BigInt(decimals) + BigInt(fraction);
 }

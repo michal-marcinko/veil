@@ -56,10 +56,10 @@ describe("Create page — Document Canvas", () => {
   });
 
   function selectInvoiceMode() {
-    fireEvent.click(screen.getByRole("button", { name: /^Invoice$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Invoice\b/i }));
   }
 
-  it("compose state renders no '01 / 02 / 03' mono section numbering", async () => {
+  it("compose state renders no 'Parties / Items / Terms' card section structure", async () => {
     render(<CreatePage />);
     selectInvoiceMode();
 
@@ -67,11 +67,20 @@ describe("Create page — Document Canvas", () => {
       expect(screen.getByLabelText(/From/i)).toBeInTheDocument();
     });
 
-    // Old design used "01" "02" "03" as section eyebrows. New design has no
-    // such numbering anywhere in the body (line-item row numbers are still
-    // OK because they're per-row, not per-section).
-    const sectionEyebrows = screen.queryAllByText(/^0[123]$/);
-    expect(sectionEyebrows).toHaveLength(0);
+    // Old design wrapped the form in three labeled cards: 01 Parties /
+    // 02 Items / 03 Terms — each rendered as <h2>. The Document Canvas
+    // redesign removes that scaffolding entirely. Per-row line numbers
+    // (e.g. "01", "02") are still valid because they're row indices,
+    // not section labels.
+    expect(
+      screen.queryByRole("heading", { name: /^Parties$/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: /^Items$/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: /^Terms$/i }),
+    ).toBeNull();
   });
 
   it("compose state mounts the sticky canvas bar with a Create private invoice button", async () => {
@@ -115,8 +124,8 @@ describe("Create page — Document Canvas", () => {
     render(<CreatePage __forceState="success" />);
 
     // Compose-mode picker AND back link must NOT be in the DOM.
-    expect(screen.queryByRole("button", { name: /^Invoice$/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Payroll$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Invoice\b/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Payroll\b/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Choose differently/i })).toBeNull();
   });
 
