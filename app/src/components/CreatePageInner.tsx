@@ -12,7 +12,7 @@ import {
   computeSubtotalMicros,
   formatSubtotal,
 } from "@/components/InvoiceForm";
-import { InvoiceCanvasBar, type CanvasBarState } from "@/components/InvoiceCanvasBar";
+import { CanvasBar, type CanvasBarState } from "@/components/CanvasBar";
 import {
   RegistrationModal,
   type RegistrationStep,
@@ -290,14 +290,16 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
   const canSubmit = !submitting && wallet.connected && subtotalMicros > 0n;
 
   // Build the canvas bar state for whatever phase we're in. The
-  // *invoice* mode only renders the bar; payroll has its own primary
-  // action inside <PayrollFlow />.
+  // *invoice* mode only renders the bar from this component; payroll's
+  // PayrollFlow renders its own <CanvasBar> with payroll-specific
+  // copy.
   let canvasState: CanvasBarState | null = null;
   if (mode === "invoice") {
     if (result) {
       canvasState = {
         kind: "success",
-        payUrl: result.url,
+        shareUrl: result.url,
+        copyLabel: "Copy link",
         copied,
         onCopy: handleCopy,
       };
@@ -309,15 +311,16 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       };
       canvasState = {
         kind: "publishing",
-        step: publishStep,
         stepLabel: stepLabels[publishStep],
+        stepCounter: `${String(publishStep).padStart(2, "0")} / 03`,
         awaitingWallet,
       };
     } else if (wallet.connected) {
       canvasState = {
         kind: "compose",
-        subtotalDisplay: formatSubtotal(subtotalMicros),
+        totalDisplay: formatSubtotal(subtotalMicros),
         canSubmit,
+        buttonLabel: "Create private invoice",
       };
     }
   }
@@ -436,7 +439,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       )}
 
       {/* Canvas bar — invoice mode only. Persists across all states. */}
-      {canvasState && <InvoiceCanvasBar state={canvasState} formId="invoice-form" />}
+      {canvasState && <CanvasBar state={canvasState} formId="invoice-form" />}
 
       <RegistrationModal open={regOpen} steps={regSteps} />
 

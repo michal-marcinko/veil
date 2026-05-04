@@ -9,7 +9,7 @@ import {
   type RegistrationStep,
   type StepStatus,
 } from "@/components/RegistrationModal";
-import { PayrollCanvasBar, type PayrollCanvasBarState } from "@/components/PayrollCanvasBar";
+import { CanvasBar, type CanvasBarState } from "@/components/CanvasBar";
 import { PayrollPublishingModal } from "@/components/PayrollPublishingModal";
 import { VeilDescentMark } from "@/components/VeilDescentMark";
 import { parsePayrollCsv, parseAmountToBaseUnits, type PayrollRow } from "@/lib/csv";
@@ -147,31 +147,46 @@ export function PayrollFlow() {
     !running && wallet.connected && rowCount > 0 && companyName.trim().length > 0;
   const inSuccessState = !running && phase === "idle" && packetUrl !== null;
 
-  const canvasBarState: PayrollCanvasBarState = inSuccessState
+  // Map the local payroll state to the shared CanvasBar's discriminated
+  // union. Same component is reused on /create invoice and /create
+  // payroll; per-flow specifics (button copy, copy label, ghost extras)
+  // live here in the consumer.
+  const totalCountForRun = runTotalCount || rowCount;
+  const canvasBarState: CanvasBarState = inSuccessState
     ? {
         kind: "success",
-        packetUrl,
-        paymentCount: rows.filter((r) => r.status === "paid").length,
-        totalDisplay,
+        shareUrl: packetUrl,
+        copyLabel: "Copy packet",
         copied: packetCopied,
-        onCopy: () => copyPacketUrl(),
-        onDownloadClaimLinks: rows.some((r) => r.claimUrl)
-          ? downloadClaimLinksCsv
+        onCopy: copyPacketUrl,
+        fallbackMeta: `${rows.filter((r) => r.status === "paid").length} payment${
+          rows.filter((r) => r.status === "paid").length === 1 ? "" : "s"
+        } sent · ${totalDisplay}`,
+        extras: rows.some((r) => r.claimUrl)
+          ? [{ label: "Claim links", onClick: downloadClaimLinksCsv }]
           : undefined,
       }
     : running
       ? {
-          kind: "running",
-          sentCount: rows.length,
-          totalCount: runTotalCount || rowCount,
-          phase: phase === "signing" ? "signing" : "sending",
+          kind: "publishing",
+          stepLabel:
+            phase === "signing"
+              ? "Signing receipt packet"
+              : `Sending payment ${rows.length + 1} of ${totalCountForRun}`,
+          stepCounter:
+            phase === "signing"
+              ? "FINAL"
+              : `${String(rows.length).padStart(2, "0")} / ${String(totalCountForRun).padStart(2, "0")}`,
           awaitingWallet: true,
         }
       : {
           kind: "compose",
-          rowCount,
           totalDisplay,
-          canRun,
+          canSubmit: canRun,
+          buttonLabel:
+            rowCount === 0
+              ? "Run private payroll"
+              : `Run ${rowCount} private payment${rowCount === 1 ? "" : "s"}`,
         };
 
   /* ─────────────────────────── run-payroll ─────────────────────────── */
@@ -691,7 +706,7 @@ export function PayrollFlow() {
         phase={phase === "signing" ? "signing" : "sending"}
         awaitingWallet
       />
-      <PayrollCanvasBar state={canvasBarState} formId="payroll-form" />
+      <CanvasBar state={canvasBarState} formId="payroll-form" />
 
       <PayrollFlowStyles />
     </div>
