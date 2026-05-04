@@ -12,6 +12,7 @@ import {
   type PayStep,
   type PayStepStatus,
 } from "@/components/PaymentProgressModal";
+import { VeilDescentMark } from "@/components/VeilDescentMark";
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice } from "@/lib/anchor";
@@ -365,60 +366,56 @@ export default function PayPage({ params }: { params: { id: string } }) {
       <div className="max-w-2xl mx-auto reveal">
         <InvoiceView metadata={metadata} />
         {paid ? (
-          <div className="mt-8 border border-sage/40 bg-sage/5 rounded-[3px] p-5">
-            <div className="flex items-start gap-3">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0 mt-0.5 text-sage">
-                <path d="M3 8l3.5 3.5L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <div className="flex-1">
-                <div className="text-[14px] text-ink font-medium">Payment sent.</div>
-                <div className="text-[13px] text-muted mt-1 leading-relaxed">
-                  The recipient&apos;s dashboard will pick this up and mark the invoice
-                  paid within ~30 seconds — no action needed from them.
-                </div>
-              </div>
-            </div>
+          <div className="mt-10 flex flex-col items-center text-center pb-4">
+            <VeilDescentMark size={144} variant="single" />
+            <div className="mt-8 eyebrow text-sage">✓ Payment sent</div>
+            <h2 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+              Thanks — payment sent.
+            </h2>
+            <p className="mt-5 text-[14px] leading-[1.55] text-muted max-w-[440px]">
+              The recipient&apos;s dashboard will pick this up and mark the
+              invoice paid within ~30 seconds — no action needed from them.
+            </p>
 
             {receiptUrl ? (
-              <div className="mt-5 pt-5 border-t border-sage/30">
-                <div className="text-[12px] font-mono tracking-[0.1em] uppercase text-dim mb-2">
-                  Receipt URL
-                </div>
-                <div className="flex items-start gap-2">
+              <div className="mt-10 w-full max-w-xl border-t border-line pt-6 text-left">
+                <div className="eyebrow mb-3">Receipt URL</div>
+                <div className="flex items-stretch gap-2">
                   <input
                     readOnly
                     value={receiptUrl}
                     onFocus={(e) => e.currentTarget.select()}
-                    className="flex-1 text-[12px] font-mono bg-paper border border-line rounded-[2px] px-2 py-1.5 text-ink truncate"
+                    className="flex-1 min-w-0 text-[12px] font-mono bg-ink/5 rounded-[3px] px-3 py-2.5 text-ink/75 truncate"
                   />
                   <button
                     onClick={() => {
                       navigator.clipboard.writeText(receiptUrl);
                       setStatus("Receipt URL copied.");
                     }}
-                    className="text-[12px] font-mono tracking-[0.05em] uppercase px-3 py-1.5 border border-line rounded-[2px] text-ink hover:bg-line/30"
+                    className="btn-primary !px-5 !py-2.5 !rounded-full shrink-0"
                   >
                     Copy
                   </button>
                 </div>
-                <div className="mt-3 text-[12px] text-muted leading-relaxed">
-                  Share this link to prove you paid this invoice. The amount is hidden;
-                  it verifies after the recipient claims the UTXO and marks the invoice paid.
-                </div>
+                <p className="mt-3 text-[12px] text-muted leading-relaxed">
+                  Share this link to prove you paid this invoice. The amount is
+                  hidden; it verifies after the recipient claims the UTXO and
+                  marks the invoice paid.
+                </p>
               </div>
             ) : (
-              <div className="mt-5 pt-5 border-t border-sage/30">
+              <div className="mt-10 w-full max-w-xl border-t border-line pt-6 text-left">
                 <button
                   onClick={handleGenerateReceipt}
                   disabled={generatingReceipt}
-                  className="text-[12px] font-mono tracking-[0.05em] uppercase px-3 py-1.5 border border-line rounded-[2px] text-ink hover:bg-line/30 disabled:opacity-60"
+                  className="btn-ghost !px-5 !py-2.5 !rounded-full disabled:opacity-60"
                 >
                   {generatingReceipt ? "Generating…" : "Generate signed receipt"}
                 </button>
-                <div className="mt-3 text-[12px] text-muted leading-relaxed">
-                  Optional. Generates a sharable URL that cryptographically proves
-                  this wallet paid this invoice. One extra wallet signature.
-                </div>
+                <p className="mt-3 text-[12px] text-muted leading-relaxed">
+                  Optional. A sharable URL that cryptographically proves this
+                  wallet paid this invoice. One extra wallet signature.
+                </p>
                 {receiptBuildError && (
                   <div className="mt-3 text-[12px] text-brick leading-relaxed">
                     Receipt build failed: {receiptBuildError}

@@ -15,6 +15,7 @@ import {
   type PayStep,
   type PayStepStatus,
 } from "@/components/PaymentProgressModal";
+import { VeilDescentMark } from "@/components/VeilDescentMark";
 import {
   fetchProductSpec,
   formatProductAmount,
@@ -242,7 +243,7 @@ export default function BuyPage({
             <>
               <header>
                 <span className="eyebrow">Private payment</span>
-                <h1 className="mt-4 font-display font-medium text-ink text-[44px] md:text-[56px] leading-[1.02] tracking-[-0.02em]">
+                <h1 className="mt-4 font-sans font-medium text-ink text-[40px] md:text-[52px] leading-[1.05] tracking-[-0.025em]">
                   {spec.name}
                 </h1>
                 {spec.description && (
@@ -253,13 +254,14 @@ export default function BuyPage({
               </header>
 
               {spec.imageUrl && (
-                <div className="mt-8 border border-line rounded-[3px] overflow-hidden bg-paper-3/40">
+                <div className="mt-8 border-y border-line">
                   {/*
                     eslint-disable-next-line @next/next/no-img-element
                     Linking to merchant-supplied images intentionally — we
                     don't host them. next/image would proxy through our
                     server, defeating the "not our content" property.
-                  */}
+                    Hairline-only frame — no rounded box, no fill — so
+                    the image reads as content on the page, not a card. */}
                   <img
                     src={spec.imageUrl}
                     alt={spec.name}
@@ -339,7 +341,7 @@ export default function BuyPage({
                 )}
 
                 {showQr && (
-                  <div className="mt-6 inline-flex flex-col items-center p-5 border border-line rounded-[3px] bg-paper-3/30">
+                  <div className="mt-6 inline-flex flex-col items-center">
                     <QRCodeSVG
                       value={customerUrl}
                       size={196}
@@ -385,36 +387,24 @@ function PaidState({
   amountDisplay: string;
 }) {
   return (
-    <div className="space-y-8">
-      <header>
-        <span className="eyebrow text-sage">✓ Payment sent</span>
-        <h1 className="mt-4 font-display font-medium text-ink text-[40px] md:text-[52px] leading-[1.02] tracking-[-0.02em]">
-          Thanks — you&apos;re done.
-        </h1>
-        <p className="mt-4 text-[15px] leading-[1.6] text-ink/80 max-w-lg">
-          Your private payment is on its way. The merchant will see it in their
-          dashboard within ~30 seconds — no further action from you.
-        </p>
-      </header>
-
-      <div className="border border-line rounded-[3px] p-5 bg-paper-3/40">
-        <div className="flex items-baseline justify-between gap-4 flex-wrap">
-          <div>
-            <div className="text-[15.5px] text-ink font-medium leading-tight">
-              {spec.name}
-            </div>
-            <div className="mt-1 font-mono text-[12px] tracking-[0.04em] text-muted tnum">
-              {amountDisplay}
-            </div>
-          </div>
-          <span className="mono-chip text-sage">paid</span>
-        </div>
+    <div className="flex flex-col items-center text-center pt-2 md:pt-4 pb-8">
+      <VeilDescentMark size={144} variant="single" />
+      <div className="mt-8 eyebrow text-sage">✓ Payment sent</div>
+      <h1 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+        Thanks — you&apos;re done.
+      </h1>
+      <div className="mt-3 font-sans text-ink text-[18px] md:text-[20px] leading-[1.4]">
+        <span className="font-medium">{spec.name}</span>
+        <span className="text-muted"> · </span>
+        <span className="tnum">{amountDisplay}</span>
       </div>
-
-      <p className="text-[12.5px] text-muted leading-relaxed max-w-md">
-        Need a record? Save this page — your wallet&apos;s tx history shows the
-        deposit, and the merchant&apos;s dashboard will show the matching
-        incoming UTXO.
+      <p className="mt-5 text-[14px] leading-[1.55] text-muted max-w-[440px]">
+        Your private payment is on its way. The merchant will see it in their
+        dashboard within ~30 seconds — no further action from you.
+      </p>
+      <p className="mt-3 text-[12.5px] leading-[1.55] text-dim max-w-[440px]">
+        Need a record? Save this page — your wallet&apos;s tx history shows
+        the deposit; the merchant&apos;s dashboard shows the matching UTXO.
       </p>
     </div>
   );
