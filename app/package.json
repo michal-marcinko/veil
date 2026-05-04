@@ -29,6 +29,9 @@
     "react-dom": "18.3.0",
     "snarkjs": "^0.7.6"
   },
+  "overrides": {
+    "@solana/wallet-adapter-react": "0.15.35"
+  },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

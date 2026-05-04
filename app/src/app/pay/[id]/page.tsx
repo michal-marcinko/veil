@@ -7,6 +7,11 @@ import { VeilLogo } from "@/components/VeilLogo";
 import { PublicKey } from "@solana/web3.js";
 import { InvoiceView } from "@/components/InvoiceView";
 import { RegistrationModal, type RegistrationStep, type StepStatus } from "@/components/RegistrationModal";
+import {
+  PaymentProgressModal,
+  type PayStep,
+  type PayStepStatus,
+} from "@/components/PaymentProgressModal";
 import { decryptJson, sha256, extractKeyFromFragment } from "@/lib/encryption";
 import { fetchCiphertext } from "@/lib/arweave";
 import { fetchInvoice } from "@/lib/anchor";
@@ -17,6 +22,8 @@ import {
   payInvoice,
   payInvoiceFromShielded,
   debugDumpIndexerTail,
+  __veilResetPopupCounter,
+  __veilPopupCountSnapshot,
 } from "@/lib/umbra";
 import { loadShieldedAvailability, type ShieldedAvailability } from "@/lib/shielded-pay";
 import { USDC_MINT } from "@/lib/constants";
@@ -45,6 +52,17 @@ export default function PayPage({ params }: { params: { id: string } }) {
   const [paymentIntentSig, setPaymentIntentSig] = useState<string | null>(null);
   const [shielded, setShielded] = useState<ShieldedAvailability | null>(null);
   const [useShielded, setUseShielded] = useState(true); // default ON when available
+
+  // Payment-progress modal state. Stays open through the entire deposit
+  // flow (including all 2-3 Phantom popups) so the user is never left
+  // staring at a static page wondering if anything is happening.
+  const [payOpen, setPayOpen] = useState(false);
+  const [payProgress, setPayProgress] = useState<Record<PayStep, PayStepStatus>>({
+    build: "pending",
+    "sign-proof": "pending",
+    "sign-deposit": "pending",
+    confirm: "pending",
+  });
 
   useEffect(() => {
     (async () => {
@@ -114,43 +132,94 @@ export default function PayPage({ params }: { params: { id: string } }) {
     if (!metadata || !wallet.publicKey) return;
     setPaying(true);
     setError(null);
-    try {
-      const client = await getOrCreateClient(wallet as any);
-      setRegOpen(true);
-      await ensureRegistered(client, (step, st) =>
-        setRegSteps((p) => ({ ...p, [step]: st === "pre" ? "in_progress" : "done" })),
-      );
 
-      // DIAGNOSTIC: log Bob's full key state at pay time so we can
-      // compare against the depositor pub that ends up on the UTXO.
-      // This is the only way to verify our hypothesis about where
-      // the on-chain depositor pub comes from.
+    // ─── DIAGNOSTIC INSTRUMENTATION ────────────────────────────────
+    // Every wallet sign request gets numbered + timestamped so we can
+    // correlate console output with visible Phantom popups. The wrap
+    // is restored in the finally{} block.
+    const t0 = Date.now();
+    const elapsed = () => `+${(Date.now() - t0).toString().padStart(5, "0")}ms`;
+    const log = (msg: string, ...args: any[]) =>
+      // eslint-disable-next-line no-console
+      console.log(`[Veil pay ${elapsed()}] ${msg}`, ...args);
+    log("════════════════ pay flow start ════════════════");
+    log(`recipient=${metadata.creator.wallet}`);
+    log(`amount=${metadata.total} (raw, base units)`);
+    log(`mint=${USDC_MINT.toBase58()}`);
+    log(`useShielded=${useShielded} shielded=${shielded?.kind ?? "null"}`);
+
+    // Reset the module-level popup counter that lives inside
+    // createFixedWalletStandardSigner (the ONLY place we can reliably
+    // count popups — the SDK reaches Phantom via Wallet Standard,
+    // bypassing wallet.signTransaction entirely).
+    __veilResetPopupCounter();
+
+    try {
+      log("Step A: getOrCreateClient (may sign master-seed message)");
+      const client = await getOrCreateClient(wallet as any);
+      log("Step A done");
+
+      setRegOpen(true);
+      log("Step B: ensureRegistered");
+      await ensureRegistered(client, (step, st) => {
+        log(`  registration step ${step} → ${st}`);
+        setRegSteps((p) => ({ ...p, [step]: st === "pre" ? "in_progress" : "done" }));
+      });
+      log("Step B done");
+
       try {
         const { diagnoseUmbraReceiver } = await import("@/lib/umbra");
         const diag = await diagnoseUmbraReceiver(client);
-        // eslint-disable-next-line no-console
-        console.log("[Veil pay diag] Bob's on-chain key state:", diag);
-        // eslint-disable-next-line no-console
-        console.log("[Veil pay diag] Bob expanded key state:", JSON.stringify(diag, null, 2));
+        log("Bob's on-chain key state:", diag);
       } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn("[Veil pay diag] failed:", e);
+        log("diagnoseUmbraReceiver failed:", e);
       }
 
-      // One-time legacy-recovery: if Bob's on-chain X25519 pub doesn't
-      // match his now-stable persisted-seed derivation (because he
-      // registered under a previous, drifting session), rotate the
-      // on-chain key to align it. Without this, Alice cannot decrypt
-      // anything Bob encrypts — see ensureReceiverKeyAligned in umbra.ts.
+      log("Step C: ensureReceiverKeyAligned");
       const align = await ensureReceiverKeyAligned(client);
-      // eslint-disable-next-line no-console
-      console.log("[Veil pay diag] ensureReceiverKeyAligned result:", align);
+      log("Step C done — align result:", align);
       if (align.rotated) {
         setStatus(
           "Refreshed your encryption key on-chain so the recipient can decrypt. One-time step.",
         );
       }
       setRegOpen(false);
+
+      // ─── HAND-OFF: registration done, payment starts ─────────────
+      // Open the payment-progress modal BEFORE the SDK call so the
+      // user has visible context throughout the Phantom popup storm.
+      log("Opening payment progress modal");
+      setPayProgress({
+        build: "in_progress",
+        "sign-proof": "pending",
+        "sign-deposit": "pending",
+        confirm: "pending",
+      });
+      setPayOpen(true);
+
+      // Drive step transitions from the REAL popup counter (not timers).
+      // Measured 3 popups on the shielded path, 2-3 on public. Map:
+      //   count 0 → build phase still
+      //   count 1 → first popup is open or signed
+      //   count 2 → second popup is open or signed
+      //   count ≥ 3 → all signing in flight
+      const ticker = window.setInterval(() => {
+        const snap = __veilPopupCountSnapshot();
+        if (snap.count === 0) return;
+        if (snap.count === 1) {
+          setPayProgress((p) =>
+            p["sign-proof"] === "pending"
+              ? { ...p, build: "done", "sign-proof": "in_progress" }
+              : p,
+          );
+        } else if (snap.count === 2) {
+          setPayProgress((p) =>
+            p["sign-deposit"] === "pending"
+              ? { ...p, build: "done", "sign-proof": "done", "sign-deposit": "in_progress" }
+              : p,
+          );
+        }
+      }, 200);
 
       const invoicePda = new PublicKey(params.id);
 
@@ -164,31 +233,45 @@ export default function PayPage({ params }: { params: { id: string } }) {
       const shouldUseShielded =
         useShielded && shielded?.kind === "available";
 
+      log(`Step D: calling ${shouldUseShielded ? "payInvoiceFromShielded" : "payInvoice"}`);
+      log("(Phantom popups fire from inside the SDK — each one logs as [Veil popup #N])");
       const payResult = shouldUseShielded
         ? await payInvoiceFromShielded(payArgs)
         : await payInvoice(payArgs);
+      const popupSnap = __veilPopupCountSnapshot();
+      log(`Step D done — total Phantom popups during pay: ${popupSnap.count} over ${popupSnap.sinceMs}ms`);
+      log("payResult:", payResult);
+
+      window.clearInterval(ticker);
+      setPayProgress({
+        build: "done",
+        "sign-proof": "done",
+        "sign-deposit": "done",
+        confirm: "in_progress",
+      });
 
       if (process.env.NEXT_PUBLIC_VEIL_DEBUG === "1") {
-        // eslint-disable-next-line no-console
-        console.log("[Veil pay diag] Umbra pay result:", payResult);
         await debugDumpIndexerTail(client, 8);
       }
 
-      // Receipt generation moved out of the eager pay path — see
-      // `handleGenerateReceipt` below. Bob's pay flow now ends after the
-      // two on-chain transactions, no extra signMessage popup. The
-      // receipt is generated only when Bob clicks "Generate signed
-      // receipt" on the success card (most users never need it; it's
-      // for forwarding proof-of-payment to the recipient out-of-band).
       setPaymentIntentSig(payResult.createUtxoSignature);
       setPaid(true);
+
+      // Keep the "all done" state visible for ~1.4s before unmounting,
+      // so the user gets visual confirmation rather than a blink-and-gone.
+      setPayProgress((p) => ({ ...p, confirm: "done" }));
+      window.setTimeout(() => setPayOpen(false), 1400);
+      log("════════════════ pay flow complete ════════════════");
     } catch (err: any) {
       // eslint-disable-next-line no-console
-      console.error("[Veil pay] full error:", err, "\nlogs:", err?.logs, "\ncause:", err?.cause);
+      console.error(`[Veil pay ${elapsed()}] ✗ FAILED`, err, "\nlogs:", err?.logs, "\ncause:", err?.cause);
       setError(err.message ?? String(err));
       setRegOpen(false);
+      setPayOpen(false);
     } finally {
+      const final = __veilPopupCountSnapshot();
       setPaying(false);
+      log(`Pay flow returned — total elapsed: ${Date.now() - t0}ms, total Phantom popups: ${final.count}`);
     }
   }
 
@@ -397,6 +480,17 @@ export default function PayPage({ params }: { params: { id: string } }) {
           </button>
         </div>
         <RegistrationModal open={regOpen} steps={regSteps} />
+        <PaymentProgressModal
+          open={payOpen}
+          steps={payProgress}
+          amountLabel={
+            metadata
+              ? `${formatAmount(metadata.total, metadata.currency.decimals)} ${metadata.currency.symbol}`
+              : ""
+          }
+          recipientLabel={metadata?.creator?.display_name || metadata?.creator?.wallet?.slice(0, 8) || "recipient"}
+          isShielded={useShielded && shielded?.kind === "available"}
+        />
         {status && <div className="mt-4 text-[13px] text-muted">{status}</div>}
       </div>
     </Shell>

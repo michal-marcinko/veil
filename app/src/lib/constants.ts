@@ -69,3 +69,26 @@ export const UMBRA_PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_UMBRA_PROGRAM_ID ||
     "DSuKkyqGVGgo4QtPABfxKJKygUDACbUhirnuv63mEpAJ",
 );
+
+// Address Lookup Table for the VeilPay single-popup tx. The pay tx packs 19
+// unique accounts and is ~250 bytes over the 1232-byte cap; ALT'ing 13 static
+// accounts (programs, sysvars, Umbra PDAs, mint) lands the tx ~100 bytes
+// under. Deploy via `cd app && node scripts/deploy-veilpay-alt.mjs`.
+//
+// Optional: when unset, payInvoiceCpi compiles a v0 message without ALT and
+// will fail at serialize time with the same "transaction too large" error
+// that motivated this work. Same null-falls-through pattern as
+// VEIL_PAY_PROGRAM_ID — null means "ALT not configured", not "ALT disabled".
+export const VEILPAY_ALT_ADDRESS: PublicKey | null = (() => {
+  const raw = process.env.NEXT_PUBLIC_VEILPAY_ALT_ADDRESS;
+  if (!raw) return null;
+  try {
+    return new PublicKey(raw);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[Veil] NEXT_PUBLIC_VEILPAY_ALT_ADDRESS set but not a valid Pubkey — ignoring",
+    );
+    return null;
+  }
+})();

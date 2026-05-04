@@ -32,6 +32,7 @@
  */
 
 import {
+  AddressLookupTableAccount,
   PublicKey,
   TransactionMessage,
   TransactionInstruction,
@@ -77,7 +78,12 @@ import { decodeEncryptedUserAccount } from "@umbra-privacy/umbra-codama";
 import { getCreateReceiverClaimableUtxoFromPublicBalanceProver } from "@umbra-privacy/web-zk-prover";
 
 import type { PayInvoiceArgs, PayInvoiceResult } from "./umbra";
-import { VEIL_PAY_PROGRAM_ID, UMBRA_PROGRAM_ID, RPC_URL } from "./constants";
+import {
+  VEIL_PAY_PROGRAM_ID,
+  UMBRA_PROGRAM_ID,
+  VEILPAY_ALT_ADDRESS,
+  RPC_URL,
+} from "./constants";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -415,14 +421,17 @@ async function generateProofAndCommitments(
   const secondViewingKeyGenerator = getSecondViewingKeyDeriver({
     client: c,
   } as any);
+  // Umbra's BN254 field-element check rejects raw `number` — every
+  // timestamp component must be coerced to `bigint` before any SDK helper
+  // touches it (assertBn254FieldElement throws "Expected bigint, got number").
   const transactionViewingKey = (await secondViewingKeyGenerator(
     mint as any,
-    year as any,
-    month as any,
-    day as any,
-    hour as any,
-    minute as any,
-    second as any,
+    BigInt(year) as any,
+    BigInt(month) as any,
+    BigInt(day) as any,
+    BigInt(hour) as any,
+    BigInt(minute) as any,
+    BigInt(second) as any,
   )) as bigint;
 
   // 12. Split destination address
@@ -844,23 +853,61 @@ export async function payInvoiceCpi(
     depositorPubkey,
   );
 
-  // 4. Add a generous compute budget. The deposit verifier alone runs ~1.2M
-  //    CU; CPI overhead bumps that. Set 1.4M to leave headroom under the
-  //    1.4M per-tx cap. If we trip the cap we'll need to remove the buffer
-  //    pre-creation branch (currently absent — we always create fresh).
+  // 4. Compute budget tuned to actual measured usage. The deposit verifier
+  //    alone runs ~1.2M CU; CPI overhead pushes that to ~1.25M. We use 1.25M
+  //    (the actual ceiling of measured usage + a small margin) instead of
+  //    Solana's 1.4M per-tx cap because the smaller value is more honest.
+  //
+  //    Note on Phantom: we initially hoped reducing this from 1.4M to 1.25M
+  //    might help Phantom's Blowfish-powered simulator (which is known to
+  //    cap simulated CU). It did not — Phantom still shows "Failed to
+  //    simulate the results of this request." The actual root cause is
+  //    Blowfish's devnet pipeline + unknown-program allowlist gap, which
+  //    rejects simulation BEFORE CU is evaluated. There's no dApp-side fix.
+  //    Solflare uses raw RPC simulateTransaction and previews correctly.
+  //    On mainnet, once VeilPay + Umbra are added to Blowfish's allowlist,
+  //    Phantom's UX will match Solflare's.
+  //    Source: docs/superpowers/notes/2026-05-03-phantom-blowfish-simulator.md
   const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: 1_400_000,
+    units: 1_250_000,
   });
 
   // 5. Compile a v0 message via @solana/web3.js
   const connection = new Connection(RPC_URL, "confirmed");
   const { blockhash, lastValidBlockHeight } =
     await connection.getLatestBlockhash("confirmed");
+
+  // 5a. Fetch the ALT (if configured). The VeilPay tx is ~250 bytes over
+  //     the 1232-byte cap with all account keys inline; ALT-substitution
+  //     drops 13 keys to 1-byte indices, saving ~360-380 bytes net.
+  //     If the ALT isn't configured we still try to compile — useful for
+  //     local diagnosis even though the resulting tx will fail at
+  //     serialize-time with "encoding overruns Uint8Array".
+  let altAccounts: AddressLookupTableAccount[] = [];
+  if (VEILPAY_ALT_ADDRESS) {
+    const altResult = await connection.getAddressLookupTable(
+      VEILPAY_ALT_ADDRESS,
+    );
+    if (altResult.value) {
+      altAccounts = [altResult.value];
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[VeilPay] ALT ${VEILPAY_ALT_ADDRESS.toBase58()} not fetchable — falling back to inline accounts. Tx will likely exceed 1232b.`,
+      );
+    }
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[VeilPay] NEXT_PUBLIC_VEILPAY_ALT_ADDRESS not set — tx will likely exceed 1232b. Run `cd app && node scripts/deploy-veilpay-alt.mjs`.",
+    );
+  }
+
   const messageV0 = new TransactionMessage({
     payerKey: depositorPubkey,
     recentBlockhash: blockhash,
     instructions: [computeBudgetIx, veilPayIx],
-  }).compileToV0Message();
+  }).compileToV0Message(altAccounts);
   const tx = new VersionedTransaction(messageV0);
 
   // 6. Sign once via the SDK client's signer (which routes to our wrapped
@@ -871,6 +918,33 @@ export async function payInvoiceCpi(
   //    object shaped { messageBytes, signatures }. Build that shape from
   //    our VersionedTransaction's serialized message.
   const messageBytes = messageV0.serialize();
+  // DIAGNOSTIC — print sizes so we can tell at a glance whether ALT
+  // substitution landed us under the 1232-byte cap. messageBytes.length is
+  // the post-ALT serialized message; signed tx adds 1 byte (sig count) +
+  // 64 bytes (one signature) = 65 bytes overhead.
+  // eslint-disable-next-line no-console
+  console.log("[VeilPay tx-size]", {
+    serializedMessageBytes: messageBytes.length,
+    estSignedTxBytes: messageBytes.length + 65,
+    underCap1232: messageBytes.length + 65 <= 1232,
+    accountKeys: messageV0.staticAccountKeys.length,
+    altCount: altAccounts.length,
+    altWritable: messageV0.addressTableLookups.reduce(
+      (n, l) => n + l.writableIndexes.length,
+      0,
+    ),
+    altReadonly: messageV0.addressTableLookups.reduce(
+      (n, l) => n + l.readonlyIndexes.length,
+      0,
+    ),
+    instructions: messageV0.compiledInstructions.length,
+    veilPayIxDataBytes: veilPayIx.data.length,
+    veilPayIxAccountCount: veilPayIx.keys.length,
+    createBufferDataBytes: createBufferIx.data.length,
+    depositDataBytes: depositIx.data.length,
+    createBufferAccountCount: createBufferIx.accounts.length,
+    depositAccountCount: depositIx.accounts.length,
+  });
   const kitTx: any = {
     messageBytes,
     signatures: { [depositorAddress]: null },
