@@ -247,11 +247,6 @@ export default function DashboardPage() {
   type StatusFilter = "all" | "pending" | "paid" | "cancelled";
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  // Default-collapse the Paid section when there are >10 paid invoices,
-  // so a long history doesn't dominate the page. Threshold is generous
-  // — a creator with 5 paid invoices probably wants to see them all.
-  const PAID_COLLAPSE_THRESHOLD = 10;
-  const [showAllPaid, setShowAllPaid] = useState(false);
 
   async function refresh() {
     if (!wallet.publicKey) return;
@@ -814,12 +809,12 @@ export default function DashboardPage() {
     });
     return mapped;
   }, [invoices]);
+  // Pending count drives the Shell's nav badge + the "Bind receipt" CTA
+  // visibility. We no longer split the list visually by paid/pending —
+  // status dot+label per row carries the per-invoice state — but the
+  // count is still useful for the surrounding chrome.
   const pendingInvoices = useMemo(
     () => incoming.filter((invoice) => invoice.status === "pending"),
-    [incoming],
-  );
-  const paidInvoices = useMemo(
-    () => incoming.filter((invoice) => invoice.status === "paid"),
     [incoming],
   );
 
@@ -1198,19 +1193,16 @@ export default function DashboardPage() {
               return <LedgerSkeleton />;
             }
 
-            const isFlatBrowse =
-              statusFilter === "all" && searchQuery.trim() === "";
-            const shouldSplit =
-              isFlatBrowse && paidInvoices.length > PAID_COLLAPSE_THRESHOLD;
-
+            // Single chronological list. Date-group sticky headers carry
+            // the structure; per-row status dot+label differentiates pending
+            // vs paid. No pending/paid subsection split — the list reads as
+            // one continuous ledger, not categorical buckets. (Status filter
+            // dropdown above lets the user narrow by state when they want.)
             if (incoming.length === 0) {
               return <LedgerEmptyState kind="zero" />;
             }
 
-            if (
-              filteredInvoices.length === 0 &&
-              !shouldSplit
-            ) {
+            if (filteredInvoices.length === 0) {
               return (
                 <LedgerEmptyState
                   kind="filtered"
@@ -1222,81 +1214,17 @@ export default function DashboardPage() {
               );
             }
 
-            if (!shouldSplit) {
-              const titleBase =
-                statusFilter === "all"
-                  ? "Invoices you created"
-                  : `${statusFilter[0].toUpperCase()}${statusFilter.slice(1)} invoices`;
-              return (
-                <LedgerSection
-                  title={titleBase}
-                  invoices={filteredInvoices}
-                  labels={labels}
-                  onBindReceipt={(pda) => openReceiptPanel(pda)}
-                />
-              );
-            }
-
-            // Split view: Pending up top, Paid collapsed by default.
-            const nonPaidPending = incoming.filter(
-              (i) => i.status !== "paid",
-            );
-            const visiblePaid = showAllPaid ? paidInvoices : [];
+            const titleBase =
+              statusFilter === "all"
+                ? "Invoices you created"
+                : `${statusFilter[0].toUpperCase()}${statusFilter.slice(1)} invoices`;
             return (
-              <div className="space-y-12">
-                <LedgerSection
-                  title={`Pending · ${pendingInvoices.length}`}
-                  invoices={nonPaidPending}
-                  labels={labels}
-                  onBindReceipt={(pda) => openReceiptPanel(pda)}
-                />
-                <div>
-                  {showAllPaid ? (
-                    <>
-                      <div className="flex items-baseline justify-end mb-2 -mt-1">
-                        <button
-                          type="button"
-                          onClick={() => setShowAllPaid(false)}
-                          className="btn-quiet text-[11px]"
-                          aria-expanded={true}
-                        >
-                          Hide
-                        </button>
-                      </div>
-                      <LedgerSection
-                        title={`Paid · ${paidInvoices.length}`}
-                        invoices={visiblePaid}
-                        labels={labels}
-                        onBindReceipt={(pda) => openReceiptPanel(pda)}
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-baseline justify-between mb-4">
-                        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-                          Paid · {paidInvoices.length}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setShowAllPaid(true)}
-                          className="btn-quiet text-[11px]"
-                          aria-expanded={false}
-                        >
-                          Show all {paidInvoices.length} paid invoices
-                        </button>
-                      </div>
-                      <div className="border border-dashed border-line rounded-[4px] p-6 text-center max-w-2xl">
-                        <p className="text-[13px] text-muted leading-relaxed">
-                          {paidInvoices.length} paid invoice
-                          {paidInvoices.length === 1 ? "" : "s"} hidden to
-                          keep the overview short. Use the status filter or
-                          expand above to see them.
-                        </p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
+              <LedgerSection
+                title={titleBase}
+                invoices={filteredInvoices}
+                labels={labels}
+                onBindReceipt={(pda) => openReceiptPanel(pda)}
+              />
             );
           })()}
 
