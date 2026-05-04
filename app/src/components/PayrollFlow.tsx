@@ -575,32 +575,42 @@ export function PayrollFlow() {
             />
           </div>
 
-          {/* CSV — quiet frame, monospace */}
-          <div className="mt-12">
-            <div className="flex items-baseline justify-between mb-2">
-              <span className="eyebrow">Payroll · wallet,amount,memo</span>
-              <button
-                type="button"
-                onClick={() => onCsvTextChange(SAMPLE_CSV)}
-                disabled={running}
-                className="text-[12px] text-muted hover:text-ink transition-colors"
-              >
-                Load sample
-              </button>
+          {/* CSV — borderless canvas. Hairline-top + hairline-bottom
+              rules give it visual containment without the 2010s
+              bordered-card register. Monospace text reads like a notebook
+              page; the sample CSV in the placeholder teaches the format
+              by example. */}
+          <div className="mt-14">
+            <div className="flex items-baseline justify-between mb-3">
+              <span className="eyebrow">Payroll CSV</span>
+              {!csvText && !running && (
+                <button
+                  type="button"
+                  onClick={() => onCsvTextChange(SAMPLE_CSV)}
+                  className="text-[12px] text-muted hover:text-ink transition-colors"
+                >
+                  Load sample →
+                </button>
+              )}
             </div>
-            <textarea
-              value={csvText}
-              onChange={(e) => onCsvTextChange(e.target.value)}
-              rows={10}
-              disabled={running}
-              className="payroll-csv-input"
-              placeholder={SAMPLE_CSV}
-              aria-label="Payroll CSV"
-            />
-            <div className="mt-2 text-[12px] text-dim">
-              {parsed.rows.length} row(s) · {totalDisplay}
+            <div className="border-t border-line">
+              <textarea
+                value={csvText}
+                onChange={(e) => onCsvTextChange(e.target.value)}
+                rows={9}
+                disabled={running}
+                className="csv-canvas-input"
+                placeholder={SAMPLE_CSV}
+                aria-label="Payroll CSV"
+              />
+            </div>
+            <div className="border-t border-line pt-2 flex items-baseline justify-between gap-4 flex-wrap">
+              <span className="text-[12px] text-dim">
+                {parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} ·{" "}
+                {totalDisplay}
+              </span>
               {parsed.errors.length > 0 && (
-                <span className="text-brick ml-3">
+                <span className="text-[12px] text-brick">
                   {parsed.errors.length} parse error
                   {parsed.errors.length === 1 ? "" : "s"}
                 </span>
@@ -1093,29 +1103,25 @@ function PayrollFlowStyles() {
         from { opacity: 0; transform: translateY(4px); }
         to   { opacity: 1; transform: translateY(0); }
       }
-      .payroll-csv-input {
+      .csv-canvas-input {
+        display: block;
         width: 100%;
         background: transparent;
-        border: 1px solid #d6ceba;
-        border-radius: 3px;
-        padding: 14px 16px;
+        border: 0;
+        outline: none;
+        padding: 18px 0;
         font-family: var(--font-mono), ui-monospace, monospace;
         font-size: 13px;
-        line-height: 1.6;
+        line-height: 1.7;
         color: #1c1712;
         resize: vertical;
-        transition: border-color 150ms ease, box-shadow 150ms ease;
+        min-height: 200px;
       }
-      .payroll-csv-input::placeholder {
+      .csv-canvas-input::placeholder {
         color: #a59c84;
+        white-space: pre;
       }
-      .payroll-csv-input:focus {
-        outline: none;
-        border-color: #1c1712;
-        box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.08);
-      }
-      .payroll-csv-input:disabled {
-        opacity: 0.55;
+      .csv-canvas-input:disabled {
         cursor: not-allowed;
       }
       .canvas-disclosure-arrow {
