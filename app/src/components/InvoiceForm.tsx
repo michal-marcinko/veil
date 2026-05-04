@@ -111,8 +111,12 @@ export function InvoiceForm({
         </div>
       </div>
 
-      {/* Line items — clean table, no card */}
-      <div className="border-t border-line pt-8">
+      {/* Line items — clean table, no card. Eyebrow + divider live here
+          (not at the page top) so the band reads as the seam between
+          parties and items, where the visual weight belongs. */}
+      <div>
+        <div className="eyebrow text-muted mb-3">New invoice</div>
+        <div className="border-t border-line pt-8">
         {/* Column headers */}
         <div className="hidden md:grid grid-cols-[1.75rem_1fr_4rem_9rem_8rem_1.5rem] gap-4 pb-3 border-b border-line items-baseline">
           <div />
@@ -145,6 +149,7 @@ export function InvoiceForm({
             <span aria-hidden className="text-gold">+</span>
             Add line
           </button>
+        </div>
         </div>
       </div>
 

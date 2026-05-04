@@ -1,6 +1,21 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+
+/**
+ * Detect Mac after mount. SSR returns null so we don't hydrate a wrong
+ * symbol; first client render sees null, then a useEffect flips to the
+ * platform-correct value. Brief absence of the kbd hint is preferable
+ * to a hydration mismatch warning.
+ */
+function useModKey(): "⌘" | "Ctrl" | null {
+  const [key, setKey] = useState<"⌘" | "Ctrl" | null>(null);
+  useEffect(() => {
+    const platform = typeof navigator !== "undefined" ? navigator.platform : "";
+    setKey(/Mac|iPhone|iPad|iPod/.test(platform) ? "⌘" : "Ctrl");
+  }, []);
+  return key;
+}
 
 export type CanvasBarState =
   | {
@@ -96,6 +111,7 @@ function ComposeBar({
   state: Extract<CanvasBarState, { kind: "compose" }>;
   formId: string;
 }) {
+  const modKey = useModKey();
   return (
     <>
       <span className="canvas-bar-meta hidden sm:inline-flex">
@@ -115,7 +131,7 @@ function ComposeBar({
           className="btn-primary !px-5 !py-2.5 !rounded-full"
         >
           <span>Create private invoice</span>
-          <kbd className="canvas-kbd">⌘↵</kbd>
+          {modKey && <kbd className="canvas-kbd">{modKey} ↵</kbd>}
         </button>
       </div>
     </>
@@ -148,6 +164,7 @@ function SuccessBar({
 }: {
   state: Extract<CanvasBarState, { kind: "success" }>;
 }) {
+  const modKey = useModKey();
   return (
     <>
       <div className="canvas-pay-link-strip flex-1 min-w-0">
@@ -163,7 +180,7 @@ function SuccessBar({
         ) : (
           <>
             <span>Copy link</span>
-            <kbd className="canvas-kbd">⌘C</kbd>
+            {modKey && <kbd className="canvas-kbd">{modKey} C</kbd>}
           </>
         )}
       </button>

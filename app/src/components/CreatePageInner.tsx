@@ -20,6 +20,8 @@ import {
 } from "@/components/RegistrationModal";
 import { CreateModeSelector } from "@/components/CreateModeSelector";
 import { PayrollFlow } from "@/components/PayrollFlow";
+import { PublishingModal } from "@/components/PublishingModal";
+import { VeilDescentMark } from "@/components/VeilDescentMark";
 import { getOrCreateClient, ensureRegistered, ensureReceiverKeyAligned } from "@/lib/umbra";
 import { createInvoiceOnChain } from "@/lib/anchor";
 import { buildMetadata, validateMetadata } from "@/lib/types";
@@ -363,10 +365,13 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
               </button>
             )}
 
-            {mode === "invoice" && (
-              <div className={inSuccessState ? "mt-2" : "mt-8"}>
-                <span className={inSuccessState ? "eyebrow text-sage" : "eyebrow"}>
-                  {inSuccessState ? "✓ Published privately · Just now" : "New invoice"}
+            {/* Compose-state eyebrow lives INSIDE the form (above the
+                items-table divider). Page-level eyebrow now reserved for
+                the success state celebration only. */}
+            {mode === "invoice" && inSuccessState && (
+              <div className="mt-2">
+                <span className="eyebrow text-sage">
+                  ✓ Published privately · Just now
                 </span>
               </div>
             )}
@@ -374,15 +379,20 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
 
           {mode === "invoice" ? (
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-8 md:mt-10 pb-32">
-              <div className="max-w-3xl">
-                {!wallet.connected ? (
-                  <div className="max-w-lg">
-                    <p className="text-[17px] md:text-[19px] text-ink/80 leading-[1.5] mb-8">
-                      To publish a private invoice, connect the wallet you&apos;ll receive payment to.
-                    </p>
-                    <ClientWalletMultiButton />
-                  </div>
-                ) : (
+              {!wallet.connected ? (
+                <div className="max-w-lg">
+                  <p className="text-[17px] md:text-[19px] text-ink/80 leading-[1.5] mb-8">
+                    To publish a private invoice, connect the wallet you&apos;ll receive payment to.
+                  </p>
+                  <ClientWalletMultiButton />
+                </div>
+              ) : inSuccessState && result ? (
+                /* Clean success layout: veil-descent SVG + minimal text.
+                   No form rerender, no chip row, no leftover state — just
+                   the celebration and the sticky bar with the pay link. */
+                <SuccessLayout result={result} />
+              ) : (
+                <div className="max-w-3xl">
                   <InvoiceForm
                     values={values}
                     onChange={(partial) =>
@@ -392,9 +402,8 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
                     errorMessage={error}
                     onDismissError={() => setError(null)}
                   />
-                )}
-                {result && <SuccessSummary result={result} />}
-              </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
@@ -408,6 +417,16 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       {canvasState && <InvoiceCanvasBar state={canvasState} formId="invoice-form" />}
 
       <RegistrationModal open={regOpen} steps={regSteps} />
+
+      {/* Publishing modal — overlays the canvas during the on-chain
+          publish flow (after registration is done, before result lands).
+          Solves the "modal disappears when Phantom popup opens" issue:
+          this stays on screen continuously through every wallet popup. */}
+      <PublishingModal
+        open={mode === "invoice" && submitting && !regOpen && !result}
+        step={publishStep}
+        awaitingWallet={awaitingWallet}
+      />
 
       <style
         dangerouslySetInnerHTML={{
@@ -479,21 +498,27 @@ function Frame({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Success summary rendered above the sticky bar — describes what was
- * shipped, with the recipient name and amount. The bar itself holds the
- * pay link + Copy button.
+ * Clean success layout — replaces the form entirely. Centered veil-
+ * descent animation (the brand's primary visual metaphor) + minimal
+ * text. The sticky bar at the bottom holds the pay link + Copy button.
+ *
+ * Deliberately omits: a re-render of the filled-in form, the chip row,
+ * the line-items table, and any "+ Send another" button. The page reads
+ * as "shipped, here's your link" — nothing else competes for attention.
  */
-function SuccessSummary({ result }: { result: InvoiceResult }) {
+function SuccessLayout({ result }: { result: InvoiceResult }) {
   return (
-    <div className="max-w-2xl mt-10">
-      <h3 className="font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
+    <div className="flex flex-col items-center justify-center text-center pt-12 md:pt-16 pb-8">
+      <VeilDescentMark size={144} />
+      <div className="mt-10 font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
         <span className="tnum">{result.formattedAmount}</span>
-        <span className="text-muted"> requested from </span>
+        <span className="text-muted"> to </span>
         <span>{result.payerName}</span>
-      </h3>
-      <p className="mt-4 text-[14px] leading-[1.55] text-ink/70 max-w-[520px]">
-        Send the link below to your client. Only their wallet (or yours via
-        the dashboard) can open it — the chain only sees an anchor hash.
+      </div>
+      <p className="mt-4 text-[14px] leading-[1.55] text-muted max-w-[440px]">
+        Send the link below to your client. Only their wallet (or yours
+        via the dashboard) can open it — the chain only sees an anchor
+        hash.
       </p>
     </div>
   );
