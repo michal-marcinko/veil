@@ -3,198 +3,352 @@
 // ---------------------------------------------------------------------------
 // /dashboard/compliance — generate a scoped auditor link.
 //
-// FLOW (replaces the prior X25519-pubkey + master-sig-in-URL form):
-//   1. Alice picks mint (defaults to PAYMENT_MINT) + a date range.
-//   2. Click "Generate auditor link":
-//      a. Fetch all of Alice's invoices on-chain.
-//      b. Filter to (mint, createdAt within range).
-//      c. Pop one wallet sign (cached) to load the metadata master sig.
-//      d. Re-encrypt those invoices' metadata under a fresh ephemeral key K
-//         and upload to Arweave (auditor-links.generateScopedGrant).
-//      e. Render the URL: /audit/grant/<grantId>#k=<base58 K>&inv=<csv>
-//   3. Alice clicks "Copy" and sends the URL to her auditor over Signal /
-//      encrypted email. The on-chain Umbra grant from the prior flow is
-//      no longer required for access — the URL stands on its own.
+// EDITORIAL-LEDGER REDESIGN (2026-05-04 v2).
 //
-// The legacy on-chain grant list (`GrantList` + `revokeComplianceGrant`)
-// is preserved below as a historical record of grants issued through
-// the prior flow. New grants no longer mint an on-chain Umbra grant by
-// default; the URL is the access mechanism.
+// The prior page was a utility-form: bare date inputs, a giant mint
+// textbox, plus a confusing "legacy on-chain grants" section that read
+// as noise to non-technical operators. The redesign mirrors the rest of
+// the app's editorial-ledger language:
+//
+//   1. Preset pill row at the top — tax years, recent quarters, last 30
+//      / 90 days, all-time, custom — plus an inline mint pill.
+//   2. A live transaction picker below — the same row layout, sticky
+//      date headers, and "Earlier" collapse the activity page uses, but
+//      with checkboxes so the operator can include / exclude rows on
+//      top of the preset.
+//   3. A live "Generate auditor link → N invoices · X.XX SOL" CTA.
+//   4. Result state replaces the picker, with copy / mailto / QR.
+//   5. The "what scoped means" copy is preserved as a default-collapsed
+//      "How this works" expander below the action.
+//
+// FLOW (unchanged below the UI):
+//   - Fetch all of Alice's invoices on-chain.
+//   - Apply mint + (preset or custom) date scope client-side.
+//   - Operator can deselect specific rows in the picker.
+//   - One wallet sign popup (cached after first use) loads the metadata
+//     master sig — used in-process only, never embedded in the URL.
+//   - Re-encrypt selected invoices under a fresh ephemeral key K and
+//     upload to Arweave (`generateScopedGrant` in auditor-links.ts).
+//   - Build the URL: /audit/grant/<grantId>#k=<base58 K>&inv=<csv>.
+//   - The link is the only credential.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
-import { GrantList } from "@/components/GrantList";
+import { InvoiceRow } from "@/components/InvoiceRow";
 import {
-  getOrCreateClient,
-  listComplianceGrants,
-  revokeComplianceGrant,
-  type GrantWithStatus,
-} from "@/lib/umbra";
-import { getOrCreateMetadataMasterSig } from "@/lib/encryption";
+  DateGroupHeader,
+  bucketByCreatedAt,
+  DATE_BUCKET_ORDER,
+} from "@/components/DateGroupHeader";
 import { fetchInvoicesByCreator } from "@/lib/anchor";
+import {
+  decryptJson,
+  deriveKeyFromMasterSig,
+  getOrCreateMetadataMasterSig,
+} from "@/lib/encryption";
+import { fetchCiphertext } from "@/lib/arweave";
 import {
   buildScopedGrantUrl,
   generateScopedGrant,
   type InScopeInvoice,
 } from "@/lib/auditor-links";
-import { USDC_MINT, PAYMENT_SYMBOL } from "@/lib/constants";
+import type { InvoiceMetadata } from "@/lib/types";
+import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
+import {
+  PresetPills,
+  buildPresets,
+  type PresetId,
+  type MintOption,
+} from "./_components/PresetPills";
+import { GrantResultCard } from "./_components/GrantResultCard";
 
-interface GrantPreview {
-  /** Generated audit URL with ephemeral key in the fragment. */
-  url: string;
-  /** How many invoices are reachable from this URL. */
-  invoiceCount: number;
-  /** How many in-scope invoices were skipped (e.g. fetch failure). */
-  skippedCount: number;
-  /** What scope produced this grant (echoed in UI for clarity). */
-  scope: { mint: string; from: string; to: string };
+// ---------------------------------------------------------------------------
+// Types — internal helpers carried through render.
+// ---------------------------------------------------------------------------
+
+interface InvoiceLabel {
+  payer: string;
+  description: string;
+  amountStr: string;
+  amountUnits: bigint; // raw smallest-unit, used for picker totals
+  decimals: number;
+  symbol: string;
 }
+
+interface PickerRow {
+  pda: string;
+  status: string;
+  createdAt: number;
+  mint: string;
+  // Reference back to the on-chain account so we can pass it to
+  // `generateScopedGrant` without a second fetch.
+  raw: { metadataUri: string; metadataHash: Uint8Array };
+}
+
+interface GrantResult {
+  url: string;
+  invoiceCount: number;
+  skippedCount: number;
+  totalAmount: string;
+  symbol: string;
+  mintLabel: string;
+}
+
+// ---------------------------------------------------------------------------
+// Page.
+// ---------------------------------------------------------------------------
+
+const RECENT_BUCKETS: ReadonlyArray<string> = ["Today", "Yesterday"];
 
 export default function CompliancePage() {
   const wallet = useWallet();
+
+  // Scope inputs — preset pills + mint dropdown.
+  const [activePresetId, setActivePresetId] = useState<PresetId>("ytd");
+  const [customFromDate, setCustomFromDate] = useState<string>("");
+  const [customToDate, setCustomToDate] = useState<string>("");
+  const [activeMint, setActiveMint] = useState<string>(USDC_MINT.toBase58());
+
+  // Invoice fetch state.
+  const [invoices, setInvoices] = useState<PickerRow[]>([]);
+  const [labels, setLabels] = useState<Map<string, InvoiceLabel>>(new Map());
+  const [fetching, setFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Selection state. We default to "all currently in-scope" — flipping
+  // a preset pill resets selection to the new in-scope set so the
+  // operator's mental model is "preset = my starting set, uncheck to
+  // exclude".
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Generation state.
   const [submitting, setSubmitting] = useState(false);
   const [progressMsg, setProgressMsg] = useState<string | null>(null);
-  const [preview, setPreview] = useState<GrantPreview | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [grantResult, setGrantResult] = useState<GrantResult | null>(null);
 
-  // Scope inputs.
-  const [mint, setMint] = useState<string>(USDC_MINT.toBase58());
-  const [fromDate, setFromDate] = useState<string>("");
-  const [toDate, setToDate] = useState<string>("");
+  // ---------------- Fetch invoices on connect ----------------
 
-  // Legacy on-chain grant ledger.
-  const [grants, setGrants] = useState<GrantWithStatus[]>([]);
-  const [grantsLoading, setGrantsLoading] = useState(false);
-  const [revokingKey, setRevokingKey] = useState<string | null>(null);
-
-  const refreshGrants = useCallback(async () => {
-    if (!wallet.connected) {
-      setGrants([]);
-      return;
-    }
-    setGrantsLoading(true);
+  const refreshInvoices = useCallback(async () => {
+    if (!wallet.publicKey) return;
+    setFetching(true);
+    setFetchError(null);
     try {
-      const client = await getOrCreateClient(wallet as any);
-      const list = await listComplianceGrants({ client });
-      setGrants(list);
+      const all = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
+      const mapped: PickerRow[] = all
+        .map((inv) => ({
+          pda: inv.publicKey.toBase58(),
+          status: Object.keys(inv.account.status)[0] ?? "pending",
+          createdAt: Number(inv.account.createdAt),
+          mint: inv.account.mint.toBase58(),
+          raw: {
+            metadataUri: inv.account.metadataUri,
+            metadataHash: inv.account.metadataHash,
+          },
+        }))
+        .sort((a, b) => {
+          if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+          return a.pda < b.pda ? -1 : a.pda > b.pda ? 1 : 0;
+        });
+      setInvoices(mapped);
+
+      // Best-effort metadata decrypt — same one-popup pattern as the
+      // dashboard. Failures are silent; the row falls back to the
+      // truncated PDA.
+      void loadLabels(wallet, all).then((nextLabels) => setLabels(nextLabels));
     } catch (err: any) {
-      setError(`Failed to load on-chain grants: ${err.message ?? String(err)}`);
+      setFetchError(`Couldn't load invoices: ${err.message ?? String(err)}`);
     } finally {
-      setGrantsLoading(false);
+      setFetching(false);
     }
   }, [wallet]);
 
   useEffect(() => {
-    void refreshGrants();
-  }, [refreshGrants]);
+    if (wallet.connected) void refreshInvoices();
+  }, [wallet.connected, refreshInvoices]);
 
-  async function handleGenerate(e: React.FormEvent) {
-    e.preventDefault();
+  // ---------------- Compute current scope window ----------------
+
+  const scopeWindow = useMemo(() => {
+    if (activePresetId === "custom") {
+      const fromTs = customFromDate
+        ? Math.floor(Date.parse(`${customFromDate}T00:00:00Z`) / 1000)
+        : null;
+      const toTs = customToDate
+        ? Math.floor(Date.parse(`${customToDate}T23:59:59Z`) / 1000)
+        : null;
+      return { fromTs, toTs };
+    }
+    const now = new Date();
+    const presets = buildPresets(now);
+    const found = presets.find((p) => p.id === activePresetId);
+    if (!found) return { fromTs: null, toTs: null };
+    return found.scope;
+  }, [activePresetId, customFromDate, customToDate]);
+
+  const inScopeRows = useMemo(() => {
+    return invoices.filter((inv) => {
+      if (activeMint && inv.mint !== activeMint) return false;
+      if (scopeWindow.fromTs != null && inv.createdAt < scopeWindow.fromTs)
+        return false;
+      if (scopeWindow.toTs != null && inv.createdAt > scopeWindow.toTs)
+        return false;
+      return true;
+    });
+  }, [invoices, activeMint, scopeWindow]);
+
+  // ---------------- Selection effect ----------------
+  //
+  // When the in-scope set changes (preset / mint / fetched data),
+  // reset selection to "all in-scope". The user then unchecks rows to
+  // exclude. This matches the natural mental model of "preset = my
+  // starting set" and avoids a stale selection that no longer
+  // intersects the visible rows.
+  const inScopeKey = useMemo(
+    () => inScopeRows.map((r) => r.pda).join(","),
+    [inScopeRows],
+  );
+  useEffect(() => {
+    setSelected(new Set(inScopeRows.map((r) => r.pda)));
+  }, [inScopeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------- Selection helpers ----------------
+
+  function toggleSelect(pda: string, next: boolean) {
+    setSelected((prev) => {
+      const copy = new Set(prev);
+      if (next) copy.add(pda);
+      else copy.delete(pda);
+      return copy;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      // If everything in scope is currently selected, clear; otherwise
+      // select all in scope. The button label below switches based on
+      // this same state.
+      const allSelected = inScopeRows.every((r) => prev.has(r.pda));
+      if (allSelected) return new Set();
+      return new Set(inScopeRows.map((r) => r.pda));
+    });
+  }
+
+  // ---------------- Live picker totals ----------------
+
+  const selectedCount = useMemo(
+    () => inScopeRows.filter((r) => selected.has(r.pda)).length,
+    [inScopeRows, selected],
+  );
+
+  const selectedTotal = useMemo(() => {
+    let sumUnits = 0n;
+    let decimals = PAYMENT_DECIMALS;
+    let symbol = PAYMENT_SYMBOL;
+    for (const r of inScopeRows) {
+      if (!selected.has(r.pda)) continue;
+      const lbl = labels.get(r.pda);
+      if (!lbl) continue;
+      sumUnits += lbl.amountUnits;
+      decimals = lbl.decimals;
+      symbol = lbl.symbol;
+    }
+    return {
+      formatted: formatBigintAmount(sumUnits, decimals),
+      symbol,
+    };
+  }, [inScopeRows, selected, labels]);
+
+  const allInScopeSelected =
+    inScopeRows.length > 0 && inScopeRows.every((r) => selected.has(r.pda));
+
+  // ---------------- Generate ----------------
+
+  async function handleGenerate() {
     if (!wallet.publicKey) return;
+    if (selectedCount === 0) return;
     setSubmitting(true);
-    setError(null);
-    setPreview(null);
-    setProgressMsg("Loading your invoices…");
+    setGenerateError(null);
+    setProgressMsg(`Re-encrypting ${selectedCount} invoice${selectedCount === 1 ? "" : "s"}…`);
     try {
-      // 1. Read all of the granter's invoices from chain.
-      const allInvoices = await fetchInvoicesByCreator(
-        wallet as any,
-        wallet.publicKey,
-      );
-
-      // 2. Apply the chosen scope (mint + createdAt range). Date inputs
-      //    are local-zone strings (YYYY-MM-DD); we convert to UTC unix
-      //    seconds and treat both bounds inclusively when present.
-      const fromTs = fromDate ? Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000) : null;
-      const toTs = toDate ? Math.floor(Date.parse(`${toDate}T23:59:59Z`) / 1000) : null;
-      const inScope = allInvoices.filter((inv) => {
-        if (mint && inv.account.mint.toBase58() !== mint) return false;
-        const ts = inv.account.createdAt;
-        if (fromTs != null && ts < fromTs) return false;
-        if (toTs != null && ts > toTs) return false;
-        return true;
-      });
-
-      if (inScope.length === 0) {
-        setError(
-          "No invoices match the selected scope. Adjust the mint or date range and try again.",
-        );
-        setProgressMsg(null);
-        return;
-      }
-
-      setProgressMsg(
-        `Re-encrypting ${inScope.length} invoice${inScope.length === 1 ? "" : "s"}…`,
-      );
-
-      // 3. Master sig (1 popup, cached after first use). Used in-process
-      //    only — never embedded in the URL.
       const masterSig = await getOrCreateMetadataMasterSig(
         wallet as any,
         wallet.publicKey.toBase58(),
       );
 
-      // 4. Re-encrypt + upload to Arweave under a fresh ephemeral key.
-      const inScopeArg: InScopeInvoice[] = inScope.map((inv) => ({
-        invoicePda: inv.publicKey.toBase58(),
-        metadataUri: inv.account.metadataUri,
-        metadataHash: inv.account.metadataHash,
-      }));
+      const inScopeArg: InScopeInvoice[] = inScopeRows
+        .filter((r) => selected.has(r.pda))
+        .map((r) => ({
+          invoicePda: r.pda,
+          metadataUri: r.raw.metadataUri,
+          metadataHash: r.raw.metadataHash,
+        }));
+
       const payload = await generateScopedGrant({
         masterSig,
         invoices: inScopeArg,
       });
 
-      // 5. Build a URL that carries the ephemeral key in the fragment.
       const grantId = `grant_${Date.now().toString(36)}`;
-      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      const origin =
+        typeof window !== "undefined" ? window.location.origin : "";
       const url = buildScopedGrantUrl({ origin, grantId, payload });
 
-      setPreview({
+      // Same totals as the live counter — we already know what the
+      // operator confirmed, so re-render the result card with the
+      // values they saw on the CTA.
+      setGrantResult({
         url,
         invoiceCount: payload.invoiceUris.length,
-        skippedCount: inScope.length - payload.invoiceUris.length,
-        scope: {
-          mint,
-          from: fromDate || "(any)",
-          to: toDate || "(any)",
-        },
+        skippedCount: inScopeArg.length - payload.invoiceUris.length,
+        totalAmount: selectedTotal.formatted,
+        symbol: selectedTotal.symbol,
+        mintLabel: mintLabel(activeMint),
       });
       setProgressMsg(null);
     } catch (err: any) {
-      setError(err.message ?? String(err));
+      setGenerateError(err.message ?? String(err));
       setProgressMsg(null);
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function handleRevoke(grant: GrantWithStatus) {
-    const key = `${grant.receiverX25519Base58}:${grant.nonce}`;
-    setRevokingKey(key);
-    setError(null);
-    try {
-      const client = await getOrCreateClient(wallet as any);
-      await revokeComplianceGrant({ client, grant });
-      await refreshGrants();
-    } catch (err: any) {
-      setError(`Revoke failed: ${err.message ?? String(err)}`);
-    } finally {
-      setRevokingKey(null);
-    }
+  function resetGrant() {
+    setGrantResult(null);
+    setGenerateError(null);
   }
+
+  // ---------------- Mint options ----------------
+  //
+  // Today the app is configured for one payment mint per environment
+  // (PAYMENT_MINT). Surface that as a single-option pill so the picker
+  // reads as scope-aware without forcing a multi-token UI we don't
+  // actually need yet. Future: add additional mints here as we add
+  // multi-mint support.
+  const mintOptions: MintOption[] = useMemo(
+    () => [{ base58: USDC_MINT.toBase58(), symbol: PAYMENT_SYMBOL }],
+    [],
+  );
+
+  // ---------------- Render ----------------
 
   if (!wallet.connected) {
     return (
       <Shell>
         <div className="max-w-lg reveal">
           <span className="eyebrow">Auditor links</span>
-          <h1 className="mt-4 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
-            Connect to generate auditor links.
+          <h1 className="mt-4 font-display text-ink text-[44px] md:text-[56px] leading-[1.02] tracking-[-0.02em]">
+            Connect to grant scoped read access.
           </h1>
+          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
+            Pick the invoices an auditor needs to see. We re-encrypt only
+            those under a fresh per-grant key — your wallet&apos;s master
+            key never leaves the browser.
+          </p>
           <div className="mt-8">
             <ClientWalletMultiButton />
           </div>
@@ -205,261 +359,436 @@ export default function CompliancePage() {
 
   return (
     <Shell>
-      <div className="max-w-2xl reveal">
+      <div className="max-w-3xl reveal">
         <span className="eyebrow">Auditor links</span>
-        <h1 className="mt-3 font-sans font-medium text-ink text-[36px] md:text-[44px] leading-[1.05] tracking-[-0.025em]">
+        <h1 className="mt-3 font-display text-ink text-[40px] md:text-[52px] leading-[1.04] tracking-[-0.02em]">
           Grant scoped read access.
         </h1>
         <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-xl">
-          Pick a mint and a date range. We re-encrypt only the matching invoices
-          under a fresh per-grant key and give you a link to share with your
-          auditor. The link is the only way to read this scope; your wallet&apos;s
-          master key never leaves the browser.
+          Pick a date range and the rows your auditor needs to see. We
+          re-encrypt only those invoices under a fresh per-grant key and
+          give you a link to share. The link is the only way to read
+          this scope.
         </p>
 
-        {error && (
-          <div className="mt-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-xl">
-            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
-            <span className="text-[13.5px] text-ink leading-relaxed flex-1">{error}</span>
-          </div>
+        {fetchError && (
+          <ErrorBanner message={fetchError} />
         )}
 
-        <form onSubmit={handleGenerate} className="mt-10 space-y-8">
-          <Field label="Mint">
-            <input
-              value={mint}
-              onChange={(e) => setMint(e.target.value)}
-              placeholder="base58 SPL mint"
-              className="input-editorial font-mono text-sm"
-              required
+        {grantResult ? (
+          <GrantResultCard
+            url={grantResult.url}
+            invoiceCount={grantResult.invoiceCount}
+            totalAmount={grantResult.totalAmount}
+            symbol={grantResult.symbol}
+            mintLabel={grantResult.mintLabel}
+            skippedCount={grantResult.skippedCount}
+            onReset={resetGrant}
+          />
+        ) : (
+          <>
+            <div className="mt-9">
+              <PresetPills
+                activePresetId={activePresetId}
+                onSelectPreset={setActivePresetId}
+                customFromDate={customFromDate}
+                customToDate={customToDate}
+                onChangeCustomFromDate={setCustomFromDate}
+                onChangeCustomToDate={setCustomToDate}
+                mintOptions={mintOptions}
+                activeMint={activeMint}
+                onSelectMint={setActiveMint}
+              />
+            </div>
+
+            <PickerHeader
+              selectedCount={selectedCount}
+              totalSelected={selectedTotal.formatted}
+              symbol={selectedTotal.symbol}
+              allInScopeSelected={allInScopeSelected}
+              onToggleAll={toggleSelectAll}
+              inScopeCount={inScopeRows.length}
             />
-            <FieldHint>
-              Defaults to your configured payment mint ({PAYMENT_SYMBOL}). Change
-              to scope the grant to invoices in a different token.
-            </FieldHint>
-          </Field>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Field label="From (UTC)" optional>
-              <input
-                type="date"
-                value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
-                className="input-editorial font-mono text-sm"
-              />
-            </Field>
-            <Field label="To (UTC)" optional>
-              <input
-                type="date"
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className="input-editorial font-mono text-sm"
-              />
-            </Field>
-          </div>
+            <PickerList
+              fetching={fetching}
+              rows={inScopeRows}
+              labels={labels}
+              selected={selected}
+              onToggle={toggleSelect}
+            />
 
-          <div className="flex items-center gap-4">
-            <button
-              type="submit"
-              disabled={submitting}
-              className="btn-primary md:min-w-[280px]"
-            >
-              {submitting ? (
-                <span className="inline-flex items-center gap-3">
-                  <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
-                  {progressMsg ?? "Generating link…"}
-                </span>
-              ) : (
-                <span>
-                  Generate auditor link <span aria-hidden>→</span>
-                </span>
-              )}
-            </button>
-            {progressMsg && !submitting && (
-              <span className="font-mono text-[12px] text-muted">{progressMsg}</span>
+            {generateError && (
+              <ErrorBanner message={generateError} />
             )}
-          </div>
-        </form>
 
-        {preview && <PreviewCard preview={preview} />}
+            <div className="mt-8 flex flex-col sm:flex-row sm:items-center gap-4">
+              <button
+                type="button"
+                disabled={submitting || selectedCount === 0}
+                onClick={handleGenerate}
+                className="btn-primary md:min-w-[340px] justify-center"
+              >
+                {submitting ? (
+                  <span className="inline-flex items-center gap-3">
+                    <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
+                    {progressMsg ?? "Generating link…"}
+                  </span>
+                ) : selectedCount === 0 ? (
+                  <span>Select invoices to grant access</span>
+                ) : (
+                  <span>
+                    Generate auditor link <span aria-hidden>→</span>
+                    <span className="ml-2 opacity-80 tabular-nums">
+                      {selectedCount} invoice{selectedCount === 1 ? "" : "s"}
+                      {" · "}
+                      {selectedTotal.formatted} {selectedTotal.symbol}
+                    </span>
+                  </span>
+                )}
+              </button>
+            </div>
 
-        <ScopeNote />
-
-        <div className="mt-12 pt-8 border-t border-line">
-          <span className="eyebrow">Legacy on-chain grants</span>
-          <p className="mt-3 text-[13px] text-ink/70 max-w-xl">
-            On-chain Umbra compliance grants issued through the prior flow.
-            Revoking these prevents future on-chain shielded-pool disclosures
-            but does not affect any auditor URLs you have already generated.
-          </p>
-          <div className="mt-6">
-            {grantsLoading ? (
-              <div className="text-[13px] text-dim">Loading grants…</div>
-            ) : (
-              <GrantList
-                grants={grants}
-                onRevoke={handleRevoke}
-                revokingKey={revokingKey}
-              />
-            )}
-          </div>
-        </div>
+            <HowThisWorksNote />
+          </>
+        )}
       </div>
     </Shell>
   );
 }
 
 // ---------------------------------------------------------------------------
-// UI bits
+// Picker header — "Select all" + live counter.
 // ---------------------------------------------------------------------------
 
-function PreviewCard({ preview }: { preview: GrantPreview }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(preview.url);
-      } else if (typeof document !== "undefined") {
-        const ta = document.createElement("textarea");
-        ta.value = preview.url;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "absolute";
-        ta.style.left = "-9999px";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-      }
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* ignore */
-    }
-  }
-
+function PickerHeader({
+  selectedCount,
+  totalSelected,
+  symbol,
+  allInScopeSelected,
+  onToggleAll,
+  inScopeCount,
+}: {
+  selectedCount: number;
+  totalSelected: string;
+  symbol: string;
+  allInScopeSelected: boolean;
+  onToggleAll: () => void;
+  inScopeCount: number;
+}) {
   return (
-    <div className="mt-10 border border-sage/40 bg-sage/5 rounded-[3px] p-5 md:p-6 max-w-xl">
-      <div className="flex items-baseline justify-between mb-4">
-        <span className="eyebrow text-sage">Auditor link ready</span>
-        <span className="font-mono text-[11px] text-dim tnum">
-          {String(preview.invoiceCount).padStart(2, "0")} invoice
-          {preview.invoiceCount === 1 ? "" : "s"}
-        </span>
-      </div>
-      <div className="flex items-center gap-2">
-        <input
-          readOnly
-          value={preview.url}
-          onFocus={(e) => e.currentTarget.select()}
-          onClick={(e) => e.currentTarget.select()}
-          className="flex-1 input-editorial font-mono text-[12px] select-all"
-          aria-label="Auditor URL"
-        />
-        <button
-          type="button"
-          onClick={copy}
-          className="shrink-0 px-4 py-2 border border-line rounded-[3px] font-mono text-[11px] tracking-[0.12em] uppercase text-ink hover:bg-ink hover:text-paper transition-colors"
+    <div className="mt-8 mb-2 flex items-center justify-between gap-4 px-4 py-3 border-b border-line/60">
+      <button
+        type="button"
+        onClick={onToggleAll}
+        disabled={inScopeCount === 0}
+        aria-pressed={allInScopeSelected}
+        className="inline-flex items-center gap-2.5 font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/55 hover:text-ink transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        <span
+          aria-hidden
+          className={[
+            "inline-flex h-[16px] w-[16px] items-center justify-center rounded-[3px] border transition-colors",
+            allInScopeSelected
+              ? "bg-ink border-ink text-paper"
+              : selectedCount > 0
+                ? "bg-paper-3 border-ink/50"
+                : "bg-paper-3 border-line",
+          ].join(" ")}
         >
-          {copied ? "Copied" : "Copy"}
-        </button>
+          {allInScopeSelected ? (
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path
+                d="M2 5l2 2 4-4"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          ) : selectedCount > 0 ? (
+            <span className="block h-[2px] w-[8px] bg-ink/70" />
+          ) : null}
+        </span>
+        <span>
+          {allInScopeSelected ? "Deselect all" : "Select all"}
+        </span>
+      </button>
+
+      <div className="font-mono text-[11px] tracking-[0.14em] uppercase text-ink/55 tabular-nums">
+        <span className="text-ink">{selectedCount}</span>
+        <span className="text-ink/40"> · </span>
+        <span className="tabular-nums">{totalSelected} {symbol}</span>
       </div>
-      <dl className="mt-5 space-y-2 text-[12.5px] font-mono border-t border-line pt-4">
-        <ResultRow
-          label="Scope"
-          value={`mint ${truncateMid(preview.scope.mint)} · ${preview.scope.from} → ${preview.scope.to}`}
-        />
-        {preview.skippedCount > 0 && (
-          <ResultRow
-            label="Skipped"
-            value={`${preview.skippedCount} invoice${preview.skippedCount === 1 ? "" : "s"} (fetch or hash mismatch)`}
-          />
-        )}
-      </dl>
-      <p className="mt-4 font-mono text-[11px] leading-relaxed text-muted">
-        Send this link to your auditor over a trusted channel (Signal, encrypted
-        email). The fragment after <span className="text-ink">#</span> carries
-        the decryption key and never reaches our servers.
-      </p>
     </div>
   );
 }
 
-function ScopeNote() {
+// ---------------------------------------------------------------------------
+// Picker list — bucketed rows + "Earlier" collapse.
+// ---------------------------------------------------------------------------
+
+function PickerList({
+  fetching,
+  rows,
+  labels,
+  selected,
+  onToggle,
+}: {
+  fetching: boolean;
+  rows: PickerRow[];
+  labels: Map<string, InvoiceLabel>;
+  selected: Set<string>;
+  onToggle: (pda: string, next: boolean) => void;
+}) {
+  if (fetching && rows.length === 0) {
+    return (
+      <ul className="divide-y divide-ink/5">
+        {[0, 1, 2].map((i) => (
+          <li key={i} className="px-4 py-4">
+            <div className="skeleton-bar h-3 w-3/4" />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <div className="border border-dashed border-line rounded-[4px] py-12 px-6 text-center mt-2">
+        <p className="font-display italic text-ink/80 text-[20px] leading-[1.3]">
+          Nothing in this scope.
+        </p>
+        <p className="mt-2 text-[13px] text-ink/55 max-w-md mx-auto">
+          Adjust the preset above (or pick a different mint) to widen
+          what you&apos;re sharing with your auditor.
+        </p>
+      </div>
+    );
+  }
+
+  // Bucket by createdAt — same logic as the dashboard ledger.
+  const buckets = new Map<string, PickerRow[]>();
+  for (const inv of rows) {
+    const key = bucketByCreatedAt(inv.createdAt);
+    const arr = buckets.get(key) ?? [];
+    arr.push(inv);
+    buckets.set(key, arr);
+  }
+  const recentBuckets = DATE_BUCKET_ORDER.filter(
+    (label) =>
+      RECENT_BUCKETS.includes(label) && (buckets.get(label)?.length ?? 0) > 0,
+  );
+  const olderBuckets = DATE_BUCKET_ORDER.filter(
+    (label) =>
+      !RECENT_BUCKETS.includes(label) && (buckets.get(label)?.length ?? 0) > 0,
+  );
+  const olderCount = olderBuckets.reduce(
+    (sum, label) => sum + (buckets.get(label)?.length ?? 0),
+    0,
+  );
+
   return (
-    <details className="mt-8 max-w-xl border-l-2 border-line/60 pl-4">
-      <summary className="cursor-pointer font-mono text-[11.5px] tracking-[0.12em] uppercase text-muted hover:text-ink transition-colors">
-        What &ldquo;scoped&rdquo; means here
+    <PickerBucketedList
+      buckets={buckets}
+      recentBuckets={recentBuckets}
+      olderBuckets={olderBuckets}
+      olderCount={olderCount}
+      labels={labels}
+      selected={selected}
+      onToggle={onToggle}
+    />
+  );
+}
+
+function PickerBucketedList({
+  buckets,
+  recentBuckets,
+  olderBuckets,
+  olderCount,
+  labels,
+  selected,
+  onToggle,
+}: {
+  buckets: Map<string, PickerRow[]>;
+  recentBuckets: string[];
+  olderBuckets: string[];
+  olderCount: number;
+  labels: Map<string, InvoiceLabel>;
+  selected: Set<string>;
+  onToggle: (pda: string, next: boolean) => void;
+}) {
+  // Default open when there are NO recent buckets — same logic as the
+  // dashboard ledger, mirroring the PayPal-style accordion.
+  const [olderOpen, setOlderOpen] = useState(recentBuckets.length === 0);
+
+  // Re-evaluate the default-open intent when the bucket shape shifts
+  // (e.g. user widens scope from "today" to "last 90 days"). We only
+  // honour this for transitions that flip the recent-empty bit; once
+  // the user manually toggles, their click wins.
+  const lastRecentEmpty = useRef<boolean>(recentBuckets.length === 0);
+  useEffect(() => {
+    const nowEmpty = recentBuckets.length === 0;
+    if (lastRecentEmpty.current !== nowEmpty) {
+      setOlderOpen(nowEmpty);
+      lastRecentEmpty.current = nowEmpty;
+    }
+  }, [recentBuckets.length]);
+
+  let runningIndex = 0;
+  function renderBucket(bucketLabel: string): JSX.Element[] {
+    const list = buckets.get(bucketLabel);
+    if (!list || list.length === 0) return [];
+    const out: JSX.Element[] = [
+      <DateGroupHeader key={`hdr-${bucketLabel}`} label={bucketLabel} />,
+    ];
+    for (const inv of list) {
+      const lbl = labels.get(inv.pda);
+      const idx = runningIndex++;
+      const delay = Math.min(idx * 40, 480);
+      out.push(
+        <InvoiceRow
+          key={inv.pda}
+          pda={inv.pda}
+          status={inv.status}
+          createdAt={inv.createdAt}
+          label={
+            lbl
+              ? {
+                  payer: lbl.payer,
+                  amount: `${lbl.amountStr} ${lbl.symbol}`,
+                  description: lbl.description,
+                }
+              : undefined
+          }
+          animationDelayMs={delay}
+          selectable
+          selected={selected.has(inv.pda)}
+          onSelectChange={onToggle}
+        />,
+      );
+    }
+    return out;
+  }
+
+  return (
+    <div>
+      {recentBuckets.length > 0 && (
+        <ul className="divide-y divide-ink/5">
+          {recentBuckets.flatMap(renderBucket)}
+        </ul>
+      )}
+
+      {recentBuckets.length === 0 && olderBuckets.length > 0 && (
+        <p className="font-display italic text-ink/50 text-[15px] py-6 px-4">
+          Nothing today or yesterday.
+        </p>
+      )}
+
+      {olderBuckets.length > 0 && (
+        <div className="mt-2 border-t border-line/60">
+          <button
+            type="button"
+            onClick={() => setOlderOpen((v) => !v)}
+            aria-expanded={olderOpen}
+            aria-controls="picker-older-section"
+            className={[
+              "group w-full flex items-center justify-between",
+              "px-2 py-4 rounded-[3px]",
+              "font-mono text-[12.5px] tracking-[0.16em] uppercase",
+              "text-ink/70 hover:text-ink hover:bg-paper-2/60",
+              "transition-colors duration-150",
+              "focus:outline-none focus-visible:ring-2 focus-visible:ring-gold/30",
+            ].join(" ")}
+          >
+            <span className="inline-flex items-center gap-3">
+              <span>{olderOpen ? "Hide earlier" : "Earlier"}</span>
+              <span className="text-ink/30">·</span>
+              <span className="tabular-nums text-ink/55">
+                {String(olderCount).padStart(2, "0")} invoice
+                {olderCount === 1 ? "" : "s"}
+              </span>
+            </span>
+            <ChevronIcon open={olderOpen} />
+          </button>
+          {olderOpen && (
+            <ul
+              id="picker-older-section"
+              className="divide-y divide-ink/5 mt-1 animate-fade-up"
+            >
+              {olderBuckets.flatMap(renderBucket)}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Misc UI bits.
+// ---------------------------------------------------------------------------
+
+function ErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="mt-6 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-xl">
+      <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+      <span className="text-[13.5px] text-ink leading-relaxed flex-1">
+        {message}
+      </span>
+    </div>
+  );
+}
+
+function HowThisWorksNote() {
+  return (
+    <details className="mt-12 max-w-xl border-t border-line/60 pt-6">
+      <summary className="cursor-pointer list-none font-mono text-[10.5px] tracking-[0.16em] uppercase text-muted hover:text-ink transition-colors inline-flex items-center gap-2">
+        <span>How this works</span>
+        <span aria-hidden>↓</span>
       </summary>
-      <div className="mt-3 space-y-2 text-[12.5px] text-ink/75 leading-relaxed">
+      <div className="mt-3 space-y-3 text-[13px] text-ink/75 leading-relaxed">
         <p>
-          The link only references the invoices you selected — we re-encrypt
-          them under a one-off key and upload those re-encrypted blobs. The
-          auditor cannot reach invoices outside the scope from this link.
+          The link only references the invoices you selected — we
+          re-encrypt them under a one-off key and upload those
+          re-encrypted blobs. The auditor cannot reach invoices outside
+          the scope from this link.
         </p>
         <p>
-          What we don&apos;t implement: zero-knowledge selective disclosure or
-          cryptographic time-bounding. Arweave is permanent, so anyone who
-          retains the URL retains read access. To &ldquo;revoke&rdquo; a grant,
-          stop sharing the link; the per-grant key has no other purpose.
+          What we don&apos;t implement: zero-knowledge selective
+          disclosure or cryptographic time-bounding. Arweave is
+          permanent, so anyone who retains the URL retains read access.
+          To &ldquo;revoke&rdquo; a grant, stop sharing the link; the
+          per-grant key has no other purpose.
         </p>
       </div>
     </details>
   );
 }
 
-function ResultRow({ label, value }: { label: string; value: string }) {
+function ChevronIcon({ open }: { open: boolean }) {
   return (
-    <div className="flex items-baseline gap-4">
-      <dt className="text-dim uppercase tracking-[0.12em] text-[10.5px] w-20 shrink-0">
-        {label}
-      </dt>
-      <dd className="text-ink break-all flex-1">{value}</dd>
-    </div>
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 10 10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+      aria-hidden
+    >
+      <path d="M2 3.5l3 3 3-3" />
+    </svg>
   );
-}
-
-function Field({
-  label,
-  optional,
-  children,
-}: {
-  label: string;
-  optional?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-baseline gap-3">
-        <label className="mono-chip">{label}</label>
-        {optional && (
-          <span className="font-mono text-[10px] tracking-[0.16em] uppercase text-dim">
-            Optional
-          </span>
-        )}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function FieldHint({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="text-[12px] text-dim font-sans leading-relaxed mt-1.5">
-      {children}
-    </div>
-  );
-}
-
-function truncateMid(s: string, keep = 6): string {
-  if (s.length <= keep * 2 + 1) return s;
-  return `${s.slice(0, keep)}…${s.slice(-keep)}`;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="min-h-screen relative pb-32">
-      <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
+      <nav className="sticky top-0 z-20 backdrop-blur-sm bg-paper/80 border-b border-line">
         <div className="max-w-[1400px] mx-auto flex items-center justify-between px-6 md:px-8 py-4">
           <VeilLogo />
           <div className="flex items-center gap-1 md:gap-2">
@@ -473,7 +802,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               href="/dashboard"
               className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
             >
-              Dashboard
+              Activity
             </a>
             <div className="ml-2">
               <ClientWalletMultiButton />
@@ -482,7 +811,82 @@ function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </nav>
 
-      <section className="max-w-[1400px] mx-auto px-6 md:px-8 pt-16 md:pt-20">{children}</section>
+      <section className="max-w-[1400px] mx-auto px-6 md:px-8 pt-16 md:pt-20">
+        {children}
+      </section>
     </main>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — labels + formatting.
+// ---------------------------------------------------------------------------
+
+async function loadLabels(
+  wallet: { publicKey: { toBase58: () => string } | null } & Record<string, any>,
+  invoices: Awaited<ReturnType<typeof fetchInvoicesByCreator>>,
+): Promise<Map<string, InvoiceLabel>> {
+  // Decrypt as many invoices' metadata as possible without triggering
+  // popups beyond the one-time master-sig sign. Failures are silent;
+  // those rows render with the truncated PDA.
+  const next = new Map<string, InvoiceLabel>();
+  if (invoices.length === 0) return next;
+  if (!wallet.publicKey) return next;
+  let masterSig: Uint8Array;
+  try {
+    masterSig = await getOrCreateMetadataMasterSig(
+      // useWallet() shape — the encryption helper reads .signMessage.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wallet as any,
+      wallet.publicKey.toBase58(),
+    );
+  } catch {
+    // User declined the popup — skip labels entirely.
+    return next;
+  }
+  await Promise.all(
+    invoices.map(async (inv: any) => {
+      try {
+        const pda = inv.publicKey.toBase58();
+        const uri: string = inv.account.metadataUri;
+        if (!uri) return;
+        const ciphertext = await fetchCiphertext(uri);
+        const key = await deriveKeyFromMasterSig(masterSig, pda);
+        const md = (await decryptJson(ciphertext, key)) as InvoiceMetadata;
+        const total = BigInt(md.total);
+        const decimals = md.currency?.decimals ?? PAYMENT_DECIMALS;
+        const symbol = md.currency?.symbol ?? PAYMENT_SYMBOL;
+        const description = (md.line_items ?? [])
+          .map((li) => li.description)
+          .filter(Boolean)
+          .join(" · ");
+        next.set(pda, {
+          payer: md.payer?.display_name || "Unknown payer",
+          description,
+          amountStr: formatBigintAmount(total, decimals),
+          amountUnits: total,
+          decimals,
+          symbol,
+        });
+      } catch {
+        // Silent — falls back to truncated PDA in the row.
+      }
+    }),
+  );
+  return next;
+}
+
+function mintLabel(base58: string): string {
+  if (base58 === USDC_MINT.toBase58()) return PAYMENT_SYMBOL;
+  return `${base58.slice(0, 6)}…${base58.slice(-6)}`;
+}
+
+function formatBigintAmount(amount: bigint, decimals: number): string {
+  if (amount === 0n) return "0";
+  const divisor = 10n ** BigInt(decimals);
+  const whole = amount / divisor;
+  const frac = amount % divisor;
+  const display = Math.min(4, decimals);
+  const padded = frac.toString().padStart(decimals, "0").slice(0, display);
+  return `${whole.toString()}.${padded}`;
 }
