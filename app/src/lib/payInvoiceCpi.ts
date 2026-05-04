@@ -922,29 +922,35 @@ export async function payInvoiceCpi(
   // substitution landed us under the 1232-byte cap. messageBytes.length is
   // the post-ALT serialized message; signed tx adds 1 byte (sig count) +
   // 64 bytes (one signature) = 65 bytes overhead.
-  // eslint-disable-next-line no-console
-  console.log("[VeilPay tx-size]", {
-    serializedMessageBytes: messageBytes.length,
-    estSignedTxBytes: messageBytes.length + 65,
-    underCap1232: messageBytes.length + 65 <= 1232,
-    accountKeys: messageV0.staticAccountKeys.length,
-    altCount: altAccounts.length,
-    altWritable: messageV0.addressTableLookups.reduce(
-      (n, l) => n + l.writableIndexes.length,
-      0,
-    ),
-    altReadonly: messageV0.addressTableLookups.reduce(
-      (n, l) => n + l.readonlyIndexes.length,
-      0,
-    ),
-    instructions: messageV0.compiledInstructions.length,
-    veilPayIxDataBytes: veilPayIx.data.length,
-    veilPayIxAccountCount: veilPayIx.keys.length,
-    createBufferDataBytes: createBufferIx.data.length,
-    depositDataBytes: depositIx.data.length,
-    createBufferAccountCount: createBufferIx.accounts.length,
-    depositAccountCount: depositIx.accounts.length,
-  });
+  //
+  // Gated behind NEXT_PUBLIC_VEIL_DEBUG=1 so the production console isn't
+  // spammed on every payment. Inline check (no umbra.ts import) to keep
+  // this module's dep surface minimal.
+  if (process.env.NEXT_PUBLIC_VEIL_DEBUG === "1") {
+    // eslint-disable-next-line no-console
+    console.log("[VeilPay tx-size]", {
+      serializedMessageBytes: messageBytes.length,
+      estSignedTxBytes: messageBytes.length + 65,
+      underCap1232: messageBytes.length + 65 <= 1232,
+      accountKeys: messageV0.staticAccountKeys.length,
+      altCount: altAccounts.length,
+      altWritable: messageV0.addressTableLookups.reduce(
+        (n, l) => n + l.writableIndexes.length,
+        0,
+      ),
+      altReadonly: messageV0.addressTableLookups.reduce(
+        (n, l) => n + l.readonlyIndexes.length,
+        0,
+      ),
+      instructions: messageV0.compiledInstructions.length,
+      veilPayIxDataBytes: veilPayIx.data.length,
+      veilPayIxAccountCount: veilPayIx.keys.length,
+      createBufferDataBytes: createBufferIx.data.length,
+      depositDataBytes: depositIx.data.length,
+      createBufferAccountCount: createBufferIx.accounts.length,
+      depositAccountCount: depositIx.accounts.length,
+    });
+  }
   const kitTx: any = {
     messageBytes,
     signatures: { [depositorAddress]: null },
