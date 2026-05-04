@@ -12,6 +12,7 @@ veil-bundlr.json
 *-keypair.json
 app/scripts/
 worktrees/
+.superpowers/
 .DS_Store
 test-ledger/
 .swarmhash
