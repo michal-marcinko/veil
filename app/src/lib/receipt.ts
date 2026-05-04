@@ -118,6 +118,52 @@ export function encodeReceipt(signed: SignedReceipt): string {
 }
 
 /**
+ * Parse a receipt from arbitrary user input — accepts:
+ *   - the full verifier URL (`.../receipt/<pda>#<blob>`)
+ *   - just the URL fragment (with or without leading `#`)
+ *   - the raw base64url blob
+ *
+ * Returns both the decoded SignedReceipt and the invoice PDA from the URL
+ * path when present. The path PDA is returned separately so the caller can
+ * cross-check it against the receipt body — `decodeReceipt` only validates
+ * the blob, not the URL framing.
+ */
+export function parseReceiptInput(
+  input: string,
+): { signed: SignedReceipt; pathPda: string | null } {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("Receipt input is empty.");
+
+  let blob = trimmed;
+  let pathPda: string | null = null;
+
+  // Full URL — pull the fragment + path PDA out.
+  if (/^https?:\/\//i.test(trimmed)) {
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch (err) {
+      throw new Error(`Receipt URL is malformed: ${String(err)}`);
+    }
+    if (!url.hash || url.hash.length < 2) {
+      throw new Error("Receipt URL is missing its signed blob (no `#…` fragment).");
+    }
+    blob = url.hash.slice(1);
+    // Path is `/receipt/<pda>` — pluck the segment after `receipt`.
+    const segments = url.pathname.split("/").filter(Boolean);
+    const idx = segments.indexOf("receipt");
+    if (idx >= 0 && segments[idx + 1]) {
+      pathPda = segments[idx + 1];
+    }
+  } else if (trimmed.startsWith("#")) {
+    blob = trimmed.slice(1);
+  }
+
+  const signed = decodeReceipt(blob);
+  return { signed, pathPda };
+}
+
+/**
  * Parse a SignedReceipt from its URL-fragment blob. Throws on malformed input.
  */
 export function decodeReceipt(blob: string): SignedReceipt {

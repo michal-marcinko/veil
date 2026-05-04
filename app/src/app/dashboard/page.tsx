@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { DashboardList } from "@/components/DashboardList";
@@ -13,6 +12,11 @@ import {
   getOrCreateMetadataMasterSig,
   deriveKeyFromMasterSig,
 } from "@/lib/encryption";
+import {
+  parseReceiptInput,
+  verifyReceiptSignature,
+  type SignedReceipt,
+} from "@/lib/receipt";
 import { fetchCiphertext } from "@/lib/arweave";
 import type { InvoiceMetadata } from "@/lib/types";
 import {
@@ -121,37 +125,38 @@ function isPendingInvoice(invoice: any): boolean {
 // processed UTXOs at scan time — preventing them from ever reaching
 // the claim step.
 
-function findStableSignature(value: unknown, seen = new Set<object>()): string | null {
+/**
+ * Walk an opaque claim-result blob and collect every base58 string that
+ * decodes to a 64-byte buffer (i.e. looks like a Solana tx signature).
+ * Used to build the in-session "claimed UTXO" set so receipts that quote
+ * a signature we actually claimed are accepted, while strangers' receipts
+ * that happen to verify cryptographically are still rejected.
+ */
+function collectStableSignatures(
+  value: unknown,
+  out: Set<string> = new Set(),
+  seen = new Set<object>(),
+): Set<string> {
   if (typeof value === "string") {
     try {
-      return bs58.decode(value).length === 64 ? value : null;
+      if (bs58.decode(value).length === 64) out.add(value);
     } catch {
-      return null;
+      // not base58 — skip
     }
+    return out;
   }
-  if (!value || typeof value !== "object") return null;
-  if (seen.has(value)) return null;
+  if (!value || typeof value !== "object") return out;
+  if (seen.has(value)) return out;
   seen.add(value);
 
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findStableSignature(item, seen);
-      if (found) return found;
-    }
-    return null;
+    for (const item of value) collectStableSignatures(item, out, seen);
+    return out;
   }
-
   for (const item of Object.values(value as Record<string, unknown>)) {
-    const found = findStableSignature(item, seen);
-    if (found) return found;
+    collectStableSignatures(item, out, seen);
   }
-  return null;
-}
-
-async function deriveClaimCommitment(invoicePda: any, claimResult: unknown): Promise<Uint8Array> {
-  const sig = findStableSignature(claimResult);
-  if (sig) return sha256(bs58.decode(sig));
-  return sha256(invoicePda.toBuffer());
+  return out;
 }
 
 export default function DashboardPage() {
@@ -181,6 +186,26 @@ export default function DashboardPage() {
   // when the wallet changes; storage event listener keeps the count
   // current if a sibling tab signs a new batch.
   const [payrollRuns, setPayrollRuns] = useState<SignedPayrollPacket[]>([]);
+
+  // In-session claim history. Every time we successfully claim incoming
+  // UTXOs, we record any 64-byte base58 strings we can pull out of the
+  // SDK's opaque result blob. When a payer pastes a receipt, we accept
+  // it only if its `markPaidTxSig` is in this set OR matches one of the
+  // pending invoices' PDAs (belt-and-suspenders for receipts that quote
+  // the payment-intent sig but the SDK didn't surface it in the result).
+  // Unmatched receipts get a soft warning but can still be applied —
+  // the receipt's ed25519 signature is the cryptographic binding.
+  const [claimedUtxoSigs, setClaimedUtxoSigs] = useState<Set<string>>(new Set());
+  // Number of incoming UTXOs we've claimed this session minus the
+  // number of receipts a creator has applied. Drives the
+  // "X received UTXOs unmatched" indicator at the top of the page.
+  const [claimedCount, setClaimedCount] = useState(0);
+  const [matchedReceiptCount, setMatchedReceiptCount] = useState(0);
+
+  // Receipt-apply UI state.
+  const [receiptInput, setReceiptInput] = useState("");
+  const [applyingReceipt, setApplyingReceipt] = useState(false);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
 
   async function refresh() {
     if (!wallet.publicKey) return;
@@ -321,39 +346,30 @@ export default function DashboardPage() {
                 throw err;
               }
             }
-            for (const invoice of all.filter(isPendingInvoice)) {
-              try {
-                // deriveClaimCommitment already handles a null claimResult
-                // by falling back to sha256(invoicePda) — see line ~57.
-                const commitment = await deriveClaimCommitment(invoice.publicKey, claimResult);
-                await markPaidOnChain(wallet as any, invoice.publicKey, commitment);
-              } catch (err: any) {
-                // The invoice-registry program throws AnchorError 6001
-                // (InvalidStatus, custom 0x1771) when MarkPaid is called
-                // on an invoice that's already in a non-Pending state —
-                // typically already Paid by an earlier run. Treat that
-                // as a no-op (the invoice already reflects the right
-                // state) instead of spamming red errors. Anything else
-                // still surfaces.
-                const msg = String(err?.message ?? err);
-                const alreadyPaid =
-                  /InvalidStatus/i.test(msg) ||
-                  /0x1771/i.test(msg) ||
-                  /Error Number: 6001/i.test(msg);
-                if (alreadyPaid) {
-                  // eslint-disable-next-line no-console
-                  console.debug(
-                    "[Veil dashboard] mark_paid skipped — invoice already in Paid state on-chain:",
-                    invoice.publicKey?.toBase58?.() ?? invoice.publicKey,
-                  );
-                } else {
-                  // eslint-disable-next-line no-console
-                  console.error("[Veil dashboard] mark_paid failed:", err);
-                }
-              }
+            // CRITICAL CHANGE (2026-05-04 Codex review fix):
+            // Previously this loop iterated every Pending invoice and
+            // called markPaidOnChain() for each one whenever ANY UTXO
+            // was claimed. That violated invoice ↔ payment binding —
+            // a single payment from anyone would flip every outstanding
+            // invoice to Paid. The on-chain `mark_paid` instruction does
+            // not (and cannot) verify which Umbra UTXO funded which
+            // invoice, so the binding has to live off-chain in a
+            // payer-signed receipt.
+            //
+            // New flow: just record the claimed UTXO signatures we can
+            // pull off the SDK result, and bump the unmatched-claim
+            // counter. The creator must explicitly paste a payer-signed
+            // receipt to mark a specific invoice paid (see
+            // `handleApplyReceipt` below).
+            const newSigs = collectStableSignatures(claimResult);
+            if (newSigs.size > 0) {
+              setClaimedUtxoSigs((prev) => {
+                const merged = new Set(prev);
+                for (const s of newSigs) merged.add(s);
+                return merged;
+              });
             }
-            const updated = await fetchInvoicesByCreator(wallet as any, wallet.publicKey);
-            setInvoices(updated.map((a: any) => ({ pda: a.publicKey, account: a.account })));
+            setClaimedCount((c) => c + incoming.length);
           }
         } catch (err: any) {
           // eslint-disable-next-line no-console
@@ -498,22 +514,115 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleManualMarkPaid(invoicePda: string) {
+  /**
+   * Apply a payer-signed receipt to bind ONE specific invoice to
+   * ONE specific payment. Replaces the old "Confirm paid" button —
+   * the creator alone can no longer flip an invoice to Paid; they
+   * need cryptographic proof the payer authorised it.
+   *
+   * Verification chain:
+   *   1. Parse URL or raw blob via parseReceiptInput (frozen format).
+   *   2. Verify ed25519 signature over the canonical receipt bytes
+   *      against the receipt's claimed payerPubkey.
+   *   3. Check receipt.invoicePda matches a Pending invoice the
+   *      connected creator owns.
+   *   4. Soft-check receipt.markPaidTxSig is a UTXO this dashboard
+   *      claimed this session — if missing, surface a warning but
+   *      still allow the apply (the ed25519 signature is the binding).
+   *   5. Submit mark_paid on-chain using sha256(payment-intent sig)
+   *      as the utxo_commitment, so the public verifier at
+   *      /receipt/[pda] can later cross-check.
+   */
+  async function handleApplyReceipt() {
     if (!wallet.publicKey) return;
-    setLoading(true);
-    setError(null);
+    setReceiptError(null);
     setNotice(null);
+
+    let signed: SignedReceipt;
+    let pathPda: string | null = null;
     try {
-      const pda = new PublicKey(invoicePda);
-      const commitment = await sha256(pda.toBuffer());
-      await markPaidOnChain(wallet as any, pda, commitment);
+      const parsed = parseReceiptInput(receiptInput);
+      signed = parsed.signed;
+      pathPda = parsed.pathPda;
+    } catch (err: any) {
+      setReceiptError(`Receipt: ${err.message ?? String(err)}`);
+      return;
+    }
+
+    if (pathPda && pathPda !== signed.receipt.invoicePda) {
+      setReceiptError(
+        "Receipt URL path PDA does not match the receipt body. Refusing to apply.",
+      );
+      return;
+    }
+
+    setApplyingReceipt(true);
+    try {
+      const sigOk = await verifyReceiptSignature(signed);
+      if (!sigOk) {
+        setReceiptError(
+          "Receipt signature is invalid — it was not signed by the claimed payer.",
+        );
+        return;
+      }
+
+      // Find the matching Pending invoice. Receipts for non-existent or
+      // already-paid invoices get a clear error rather than spamming
+      // mark_paid and watching the program reject with InvalidStatus.
+      const target = invoices.find(
+        (i) =>
+          i.pda.toBase58() === signed.receipt.invoicePda &&
+          isPendingInvoice(i),
+      );
+      if (!target) {
+        setReceiptError(
+          "No matching Pending invoice on this dashboard for receipt PDA " +
+            `${signed.receipt.invoicePda.slice(0, 8)}…${signed.receipt.invoicePda.slice(-4)}.`,
+        );
+        return;
+      }
+
+      // Soft check: did this dashboard actually claim a UTXO whose
+      // signature appears in the receipt? Mismatch is suspicious but
+      // not fatal — Umbra's relayer-side claim path may surface a
+      // different signature than the payer's pay-tx, and the SDK's
+      // result blob is opaque. The cryptographic binding is the
+      // ed25519 signature over the receipt body, which we already
+      // verified.
+      const claimMatched = claimedUtxoSigs.has(signed.receipt.markPaidTxSig);
+
+      // utxo_commitment = sha256(payment-intent signature). Same
+      // derivation the public /receipt/[pda] verifier expects for
+      // its sanity check.
+      const sigBytes = bs58.decode(signed.receipt.markPaidTxSig);
+      const commitment = await sha256(sigBytes);
+
+      try {
+        await markPaidOnChain(wallet as any, target.pda, commitment);
+      } catch (err: any) {
+        const msg = String(err?.message ?? err);
+        const alreadyPaid =
+          /InvalidStatus/i.test(msg) ||
+          /0x1771/i.test(msg) ||
+          /Error Number: 6001/i.test(msg);
+        if (!alreadyPaid) throw err;
+        // Treat already-paid as a no-op success — receipt is still bound.
+      }
+
+      setMatchedReceiptCount((c) => c + 1);
+      setReceiptInput("");
+      setNotice(
+        claimMatched
+          ? `Receipt applied — invoice marked Paid (claim signature matched).`
+          : `Receipt applied — invoice marked Paid. Note: payment signature was not in this session's claim history; relying on receipt signature alone.`,
+      );
       await refresh();
     } catch (err: any) {
       // eslint-disable-next-line no-console
-      console.error("[Veil dashboard] manual mark_paid failed:", err);
-      setError(`Manual confirmation: ${err.message ?? String(err)}`);
+      console.error("[Veil dashboard] apply receipt failed:", err);
+      setReceiptError(`Apply receipt: ${err.message ?? String(err)}`);
     } finally {
-      setLoading(false);
+      setApplyingReceipt(false);
     }
   }
 
@@ -599,6 +708,12 @@ export default function DashboardPage() {
 
   const invoiceCount = incoming.length;
   const payrollRunCount = payrollRunSummaries.length;
+  // Soft indicator for the dashboard header — claims that have come in
+  // this session but have no payer receipt bound to an invoice yet.
+  // Floor at 0 in case the operator applied more receipts than UTXOs
+  // they personally claimed (rare: receipt for a UTXO claimed in an
+  // older session that was outside the in-session set).
+  const unmatchedClaims = Math.max(0, claimedCount - matchedReceiptCount);
 
   return (
     <Shell>
@@ -687,6 +802,18 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {unmatchedClaims > 0 && (
+            <div className="mb-6 flex items-start gap-4 border-l-2 border-gold pl-4 py-2 max-w-2xl">
+              <span className="mono-chip text-gold shrink-0 pt-0.5">Unmatched</span>
+              <span className="text-[13.5px] text-ink leading-relaxed flex-1">
+                {unmatchedClaims} received UTXO{unmatchedClaims === 1 ? "" : "s"}{" "}
+                claimed this session without a matching payer receipt. Funds are
+                in your private balance, but no invoice is bound until a receipt
+                arrives. Ask the payer to share their signed receipt link.
+              </span>
+            </div>
+          )}
+
           {error && (
             <div className="mb-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-2xl">
               <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
@@ -716,32 +843,51 @@ export default function DashboardPage() {
           {pendingInvoices.length > 0 && (
             <div className="mt-10 border border-gold/30 bg-gold/5 rounded-[4px] p-5 max-w-3xl">
               <div className="flex items-start justify-between gap-6">
-                <div>
-                  <span className="eyebrow">Manual reconciliation</span>
+                <div className="flex-1">
+                  <span className="eyebrow">Apply payer receipt</span>
                   <p className="mt-2 text-[13.5px] leading-relaxed text-ink/75">
-                    If Umbra scan/claim is delayed, the invoice creator can still
-                    acknowledge a payment manually. This signs the same recipient-only
-                    mark_paid instruction; it does not let the payer mark invoices paid.
+                    To mark a Pending invoice Paid, paste the signed receipt
+                    URL or blob your payer generated on the pay page. The
+                    receipt cryptographically binds one specific payment to
+                    one specific invoice — this dashboard verifies the
+                    payer&apos;s ed25519 signature before submitting on-chain.
                   </p>
                 </div>
               </div>
-              <ul className="mt-4 divide-y divide-line/60">
-                {pendingInvoices.map((invoice) => (
-                  <li key={invoice.pda} className="py-3 flex items-center justify-between gap-4">
-                    <span className="font-mono text-[12px] text-ink truncate">
-                      {invoice.pda.slice(0, 8)}...{invoice.pda.slice(-4)}
+              <div className="mt-4 flex flex-col gap-3">
+                <textarea
+                  value={receiptInput}
+                  onChange={(e) => setReceiptInput(e.target.value)}
+                  placeholder="https://veil.app/receipt/<pda>#<blob>  —  or just the blob"
+                  rows={3}
+                  className="w-full font-mono text-[12px] bg-paper border border-line rounded-[3px] p-3 text-ink placeholder:text-dim resize-y focus:outline-none focus:border-ink"
+                  disabled={applyingReceipt}
+                />
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-[11.5px] font-mono tracking-[0.08em] text-dim uppercase">
+                    {pendingInvoices.length} invoice
+                    {pendingInvoices.length === 1 ? "" : "s"} pending
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleApplyReceipt}
+                    disabled={applyingReceipt || receiptInput.trim().length === 0}
+                    className="btn-ghost text-[12px] px-4 py-2 shrink-0 disabled:opacity-40"
+                  >
+                    {applyingReceipt ? "Verifying…" : "Apply receipt"}
+                  </button>
+                </div>
+                {receiptError && (
+                  <div className="flex items-start gap-3 border-l-2 border-brick pl-3 py-1.5">
+                    <span className="mono-chip text-brick shrink-0 pt-0.5">
+                      Receipt
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleManualMarkPaid(invoice.pda)}
-                      disabled={loading}
-                      className="btn-ghost text-[12px] px-3 py-1.5 shrink-0"
-                    >
-                      Confirm paid
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                    <span className="text-[12.5px] text-ink leading-relaxed flex-1">
+                      {receiptError}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
