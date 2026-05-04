@@ -49,6 +49,7 @@ vi.mock("@/lib/arweave", () => ({
 }));
 
 import CreatePage from "@/app/create/page";
+import { CreatePageInner } from "@/components/CreatePageInner";
 
 describe("Create page — Document Canvas", () => {
   beforeEach(() => {
@@ -121,7 +122,7 @@ describe("Create page — Document Canvas", () => {
     // Drive the page to success state via the test helper exposed by
     // CreatePage (a __test__ prop). This lets us isolate the success-state
     // render from the full async create_invoice flow.
-    render(<CreatePage __forceState="success" />);
+    render(<CreatePageInner __forceState="success" />);
 
     // Compose-mode picker AND back link must NOT be in the DOM.
     expect(screen.queryByRole("button", { name: /^Invoice\b/i })).toBeNull();
@@ -130,7 +131,7 @@ describe("Create page — Document Canvas", () => {
   });
 
   it("success state renders the pay-link strip + Copy link button", async () => {
-    render(<CreatePage __forceState="success" />);
+    render(<CreatePageInner __forceState="success" />);
 
     // Pay link is visible somewhere in the canvas bar.
     expect(screen.getByText(/veil\.app\/pay\//i)).toBeInTheDocument();
