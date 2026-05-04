@@ -5,7 +5,14 @@ import {
   WalletProvider as _SolanaWalletProvider,
 } from "@solana/wallet-adapter-react";
 import { WalletModalProvider as _WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import { PhantomWalletAdapter, SolflareWalletAdapter } from "@solana/wallet-adapter-wallets";
+// Import directly from the per-wallet packages instead of from
+// `@solana/wallet-adapter-wallets`. The metapackage bundles every
+// adapter — including WalletConnect, which transitively pulls in
+// `@reown/appkit` and a dependency on `viem` (an EVM lib we don't
+// use). Direct imports keep the bundle Solana-only and avoid the
+// missing-viem build error.
+import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
+import { SolflareWalletAdapter } from "@solana/wallet-adapter-solflare";
 import { useMemo, type ComponentType } from "react";
 import { RPC_URL } from "@/lib/constants";
 
