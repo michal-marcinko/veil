@@ -52,7 +52,11 @@ import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 
 type Mode = "invoice" | "payroll" | null;
 
-const SCROLL_BACK_MS = 900;
+// How long after click before form unmounts. Must be ≥ form-exit-anim
+// duration (380ms below) so the user sees the exit complete. Below this
+// we re-render before the animation finishes; above it we sit on a
+// blank-but-faded form. Tuned with the exit curve for snap.
+const FORM_EXIT_MS = 380;
 
 const EMPTY_FORM: InvoiceFormValues = {
   creatorDisplayName: "",
@@ -145,7 +149,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       setCopied(false);
       setValues(EMPTY_FORM);
       exitTimeoutRef.current = null;
-    }, SCROLL_BACK_MS);
+    }, FORM_EXIT_MS);
   }
 
   async function handleSubmit() {
@@ -331,14 +335,12 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       {/* Picker — only shown before a mode is selected. Once the user
           enters Invoice or Payroll, it unmounts (form takes the whole
           viewport — no peek-through above to break immersion). The
-          big-chevron back button below remounts it on demand. */}
+          big-chevron back button below remounts it on demand.
+          No section-level reveal animation: CreateModeSelector owns
+          its own 200ms-with-stagger entry; stacking the old 700ms
+          fade-up on top made the picker feel sluggish on remount. */}
       {mode === null && (
-        <section
-          className={[
-            "max-w-[1400px] mx-auto px-6 md:px-8 pt-24 md:pt-32 pb-16 md:pb-24",
-            "transition-opacity duration-300 animate-fade-up",
-          ].join(" ")}
-        >
+        <section className="max-w-[1400px] mx-auto px-6 md:px-8 pt-24 md:pt-32 pb-16 md:pb-24">
           <CreateModeSelector onSelect={handleSelectMode} />
         </section>
       )}
@@ -451,20 +453,34 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       <style
         dangerouslySetInnerHTML={{
           __html: `
+        /*
+          Form reveal (mount): 420ms ease-out-quart. Snappy onset, soft
+          landing — feels responsive but not jittery.
+          Form exit (back-button click): 380ms ease-in-quart. Fast
+          acceleration outward; pairs with the slight scale-down for the
+          "shrinking back into the picker" sensation. Distance kept
+          small (translateY 18px) — large translates feel slow even at
+          sub-400ms durations.
+          Apple's app-switch transition is the reference: ~350-450ms
+          with cubic curves and combined translate + scale, never just
+          opacity.
+        */
         .form-reveal {
           opacity: 0;
-          transform: translateY(40px);
-          animation: form-reveal-anim 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          transform: translateY(24px) scale(0.985);
+          animation: form-reveal-anim 420ms cubic-bezier(0.165, 0.84, 0.44, 1) forwards;
+          transform-origin: 50% 0%;
         }
         .form-reveal.is-exiting {
-          animation: form-exit-anim 600ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
+          animation: form-exit-anim 380ms cubic-bezier(0.5, 0, 0.75, 0) forwards;
+          transform-origin: 50% 0%;
         }
         @keyframes form-reveal-anim {
-          to { opacity: 1; transform: translateY(0); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
         }
         @keyframes form-exit-anim {
-          from { opacity: 1; transform: translateY(0); }
-          to { opacity: 0; transform: translateY(24px); }
+          from { opacity: 1; transform: translateY(0) scale(1); }
+          to { opacity: 0; transform: translateY(18px) scale(0.985); }
         }
         @media (prefers-reduced-motion: reduce) {
           .form-reveal,
