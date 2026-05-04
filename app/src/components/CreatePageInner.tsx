@@ -512,13 +512,12 @@ function SuccessLayout({ result }: { result: InvoiceResult }) {
       <VeilDescentMark size={144} />
       <div className="mt-10 font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
         <span className="tnum">{result.formattedAmount}</span>
-        <span className="text-muted"> to </span>
+        <span className="text-muted"> requested from </span>
         <span>{result.payerName}</span>
       </div>
       <p className="mt-4 text-[14px] leading-[1.55] text-muted max-w-[440px]">
-        Send the link below to your client. Only their wallet (or yours
-        via the dashboard) can open it — the chain only sees an anchor
-        hash.
+        Encrypted client-side. Only their wallet — or yours via the
+        dashboard — can open it; the chain sees only a hash.
       </p>
     </div>
   );
