@@ -368,18 +368,40 @@ export function PayrollFlow() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
-    if (running) return;
+  /**
+   * Drag-drop handlers for the recipients table. Two subtleties:
+   *
+   * 1. preventDefault on dragOver is what tells the browser this surface
+   *    accepts drops — without it, the browser shows the "no-drop"
+   *    cursor and the drop event never fires. We also explicitly set
+   *    dropEffect so the cursor reads "copy" not "move".
+   *
+   * 2. dragLeave fires every time the cursor crosses a child boundary
+   *    (each row, each input), not only when leaving the wrapper. We
+   *    deactivate only when the relatedTarget is genuinely outside the
+   *    wrapper (or null, which means leaving the window). Otherwise the
+   *    overlay flickers off the moment the user moves over a row.
+   */
+  function handleDragEnter(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
+    if (running) return;
     setDragActive(true);
   }
-  function handleDragLeave(_e: React.DragEvent<HTMLDivElement>) {
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    if (running) return;
+    e.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  }
+  function handleDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    const next = e.relatedTarget as Node | null;
+    if (next && e.currentTarget.contains(next)) return;
     setDragActive(false);
   }
   function handleDrop(e: React.DragEvent<HTMLDivElement>) {
-    if (running) return;
     e.preventDefault();
     setDragActive(false);
+    if (running) return;
     const file = e.dataTransfer.files?.[0];
     if (file) {
       ingestCsvFile(file).catch((err) =>
@@ -761,6 +783,7 @@ export function PayrollFlow() {
               </div>
             </div>
             <div
+              onDragEnter={handleDragEnter}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
