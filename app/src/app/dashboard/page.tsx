@@ -1030,7 +1030,29 @@ export default function DashboardPage() {
             Read directly from Solana. Encrypted to you.
           </p>
         </div>
-        <div className="pt-2 shrink-0">
+        {/* Right-side action cluster. 2026-05-04 v3 (user feedback): the
+            previous footer-only placement of "Run private payroll" /
+            "Manage auditor grants" was below the fold for any user with
+            a real invoice list — they read as "hidden" actions. Pulled
+            up here next to refresh so the three primary actions a
+            creator takes (refresh / payroll / grants) are always visible.
+            Editorial mono small-caps; gold accent on the arrows so they
+            register as actions, not labels. */}
+        <div className="pt-2 shrink-0 flex items-center gap-5">
+          <a
+            href="/payroll/outgoing"
+            className="hidden md:inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.16em] uppercase text-ink/60 hover:text-ink transition-colors"
+          >
+            <span>Run payroll</span>
+            <span className="text-gold" aria-hidden>&rarr;</span>
+          </a>
+          <a
+            href="/dashboard/compliance"
+            className="hidden md:inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.16em] uppercase text-ink/60 hover:text-ink transition-colors"
+          >
+            <span>Auditor grants</span>
+            <span className="text-gold" aria-hidden>&rarr;</span>
+          </a>
           <RefreshButton onClick={refresh} loading={loading} />
         </div>
       </div>
@@ -1244,7 +1266,12 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <div className="mt-10 pt-8 border-t border-line">
+          {/* Footer action duplicates removed — these now live in the
+              right-side cluster of the page header (next to Refresh).
+              Mobile (<md) keeps them here as a fallback so users on
+              narrow screens still have access; desktop hides them via
+              `hidden md:flex` since the header already shows them. */}
+          <div className="mt-10 pt-8 border-t border-line flex md:hidden">
             <a href="/payroll/outgoing" className="btn-quiet mr-5">
               Run private payroll →
             </a>
@@ -1340,7 +1367,6 @@ function LedgerSection({
       <DateGroupHeader
         key={`hdr-${bucketLabel}`}
         label={bucketLabel}
-        count={`${String(rows.length).padStart(2, "0")}`}
       />,
     ];
     for (const inv of rows) {
@@ -1382,9 +1408,16 @@ function LedgerSection({
         </p>
       )}
 
-      {/* Older toggle — PayPal-style accordion. Default collapsed. */}
+      {/* Older toggle — PayPal-style accordion. Default collapsed.
+          2026-05-04 v3 refinement (user feedback): the prior toggle was
+          too quiet to discover (text-ink/50 mono 10.5px). Bumped to
+          12.5px, paired with a hairline top border so it reads as a
+          deliberate section affordance, increased contrast on hover,
+          and the chevron is now slightly larger so the click target is
+          unmistakable. Still mono small-caps so it sits in the
+          editorial language. */}
       {olderBuckets.length > 0 && (
-        <div className="mt-3">
+        <div className="mt-2 border-t border-line/60">
           <button
             type="button"
             onClick={() => setOlderOpen((v) => !v)}
@@ -1392,17 +1425,17 @@ function LedgerSection({
             aria-controls="ledger-older-section"
             className={[
               "group w-full flex items-center justify-between",
-              "px-4 py-3 rounded-[3px]",
-              "font-mono text-[10.5px] tracking-[0.18em] uppercase",
-              "text-ink/50 hover:text-ink hover:bg-paper-2/60",
+              "px-2 py-4 rounded-[3px]",
+              "font-mono text-[12.5px] tracking-[0.16em] uppercase",
+              "text-ink/70 hover:text-ink hover:bg-paper-2/60",
               "transition-colors duration-150",
               "focus:outline-none focus-visible:ring-2 focus-visible:ring-gold/30",
             ].join(" ")}
           >
             <span className="inline-flex items-center gap-3">
-              <span>Earlier</span>
+              <span>{olderOpen ? "Hide earlier" : "Earlier"}</span>
               <span className="text-ink/30">·</span>
-              <span className="tabular-nums text-ink/40">
+              <span className="tabular-nums text-ink/55">
                 {String(olderCount).padStart(2, "0")} invoice{olderCount === 1 ? "" : "s"}
               </span>
             </span>
@@ -1528,8 +1561,8 @@ function FilterBar({
 function ChevronIcon({ open }: { open: boolean }) {
   return (
     <svg
-      width="10"
-      height="10"
+      width="12"
+      height="12"
       viewBox="0 0 10 10"
       fill="none"
       stroke="currentColor"

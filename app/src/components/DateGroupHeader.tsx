@@ -10,35 +10,23 @@
  */
 interface Props {
   label: string;
-  /** Optional small-caps count chip on the right, e.g. "03 / 12". */
-  count?: string;
 }
 
-export function DateGroupHeader({ label, count }: Props) {
+export function DateGroupHeader({ label }: Props) {
   return (
-    <div
-      className={
-        // Sticky at the top of the list scroll container.
-        // bg-paper to occlude rows scrolling under it; z-10 stays
-        // above the row hover backdrop but well below modals (z-50).
-        //
-        // 2026-05-04 refinement: tightened to a thin band — was a chunky
-        // section break (py-2 mb-3 + outer space-y), now reads as a
-        // hairline divider with mono small-caps. Bottom border dropped
-        // in favor of the list's own row dividers; visual rhythm is
-        // carried by typography + tight whitespace rather than a rule.
-        "sticky top-0 z-10 -mx-4 px-4 pt-2 pb-1 mb-0 bg-paper " +
-        "flex items-baseline justify-between"
-      }
-    >
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink/40">
+    // 2026-05-04 v2 refinement (user feedback): the previous implementation
+    // had `-mx-4 px-4 bg-paper` which produced a horizontal band that read
+    // as "ugly white space" against the rows above/below — even though
+    // bg-paper matches the page bg, the negative-margin extension created
+    // a perceived strip. Also dropped the count chip on the right (visual
+    // noise; the row stack already shows count). Sticky stays so the
+    // bucket label tracks scroll position; bg-paper now sits flush with
+    // row content (no horizontal extension), so it occludes scrolling
+    // rows without creating a visual band when stationary.
+    <div className="sticky top-0 z-10 bg-paper pt-2 pb-1.5">
+      <span className="font-mono text-[10px] uppercase tracking-[0.20em] text-ink/45">
         {label}
       </span>
-      {count && (
-        <span className="font-mono text-[10px] tabular-nums tracking-[0.12em] text-ink/30">
-          {count}
-        </span>
-      )}
     </div>
   );
 }
