@@ -82,10 +82,10 @@ describe("Dashboard page", () => {
 
     await waitFor(() => {
       // Page was renamed Dashboard → Activity; the editorial-ledger
-      // redesign (2026-05-04) uses Boska "Activity" as the H1 with a
-      // wallet-shorthand mono eyebrow above and the subtitle "Read
-      // directly from Solana. Encrypted to you." Match against the
-      // subtitle — it's the most stable marker for "page rendered".
+      // redesign (2026-05-04) uses Boska "Activity" as the H1 with the
+      // subtitle "Read directly from Solana. Encrypted for you." Match
+      // the first sentence — stable marker for "page rendered" across
+      // future copy tweaks to the second sentence.
       expect(screen.getByText(/Read directly from Solana\./i)).toBeInTheDocument();
     });
 

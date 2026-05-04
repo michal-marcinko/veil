@@ -1008,26 +1008,18 @@ export default function DashboardPage() {
       </SlideOverPanel>
 
       {/* Page header — Boska serif on the H1 ONLY (per editorial spec).
-          2026-05-04 refinement: dropped the redundant "Activity" eyebrow
-          (the H1 was already "Activity" — felt stuttered). The eyebrow
-          now carries the connected wallet shorthand in mono small-caps,
-          which is information the user actually needs at a glance. The
-          subtitle was rewritten to drop the "Your private payment
-          ledger" prefix (the H1 + nav already convey "this is yours")
-          in favor of the cryptographic guarantee, which is the
-          differentiator. */}
+          2026-05-04 v4: dropped the wallet-shorthand eyebrow above the
+          H1 (the user already sees their wallet in the top nav and the
+          balance card; repeating it here read as noise). Subtitle copy
+          tightened from "Encrypted to you" → "Encrypted for you" — "to"
+          read directional/awkward; "for" reads beneficiary-natural. */}
       <div className="flex items-start justify-between gap-6 mb-10 reveal">
         <div>
-          {wallet.publicKey && (
-            <span className="font-mono text-[10.5px] tracking-[0.18em] uppercase text-ink/40 tabular-nums">
-              {`${wallet.publicKey.toBase58().slice(0, 4)}…${wallet.publicKey.toBase58().slice(-4)}`}
-            </span>
-          )}
-          <h1 className="mt-3 font-display text-ink text-[44px] md:text-[60px] leading-[1.0] tracking-[-0.02em]">
+          <h1 className="font-display text-ink text-[44px] md:text-[60px] leading-[1.0] tracking-[-0.02em]">
             Activity
           </h1>
           <p className="mt-3 text-[14.5px] text-ink/55 max-w-lg leading-[1.5]">
-            Read directly from Solana. Encrypted to you.
+            Read directly from Solana. Encrypted for you.
           </p>
         </div>
         {/* Right-side action cluster. 2026-05-04 v3 (user feedback): the
@@ -1401,9 +1393,12 @@ function LedgerSection({
       {/* Empty-recent fallback: if the user has older invoices but
           nothing today/yesterday, show a small italic line so the page
           doesn't look broken — the toggle right below it surfaces the
-          older history. */}
+          older history. 2026-05-04 v4: dropped the bottom border (the
+          Earlier toggle's own border-t carries the separator; having
+          both produced a perceived 'double line' on the Paid filter
+          where Today/Yesterday are usually empty). */}
       {recentBuckets.length === 0 && olderBuckets.length > 0 && (
-        <p className="font-display italic text-ink/50 text-[15px] py-6 px-4 border-b border-ink/5">
+        <p className="font-display italic text-ink/50 text-[15px] py-6 px-4">
           Nothing today or yesterday.
         </p>
       )}
