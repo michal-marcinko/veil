@@ -5,6 +5,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { DashboardList } from "@/components/DashboardList";
+import { ClaimProgressModal } from "@/components/ClaimProgressModal";
 import { fetchInvoicesByCreator, markPaidOnChain } from "@/lib/anchor";
 import {
   sha256,
@@ -207,6 +208,22 @@ export default function DashboardPage() {
   const [applyingReceipt, setApplyingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
 
+  // Claim-progress modal state. Shown the moment we discover N
+  // claimable UTXOs and are about to walk through them sequentially.
+  // `claimModal.total === 0` (the default) keeps the modal closed.
+  type ClaimModalState = {
+    open: boolean;
+    current: number;
+    total: number;
+    error: string | null;
+  };
+  const [claimModal, setClaimModal] = useState<ClaimModalState>({
+    open: false,
+    current: 0,
+    total: 0,
+    error: null,
+  });
+
   async function refresh() {
     if (!wallet.publicKey) return;
     setLoading(true);
@@ -293,6 +310,17 @@ export default function DashboardPage() {
         const incoming = [...scan.received, ...scan.publicReceived];
           if (incoming.length > 0) {
             claimedThisRefresh = true;
+            // Open the progress modal BEFORE the first Phantom popup
+            // fires. With N=6 unclaimed UTXOs the unguarded path
+            // unleashed six wallet prompts in a few seconds with no
+            // context; the modal explains what's happening and ticks
+            // the progress bar as each one lands.
+            setClaimModal({
+              open: true,
+              current: 0,
+              total: incoming.length,
+              error: null,
+            });
             // Watermark-based incremental scan in `scanClaimableUtxos`
             // means `incoming` should only contain UTXOs newer than
             // what we've already processed in past sessions. We still
@@ -302,7 +330,21 @@ export default function DashboardPage() {
             // already-claimed UTXOs reappear in the scan.
             let claimResult: Awaited<ReturnType<typeof claimUtxos>> | null = null;
             try {
-              claimResult = await claimUtxos({ client, utxos: incoming });
+              claimResult = await claimUtxos({
+                client,
+                utxos: incoming,
+                onProgress: (current, total) => {
+                  // Drive the modal's progress bar from inside umbra.ts.
+                  // Because `claimUtxos` processes UTXOs sequentially
+                  // when an `onProgress` callback is provided, this fires
+                  // exactly once per claimed UTXO.
+                  setClaimModal((prev) => ({
+                    ...prev,
+                    current,
+                    total,
+                  }));
+                },
+              });
             } catch (err: any) {
               const msg = String(err?.message ?? err);
               const alreadyReserved = /already reserved/i.test(msg) || /409/.test(msg);
@@ -370,10 +412,33 @@ export default function DashboardPage() {
               });
             }
             setClaimedCount((c) => c + incoming.length);
+            // Pin the bar to 100% (the per-UTXO retry path may not
+            // emit a final progress tick) and let the success state
+            // breathe for ~1.5s before auto-closing.
+            setClaimModal((prev) => ({
+              ...prev,
+              current: prev.total,
+              error: null,
+            }));
+            setTimeout(() => {
+              setClaimModal({ open: false, current: 0, total: 0, error: null });
+            }, 1500);
           }
         } catch (err: any) {
           // eslint-disable-next-line no-console
           console.error("[Veil dashboard] scan/claim failed:", err);
+          // Surface the failure inside the modal if we'd already opened
+          // it. Auto-close after a longer pause so the user can read.
+          setClaimModal((prev) =>
+            prev.open
+              ? { ...prev, error: err?.message ?? String(err) }
+              : prev,
+          );
+          setTimeout(() => {
+            setClaimModal((prev) =>
+              prev.error ? { open: false, current: 0, total: 0, error: null } : prev,
+            );
+          }, 4000);
         }
 
       try {
@@ -717,6 +782,12 @@ export default function DashboardPage() {
 
   return (
     <Shell>
+      <ClaimProgressModal
+        open={claimModal.open}
+        current={claimModal.current}
+        total={claimModal.total}
+        errorMessage={claimModal.error}
+      />
       <div className="flex items-baseline justify-between mb-10 reveal">
         <div>
           <span className="eyebrow">Activity</span>
