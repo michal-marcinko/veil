@@ -85,6 +85,12 @@ interface PayrollRunRow extends PayrollPacketRow {
   claimUrl?: string;
   /** Set when this row used the claim-link path. */
   registrationStatus?: RegistrationStatus;
+  /** Structured error info for the in-app disclosure UI. The packet's
+   *  `error` field stays a single-line string for the signed packet
+   *  shape (PayrollPacketRow), but the runtime row also carries the
+   *  full logs + phase so a "Show details" expander can render them.
+   *  Discarded when the packet is built (see `runRowToPacketRow`). */
+  errorDetail?: RowErrorDetail;
 }
 
 interface RegistrationDetectionResult {
@@ -115,6 +121,26 @@ const SAMPLE_RECIPIENTS: RecipientRow[] = [
 ];
 
 /**
+ * Structured payload for a failed row. Carries the headline message,
+ * the program logs (when we can find them), and an optional phase
+ * marker telling us WHICH step of the claim-link sub-flow failed
+ * (fund / register / deposit) — useful because each phase touches a
+ * different program and the right next step depends on which one
+ * tripped.
+ */
+interface RowErrorDetail {
+  /** Single-line summary surfaced in the row chip. */
+  summary: string;
+  /** Sub-step that threw, when known. */
+  phase?: "fund" | "register" | "deposit" | "shielded" | "public";
+  /** Last ~20 program logs from simulation, when present. Joined
+   *  with newlines for the disclosure UI. */
+  logs?: string[];
+  /** Raw error message from the thrower, before we added hints. */
+  rawMessage: string;
+}
+
+/**
  * Extract the most informative message we can from a Solana / Umbra SDK
  * thrown error. Solana web3 errors usually expose `.logs` (the program
  * logs from simulation) and sometimes `.cause.logs`; the message alone
@@ -127,28 +153,88 @@ const SAMPLE_RECIPIENTS: RecipientRow[] = [
  * appends a hint:
  *   - "insufficient" / "0x1" → likely public-balance funding gap
  *   - "AccountNotFound" / "account does not exist" → unwrapped wSOL ATA
+ *
+ * Phase tagging: when called from `sendViaClaimLink` we already know
+ * which sub-step threw, so we forward that as `phase` so the row can
+ * label the chip ("fund / register / deposit") rather than just
+ * "claim-link path failed".
  */
-function formatTxError(err: any): string {
+async function formatTxError(
+  err: any,
+  opts?: { phase?: RowErrorDetail["phase"]; connection?: any },
+): Promise<RowErrorDetail> {
   const baseMsg = err?.message ?? String(err);
-  const logs: string[] | undefined =
-    err?.logs ?? err?.cause?.logs ?? err?.transactionLogs;
-  let detail = "";
-  if (Array.isArray(logs) && logs.length > 0) {
-    // Last 3 logs typically include the failure reason.
-    const tail = logs.slice(-3).join(" · ");
-    detail = ` — ${tail}`;
+
+  // Always log the raw object so DevTools shows the full structure
+  // even if our shape-matching below misses something. The user's
+  // first instinct on a failure is "open console", and we shouldn't
+  // hide what we got from the wallet adapter / SDK.
+  // eslint-disable-next-line no-console
+  console.error("[payroll] row failed", { phase: opts?.phase, err });
+
+  // Walk every error-shape we've seen surface logs through:
+  //   - `err.logs`                            web3.js BlockheightExceededError, anchor errors
+  //   - `err.cause.logs`                      wallet-adapter SendTransactionError
+  //   - `err.transactionLogs`                 some custom rejection paths
+  //   - `err.error.logs`                      nested SDK wrappers
+  //   - `err.simulation.logs` / `err.simulationResponse.logs`
+  //                                           direct simulateTransaction-thrown
+  //   - `await err.getLogs(connection)`       newer @solana/web3.js (≥1.95)
+  //                                           SendTransactionError exposes a
+  //                                           lazy fetcher that loads logs from
+  //                                           the network when the throw site
+  //                                           didn't include them inline.
+  let logs: string[] | undefined =
+    err?.logs ??
+    err?.cause?.logs ??
+    err?.transactionLogs ??
+    err?.error?.logs ??
+    err?.simulation?.logs ??
+    err?.simulationResponse?.logs;
+
+  if ((!logs || logs.length === 0) && typeof err?.getLogs === "function" && opts?.connection) {
+    try {
+      const fetched = await err.getLogs(opts.connection);
+      if (Array.isArray(fetched) && fetched.length > 0) {
+        logs = fetched;
+      }
+    } catch {
+      // getLogs() can itself throw (network blip, expired blockhash).
+      // We already have the base message — no point bubbling further.
+    }
   }
-  const combined = `${baseMsg}${detail}`;
+
+  // Anchor-style errors sometimes pack the actual reason in `.error.errorMessage`.
+  const anchorReason =
+    err?.error?.errorMessage ||
+    err?.errorLogs?.find?.((l: string) => /^Program log: AnchorError/.test(l));
+
+  let summary = baseMsg;
+  if (anchorReason) summary = `${summary} — ${anchorReason}`;
+  if (logs && logs.length > 0) {
+    // Tail of the logs is where the failure reason lands — surface
+    // up to 3 trailing lines in the chip; full list goes into the
+    // disclosure UI under the row.
+    const tail = logs.slice(-3).join(" · ");
+    summary = `${summary} — ${tail}`;
+  }
+
   // Heuristic hint for the common case: public-funding shortfall on
   // claim-link rows. The deposit pulls from the sender's PUBLIC token
   // ATA (e.g. wSOL on devnet), not native SOL or encrypted balance.
   if (
-    /insufficient|0x1\b|0x1$/i.test(combined) ||
-    /AccountNotFound|account does not exist|TokenAccountNotFound/i.test(combined)
+    /insufficient|0x1\b|0x1$/i.test(summary) ||
+    /AccountNotFound|account does not exist|TokenAccountNotFound/i.test(summary)
   ) {
-    return `${combined}\nHint: claim-link rows pull from your PUBLIC ${PAYMENT_SYMBOL} ATA. Wrap more SOL or top up that ATA before re-running.`;
+    summary = `${summary}\nHint: claim-link rows pull from your PUBLIC ${PAYMENT_SYMBOL} ATA. Wrap more SOL or top up that ATA before re-running.`;
   }
-  return combined;
+
+  return {
+    summary,
+    phase: opts?.phase,
+    logs,
+    rawMessage: baseMsg,
+  };
 }
 
 /**
@@ -595,12 +681,20 @@ export function PayrollFlow() {
               registrationStatus: "unregistered",
             });
           } catch (err: any) {
+            const detail = await formatTxError(err, {
+              phase: err?.__veilPhase ?? undefined,
+              connection,
+            });
+            const phaseLabel = detail.phase
+              ? `Claim-link ${detail.phase} step failed`
+              : "Claim-link path failed";
             resultRows.push({
               ...prepared,
               status: "failed",
               mode: "public",
               txSignature: null,
-              error: `Claim-link path failed: ${formatTxError(err)}`,
+              error: `${phaseLabel}: ${detail.summary}`,
+              errorDetail: { ...detail, summary: `${phaseLabel}: ${detail.summary}` },
               registrationStatus: "unregistered",
             });
           }
@@ -631,12 +725,17 @@ export function PayrollFlow() {
             registrationStatus: status,
           });
         } catch (err: any) {
+          const detail = await formatTxError(err, {
+            phase: useShieldedForRun ? "shielded" : "public",
+            connection,
+          });
           resultRows.push({
             ...prepared,
             status: "failed",
             mode: useShieldedForRun ? "shielded" : "public",
             txSignature: null,
-            error: formatTxError(err),
+            error: detail.summary,
+            errorDetail: detail,
             registrationStatus: status,
           });
         }
@@ -718,20 +817,47 @@ export function PayrollFlow() {
     rowIndex: number;
   }): Promise<{ claimUrl: string; depositSignature: string; shadowAddress: string }> {
     const ephemeral = generateEphemeralKeypair();
-    await fundShadowAccount({
-      payerWallet: args.payerWallet,
-      shadowAddress: ephemeral.address,
-      lamports: SHADOW_FUNDING_LAMPORTS,
-      connection: args.connection,
-    });
+
+    // Each step gets its own try/catch so the thrown error carries
+    // a `phase` tag we can surface in the row UI. Without this,
+    // every claim-link failure shows up as "Transaction simulation
+    // failed" with no hint at WHICH step (fund / register / deposit)
+    // tripped — and they hit different programs with different
+    // failure modes (system program, Umbra registration, Umbra
+    // deposit).
+    try {
+      await fundShadowAccount({
+        payerWallet: args.payerWallet,
+        shadowAddress: ephemeral.address,
+        lamports: SHADOW_FUNDING_LAMPORTS,
+        connection: args.connection,
+      });
+    } catch (err: any) {
+      err.__veilPhase = "fund";
+      throw err;
+    }
+
     const shadowClient = await buildShadowClient(ephemeral.privateKey);
-    await registerShadowAccount({ shadowClient });
-    const deposit = await depositToShadow({
-      payerClient: args.payerClient,
-      shadowAddress: ephemeral.address,
-      mint: USDC_MINT.toBase58(),
-      amount: BigInt(args.prepared.amount),
-    });
+
+    try {
+      await registerShadowAccount({ shadowClient });
+    } catch (err: any) {
+      err.__veilPhase = "register";
+      throw err;
+    }
+
+    let deposit: { depositSignature: string };
+    try {
+      deposit = await depositToShadow({
+        payerClient: args.payerClient,
+        shadowAddress: ephemeral.address,
+        mint: USDC_MINT.toBase58(),
+        amount: BigInt(args.prepared.amount),
+      });
+    } catch (err: any) {
+      err.__veilPhase = "deposit";
+      throw err;
+    }
     const claimUrl = generateClaimUrl({
       baseUrl: typeof window !== "undefined" ? window.location.origin : "",
       batchId: args.batchId,
@@ -1349,7 +1475,9 @@ function ResultRow({
           <div className="mt-1 text-[12.5px] text-muted truncate">
             {row.memo || "No memo"}
           </div>
-          {row.error && <div className="mt-2 text-[12px] text-brick">{row.error}</div>}
+          {row.error && (
+            <RowErrorChip error={row.error} detail={row.errorDetail} />
+          )}
         </div>
         <StatusBadge status={row.status} />
       </div>
@@ -1413,6 +1541,64 @@ function PlaceholderRow({ row, idx }: { row: PayrollRow; idx: number }) {
         </span>
       </div>
     </li>
+  );
+}
+
+/**
+ * RowErrorChip — failed-row error display with optional collapsible
+ * details. The chip itself shows the summary (single-line, brick); a
+ * "Show details" toggle reveals the full message + program logs in a
+ * mono pre-block underneath. Logs are also written to console.error
+ * by formatTxError so devtools-savvy users have the full object.
+ *
+ * Phase pill (when known) sits inline before the summary so the user
+ * can see at a glance whether it was the SOL transfer, Umbra
+ * registration, or the deposit that tripped — three different
+ * remediation paths.
+ */
+function RowErrorChip({
+  error,
+  detail,
+}: {
+  error: string;
+  detail?: RowErrorDetail;
+}) {
+  const [open, setOpen] = useState(false);
+  const hasLogs = !!(detail?.logs && detail.logs.length > 0);
+  const hasMore = hasLogs || (detail?.rawMessage && detail.rawMessage !== error);
+
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-baseline gap-2 text-[12px] text-brick leading-relaxed">
+        {detail?.phase && (
+          <span className="font-mono text-[9.5px] tracking-[0.16em] uppercase px-1.5 py-0.5 border border-brick/40 rounded-[2px] text-brick/90 bg-brick/5">
+            {detail.phase}
+          </span>
+        )}
+        <span className="whitespace-pre-wrap break-words">{error}</span>
+      </div>
+      {hasMore && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="mt-1.5 font-mono text-[10px] tracking-[0.16em] uppercase text-ink/55 hover:text-ink transition-colors inline-flex items-center gap-1.5"
+          >
+            <span>{open ? "Hide details" : "Show details"}</span>
+            <span aria-hidden className={`transition-transform duration-150 ${open ? "rotate-180" : ""}`}>↓</span>
+          </button>
+          {open && (
+            <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap break-words border border-line bg-paper-2/60 rounded-[3px] p-3 font-mono text-[11px] text-ink leading-[1.55]">
+              {detail?.rawMessage && (
+                <div className="text-muted mb-2">{detail.rawMessage}</div>
+              )}
+              {hasLogs && detail!.logs!.join("\n")}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

@@ -4,22 +4,27 @@ import { useEffect, useState } from "react";
 import { buildGiftQuickShareTargets } from "@/lib/gift-cards";
 
 /**
- * GiftShareCard — the celebratory artifact that appears AFTER the sender
- * finishes the create flow.
+ * GiftShareCard — the artifact that appears AFTER the sender finishes
+ * the create flow.
  *
  * Two halves:
- *   - A "card" (left): an editorial-celebratory rendition of the gift —
- *     amount in display serif, optional message in Boska italic, sender
- *     and recipient names. This is what the sender sees as proof their
- *     gift exists; it's also the visual identity of the gift before the
- *     URL is even shared.
- *   - A "share" panel (right): the gift URL in a copy-able row, plus three
+ *   - A "card" (left): an editorial rendition of the transfer — amount
+ *     in display serif, optional sender/recipient names. This is what
+ *     the sender sees as proof their transfer exists; it's also the
+ *     visual identity before the URL is even shared.
+ *   - A "share" panel (right): the URL in a copy-able row, plus three
  *     quick-share buttons (X, email, sms). Mobile collapses to a stack.
  *
- * Tone: editorial-celebratory (thoughtful birthday card from a designer
- * friend), NOT crypto-bro confetti. Boska italic for the message; gold
- * accent only on the amount; thin gold rule under the card. No emoji
- * unless the user typed one in their message.
+ * Two tones:
+ *   - tone="gift" (default) — celebratory: gold rule, "A gift" eyebrow,
+ *     gold display amount, italic Boska message blockquote, "Veil ·
+ *     private gift" / "Claim once" footer. The "thoughtful birthday
+ *     card from a designer friend" treatment.
+ *   - tone="transfer" — sober: no gold rule, "Transfer" eyebrow, ink
+ *     display amount, no message blockquote (transfer mode hides the
+ *     message field), "Veil · private transfer" footer. Used by
+ *     Private-transfer mode in /create + /send when the sender hasn't
+ *     opted into "Send as a gift".
  */
 export interface GiftShareCardProps {
   giftUrl: string;
@@ -28,6 +33,9 @@ export interface GiftShareCardProps {
   message?: string;
   senderName?: string;
   recipientName?: string;
+  /** "gift" preserves the original celebratory treatment; "transfer"
+   *  drops the gold + italic + gift-specific copy. */
+  tone?: "gift" | "transfer";
   /** Called when the sender clicks "Send another" on the share screen. */
   onReset?: () => void;
 }
@@ -39,8 +47,10 @@ export function GiftShareCard({
   message,
   senderName,
   recipientName,
+  tone = "gift",
   onReset,
 }: GiftShareCardProps) {
+  const isGift = tone === "gift";
   const [copied, setCopied] = useState(false);
 
   // Reset the "Copied" pill after a beat — same UX as PayrollFlow's copy
@@ -78,20 +88,27 @@ export function GiftShareCard({
         style={{ animationDelay: "60ms" }}
       >
         <div className="relative bg-paper-3 border border-line rounded-[4px] px-8 md:px-12 py-10 md:py-14 overflow-hidden">
-          {/* Hairline gold rule: the "ribbon" without the actual ribbon. */}
-          <div className="absolute left-0 top-0 h-1 w-full bg-gold/80" />
+          {/* Hairline gold rule — gift tone only. The "ribbon" without
+              the actual ribbon. Transfer tone sits flush with no gold
+              accent (sober treatment). */}
+          {isGift && <div className="absolute left-0 top-0 h-1 w-full bg-gold/80" />}
 
-          <span className="eyebrow">A gift</span>
+          <span className="eyebrow">{isGift ? "A gift" : "Transfer"}</span>
 
           {recipientName && (
             <p className="mt-4 text-[14px] text-muted">
-              For{" "}
+              {isGift ? "For" : "To"}{" "}
               <span className="text-ink font-medium">{recipientName}</span>
             </p>
           )}
 
           <div className="mt-6 flex items-baseline gap-3">
-            <span className="font-display font-medium text-gold text-[64px] md:text-[88px] leading-[0.95] tracking-[-0.025em]">
+            <span
+              className={[
+                "font-display font-medium text-[64px] md:text-[88px] leading-[0.95] tracking-[-0.025em]",
+                isGift ? "text-gold" : "text-ink",
+              ].join(" ")}
+            >
               {amountDisplay}
             </span>
             <span className="font-mono text-[14px] tracking-[0.1em] uppercase text-muted">
@@ -99,7 +116,10 @@ export function GiftShareCard({
             </span>
           </div>
 
-          {message && (
+          {/* Italic Boska message blockquote: gift tone only. Transfer
+              tone hides the message field in the form, so it should
+              never have a message to render — guarded anyway. */}
+          {isGift && message && (
             <blockquote className="mt-10 max-w-[520px] font-display italic text-ink text-[22px] md:text-[26px] leading-[1.35] tracking-[-0.005em]">
               <span aria-hidden className="text-muted mr-1">&ldquo;</span>
               {message}
@@ -116,7 +136,7 @@ export function GiftShareCard({
 
           <div className="mt-12 pt-6 border-t border-line/70 flex items-center justify-between gap-4">
             <span className="font-mono text-[10.5px] tracking-[0.16em] uppercase text-dim">
-              Veil · private gift
+              {isGift ? "Veil · private gift" : "Veil · private transfer"}
             </span>
             <span className="font-mono text-[10.5px] tracking-[0.16em] uppercase text-dim">
               Claim once
@@ -132,9 +152,13 @@ export function GiftShareCard({
       >
         <span className="eyebrow">Share</span>
         <h2 className="mt-3 font-sans font-medium text-ink text-[24px] md:text-[28px] leading-[1.15] tracking-[-0.015em]">
-          The gift is funded.
+          {isGift ? "The gift is funded." : "The transfer is ready."}
           <br />
-          <span className="text-muted">Hand it to {recipientName?.trim() || "them"}.</span>
+          <span className="text-muted">
+            {isGift
+              ? `Hand it to ${recipientName?.trim() || "them"}.`
+              : `Send the link to ${recipientName?.trim() || "them"}.`}
+          </span>
         </h2>
 
         <p className="mt-5 text-[14px] text-ink/75 leading-relaxed">
@@ -143,20 +167,20 @@ export function GiftShareCard({
         </p>
 
         <div className="mt-7">
-          <label className="eyebrow block mb-2">Gift link</label>
+          <label className="eyebrow block mb-2">{isGift ? "Gift link" : "Transfer link"}</label>
           <div className="flex items-stretch gap-2">
             <input
               readOnly
               value={giftUrl}
               onFocus={(e) => e.currentTarget.select()}
               className="input-editorial font-mono text-[12.5px] truncate"
-              aria-label="Gift link"
+              aria-label={isGift ? "Gift link" : "Transfer link"}
             />
             <button
               type="button"
               onClick={handleCopy}
               className="btn-ghost px-4 shrink-0"
-              aria-label="Copy gift link"
+              aria-label={isGift ? "Copy gift link" : "Copy transfer link"}
             >
               {copied ? "Copied" : "Copy"}
             </button>
@@ -192,7 +216,7 @@ export function GiftShareCard({
         {onReset && (
           <div className="mt-10 pt-6 border-t border-line">
             <button type="button" onClick={onReset} className="btn-quiet text-[13px]">
-              Send another gift →
+              {isGift ? "Send another gift →" : "Send another transfer →"}
             </button>
           </div>
         )}

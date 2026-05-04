@@ -34,6 +34,8 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
@@ -105,6 +107,21 @@ const RECENT_BUCKETS: ReadonlyArray<string> = ["Today", "Yesterday"];
 
 export default function CompliancePage() {
   const wallet = useWallet();
+  const router = useRouter();
+
+  // Outgoing-transition state. The "← Activity" back link sets this
+  // before pushing the next route so the current surface fades out
+  // before /dashboard's `.reveal` animation paints the destination.
+  // Effect: a continuous opacity hand-off rather than a hard cut.
+  const [leaving, setLeaving] = useState(false);
+  const handleBackToActivity = useCallback(() => {
+    if (leaving) return; // double-click protection
+    setLeaving(true);
+    // 180ms matches the fade-out duration on the wrapper below — long
+    // enough to read as a transition, short enough that the user
+    // doesn't perceive a stall before the route swap.
+    window.setTimeout(() => router.push("/dashboard"), 180);
+  }, [leaving, router]);
 
   // Scope inputs — preset pills + mint dropdown.
   const [activePresetId, setActivePresetId] = useState<PresetId>("ytd");
@@ -336,21 +353,32 @@ export default function CompliancePage() {
 
   // ---------------- Render ----------------
 
+  // Wrapper class for the outgoing transition. Pairs with the 180ms
+  // window in `handleBackToActivity` above. Tailwind doesn't have a
+  // 180ms duration token, so we use the arbitrary-value bracket form.
+  const surfaceClass = [
+    "transition-[opacity,transform] duration-[180ms] ease-out",
+    leaving ? "opacity-0 -translate-y-[2px]" : "opacity-100 translate-y-0",
+  ].join(" ");
+
   if (!wallet.connected) {
     return (
       <Shell>
-        <div className="max-w-lg reveal">
-          <span className="eyebrow">Auditor links</span>
-          <h1 className="mt-4 font-display text-ink text-[44px] md:text-[56px] leading-[1.02] tracking-[-0.02em]">
-            Connect to grant scoped read access.
-          </h1>
-          <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
-            Pick the invoices an auditor needs to see. We re-encrypt only
-            those under a fresh per-grant key — your wallet&apos;s master
-            key never leaves the browser.
-          </p>
-          <div className="mt-8">
-            <ClientWalletMultiButton />
+        <div className={surfaceClass}>
+          <BackToActivityLink onLeave={handleBackToActivity} />
+          <div className="max-w-lg reveal">
+            <span className="eyebrow">Auditor links</span>
+            <h1 className="mt-4 font-display text-ink text-[44px] md:text-[56px] leading-[1.02] tracking-[-0.02em]">
+              Connect to grant scoped read access.
+            </h1>
+            <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-md">
+              Pick the invoices an auditor needs to see. We re-encrypt only
+              those under a fresh per-grant key — your wallet&apos;s master
+              key never leaves the browser.
+            </p>
+            <div className="mt-8">
+              <ClientWalletMultiButton />
+            </div>
           </div>
         </div>
       </Shell>
@@ -359,34 +387,54 @@ export default function CompliancePage() {
 
   return (
     <Shell>
-      <div className="max-w-3xl reveal">
-        <span className="eyebrow">Auditor links</span>
-        <h1 className="mt-3 font-display text-ink text-[40px] md:text-[52px] leading-[1.04] tracking-[-0.02em]">
-          Grant scoped read access.
-        </h1>
-        <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-xl">
-          Pick a date range and the rows your auditor needs to see. We
-          re-encrypt only those invoices under a fresh per-grant key and
-          give you a link to share. The link is the only way to read
-          this scope.
-        </p>
+      <div className={surfaceClass}>
+        <BackToActivityLink onLeave={handleBackToActivity} />
+
+        {/* Pre-grant intro is hidden once the grant is generated, so
+            the success card sits alone — the leftover "Auditor links /
+            Grant scoped read access. / Pick a date range…" text bug
+            from the prior build is gone here. The GrantResultCard
+            carries its own "Auditor link ready" eyebrow, so removing
+            this block doesn't leave the success state header-less. */}
+        {!grantResult && (
+          <div className="max-w-3xl reveal">
+            <span className="eyebrow">Auditor links</span>
+            <h1 className="mt-3 font-display text-ink text-[40px] md:text-[52px] leading-[1.04] tracking-[-0.02em]">
+              Grant scoped read access.
+            </h1>
+            <p className="mt-5 text-[15px] leading-[1.55] text-ink/70 max-w-xl">
+              Pick a date range and the rows your auditor needs to see. We
+              re-encrypt only those invoices under a fresh per-grant key and
+              give you a link to share. The link is the only way to read
+              this scope.
+            </p>
+          </div>
+        )}
 
         {fetchError && (
-          <ErrorBanner message={fetchError} />
+          <div className="max-w-3xl">
+            <ErrorBanner message={fetchError} />
+          </div>
         )}
 
         {grantResult ? (
-          <GrantResultCard
-            url={grantResult.url}
-            invoiceCount={grantResult.invoiceCount}
-            totalAmount={grantResult.totalAmount}
-            symbol={grantResult.symbol}
-            mintLabel={grantResult.mintLabel}
-            skippedCount={grantResult.skippedCount}
-            onReset={resetGrant}
-          />
+          // Success state: centre the result card. The card has its own
+          // `max-w-2xl`; wrapping in a flex centring container puts it
+          // mid-column — the page is no longer fighting the picker's
+          // left-aligned column when there's nothing else on the page.
+          <div className="flex justify-center pt-2">
+            <GrantResultCard
+              url={grantResult.url}
+              invoiceCount={grantResult.invoiceCount}
+              totalAmount={grantResult.totalAmount}
+              symbol={grantResult.symbol}
+              mintLabel={grantResult.mintLabel}
+              skippedCount={grantResult.skippedCount}
+              onReset={resetGrant}
+            />
+          </div>
         ) : (
-          <>
+          <div className="max-w-3xl">
             <div className="mt-9">
               <PresetPills
                 activePresetId={activePresetId}
@@ -450,10 +498,81 @@ export default function CompliancePage() {
             </div>
 
             <HowThisWorksNote />
-          </>
+          </div>
         )}
       </div>
     </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// BackToActivityLink — sleek "← Activity" affordance at the top-left
+// of the content column. Renders as a real <Link> so middle-click /
+// cmd-click open in a new tab, but intercepts plain clicks to play
+// the surface fade-out before the route swap (set by `onLeave`).
+//
+// The chevron does a small slide-left on hover (3px, 200ms ease-out)
+// to telegraph the "go back" direction without being theatrical. The
+// label uses the same mono-uppercase chip language as the rest of the
+// app's secondary nav cues.
+// ---------------------------------------------------------------------------
+
+function BackToActivityLink({ onLeave }: { onLeave: () => void }) {
+  return (
+    <Link
+      href="/dashboard"
+      onClick={(e) => {
+        // Allow modifier-clicks (open in new tab) to fall through to
+        // the browser's default navigation. Only intercept the plain
+        // primary-button click — that's the path that should fade.
+        if (
+          e.metaKey ||
+          e.ctrlKey ||
+          e.shiftKey ||
+          e.altKey ||
+          (e as any).button === 1
+        ) {
+          return;
+        }
+        e.preventDefault();
+        onLeave();
+      }}
+      aria-label="Back to Activity"
+      className={[
+        "group inline-flex items-center gap-2.5",
+        "mt-1 mb-7",
+        "font-mono text-[10.5px] tracking-[0.16em] uppercase",
+        "text-ink/55 hover:text-ink",
+        "transition-colors duration-200",
+        "focus:outline-none focus-visible:text-ink",
+      ].join(" ")}
+    >
+      <span
+        aria-hidden
+        className={[
+          "inline-flex items-center justify-center w-[18px] h-[18px]",
+          "rounded-full border border-line/80",
+          "transition-[transform,border-color,background-color] duration-200 ease-out",
+          "group-hover:-translate-x-[3px] group-hover:border-ink/60 group-hover:bg-paper-3",
+          "group-focus-visible:-translate-x-[3px] group-focus-visible:border-ink/60",
+        ].join(" ")}
+      >
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M6.5 2.5L3 5l3.5 2.5" />
+        </svg>
+      </span>
+      <span>Activity</span>
+    </Link>
   );
 }
 

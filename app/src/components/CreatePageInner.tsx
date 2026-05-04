@@ -18,8 +18,9 @@ import {
   type RegistrationStep,
   type StepStatus,
 } from "@/components/RegistrationModal";
-import { CreateModeSelector } from "@/components/CreateModeSelector";
+import { CreateModeSelector, type CreateMode } from "@/components/CreateModeSelector";
 import { PayrollFlow } from "@/components/PayrollFlow";
+import { NewProductFlow } from "@/components/NewProductFlow";
 import { PublishingModal } from "@/components/PublishingModal";
 import { VeilDescentMark } from "@/components/VeilDescentMark";
 import { getOrCreateClient, ensureRegistered, ensureReceiverKeyAligned } from "@/lib/umbra";
@@ -50,7 +51,7 @@ import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
  * imports the no-prop wrapper from page.tsx.
  */
 
-type Mode = "invoice" | "payroll" | null;
+type Mode = CreateMode | null;
 
 // How long after click before form unmounts. Must be ≥ form-exit-anim
 // duration (380ms below) so the user sees the exit complete. Below this
@@ -120,7 +121,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
     commitment: "pending",
   });
 
-  function handleSelectMode(next: "invoice" | "payroll") {
+  function handleSelectMode(next: CreateMode) {
     if (exitTimeoutRef.current !== null) {
       window.clearTimeout(exitTimeoutRef.current);
       exitTimeoutRef.current = null;
@@ -359,7 +360,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
           ]
             .filter(Boolean)
             .join(" ")}
-          aria-label={mode === "invoice" ? "Create invoice" : "Run payroll"}
+          aria-label={modeAriaLabel(mode)}
         >
           <div className="max-w-[1400px] mx-auto px-6 md:px-8 pt-12 md:pt-16">
             {/* Back to picker — big bare chevron, no label. Hover lifts
@@ -402,7 +403,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
             )}
           </div>
 
-          {mode === "invoice" ? (
+          {mode === "invoice" && (
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-8 md:mt-10 pb-32">
               {!wallet.connected ? (
                 <div className="max-w-lg">
@@ -430,9 +431,24 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
                 </div>
               )}
             </div>
-          ) : (
+          )}
+
+          {mode === "payroll" && (
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
               <PayrollFlow />
+            </div>
+          )}
+
+          {/* Storefront mode embeds the NewProductFlow component used by
+              the standalone /products/new route. The flow owns its own
+              internal state — the chevron-back above unmounts it and
+              discards that state, matching invoice/payroll's "abandon
+              and pick something else" feel.
+              (Private-transfer / gift mode was removed 2026-05-04 — see
+              docs/roadmap.md for reasoning.) */}
+          {mode === "product" && (
+            <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
+              <NewProductFlow />
             </div>
           )}
         </section>
@@ -563,6 +579,25 @@ function SuccessLayout({ result }: { result: InvoiceResult }) {
 }
 
 /* ──────────────── helpers (unchanged from the prior version) ──────────────── */
+
+/**
+ * aria-label for the mode section. We branch by mode so the assistive
+ * tech announcement is specific (matters more in /create than most
+ * surfaces because the form swap is non-routed and the section heading
+ * is visually replaced rather than re-rendered with a different H1).
+ */
+function modeAriaLabel(mode: Mode): string {
+  switch (mode) {
+    case "invoice":
+      return "Create invoice";
+    case "payroll":
+      return "Run payroll";
+    case "product":
+      return "Create a storefront";
+    default:
+      return "";
+  }
+}
 
 function formatTotalForDisplay(units: bigint, decimals: number, symbol: string): string {
   const divisor = 10n ** BigInt(decimals);

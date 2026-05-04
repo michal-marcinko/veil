@@ -3,16 +3,32 @@
 import { useEffect, useState } from "react";
 
 /**
- * Two-card picker for the /create flow. The page is the choreographer —
+ * Three-card picker for the /create flow. The page is the choreographer —
  * this component just renders the cards and reports the selection upward.
  *
- * Cards mount with a tiny stagger (Apple-style: read both, *then* commit
- * to one) and answer to a short hover-lift. Icons are inline SVG, drawn
- * with a single stroke weight so they sit comfortably next to Boska
- * display type without looking pictographic.
+ * All three tiles (Invoice, Payroll, Storefront) use the same in-page
+ * mode swap: clicking calls `onSelect`, the picker fades out, and the
+ * corresponding form takes the page — with a chevron-up "back to
+ * picker" affordance at the top. The flow components live in
+ * `src/components/` and are also rendered by their standalone routes
+ * (e.g. `/products/new`) so direct hits still work.
+ *
+ * Private transfer was removed from the picker on 2026-05-04 — it's
+ * strictly a subset of Payroll's claim-link path (single recipient ==
+ * one-row payroll) and adding it as a fourth tile diluted the B2B
+ * positioning. The /send and /gift/[token] routes remain alive in the
+ * codebase but are unlinked from the main flow. See
+ * `docs/roadmap.md` for the full reasoning.
+ *
+ * Cards mount with a tiny stagger (Apple-style: read all three, *then*
+ * commit to one). Icons are inline SVG drawn against the same
+ * page+veil silhouette across variants — only the figures inside the
+ * page swap so the marks read as a family.
  */
+export type CreateMode = "invoice" | "payroll" | "product";
+
 export interface CreateModeSelectorProps {
-  onSelect: (mode: "invoice" | "payroll") => void;
+  onSelect: (mode: CreateMode) => void;
 }
 
 export function CreateModeSelector({ onSelect }: CreateModeSelectorProps) {
@@ -42,6 +58,14 @@ export function CreateModeSelector({ onSelect }: CreateModeSelectorProps) {
         body="Pay many recipients at once, from a CSV."
         icon={<VeilMark variant="batch" />}
         onClick={() => onSelect("payroll")}
+      />
+      <ModeCard
+        index={2}
+        mounted={mounted}
+        title="Storefront"
+        body="Publish a product. Customers buy from one URL, any time."
+        icon={<VeilMark variant="product" />}
+        onClick={() => onSelect("product")}
       />
     </div>
   );
@@ -111,12 +135,18 @@ function ModeCard({
    register the figure(s), then a 1.1s ease-out-expo descent drops the
    veil to cover them. On un-hover: snappy 220ms retraction so leaving
    the card doesn't drag.
-   The two variants differ only in the figures group inside the page:
-     - single → one person bust (Invoice)
-     - batch  → three figures in a row (Payroll)
+   The four variants differ only in the figures group inside the page:
+     - single   → one person bust            (Invoice)
+     - batch    → three figures in a row     (Payroll)
+     - transfer → sealed envelope + wax seal (Private transfer)
+     - product  → tag with circular hole     (Storefront)
    ───────────────────────────────────────────────────────────────────── */
-function VeilMark({ variant }: { variant: "single" | "batch" }) {
-  const ns = variant; // "single" | "batch" — namespaces all SVG-internal IDs
+function VeilMark({
+  variant,
+}: {
+  variant: "single" | "batch" | "transfer" | "product";
+}) {
+  const ns = variant; // namespaces all SVG-internal IDs
   return (
     <span className="relative inline-flex w-16 h-16 -ml-1" aria-hidden="true">
       <svg viewBox="0 0 512 512" className="w-full h-full" aria-hidden="true">
@@ -184,8 +214,7 @@ function VeilMark({ variant }: { variant: "single" | "batch" }) {
 
         {/* PAGE CONTENT (clipped to page outline) */}
         <g clipPath={`url(#pageClip-${ns})`}>
-          {/* Figures — what the veil will conceal on hover */}
-          {variant === "single" ? (
+          {variant === "single" && (
             <g>
               <circle cx="259" cy="155" r="28" stroke="#1A1814" strokeWidth="5.2" fill="none" />
               <path
@@ -193,7 +222,9 @@ function VeilMark({ variant }: { variant: "single" | "batch" }) {
                 stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" strokeLinejoin="round" fill="none"
               />
             </g>
-          ) : (
+          )}
+
+          {variant === "batch" && (
             <g>
               {/* Left figure */}
               <circle cx="192" cy="160" r="18" stroke="#1A1814" strokeWidth="5.2" fill="none" />
@@ -216,7 +247,62 @@ function VeilMark({ variant }: { variant: "single" | "batch" }) {
             </g>
           )}
 
-          {/* Lower line items — always visible (sender's records) */}
+          {variant === "transfer" && (
+            <g>
+              {/* Sealed envelope. Body rect + closed-flap V meeting at
+                  the wax-seal dot in the center. Reads instantly as
+                  "private letter / sealed transfer" — the dot
+                  reinforces the sealed-not-yet-opened semantic.
+                  Coordinates tuned for 64px display size; thicker
+                  strokes than figures because thinner lines vanish
+                  when the veil descends in reduced-motion mode. */}
+              <rect
+                x="194" y="178" width="130" height="86"
+                stroke="#1A1814" strokeWidth="5.2" fill="none"
+                strokeLinejoin="round"
+              />
+              {/* Closed top flap — V shape from the two top corners
+                  down to the seal point at the centre of the body. */}
+              <path
+                d="M194 178 L259 232 L324 178"
+                stroke="#1A1814"
+                strokeWidth="5.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+              {/* Wax seal — slightly larger than the figure-page
+                  reading dots so it carries weight as the focal point. */}
+              <circle cx="259" cy="232" r="7.5" fill="#1A1814" />
+            </g>
+          )}
+
+          {variant === "product" && (
+            <g>
+              {/* Price-tag silhouette pointing right + a small "$" carved
+                  inside reads instantly as "payment". The tag's
+                  punched hole sits on the left so the visual mass leans
+                  toward the chevron — same diagonal energy the page-fold
+                  in the lower-right of the icon already carries. */}
+              <path
+                d="M196 152 H260 L322 213 L260 274 H196 Z"
+                stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" strokeLinejoin="round" fill="none"
+              />
+              {/* Punch hole */}
+              <circle cx="218" cy="213" r="9" stroke="#1A1814" strokeWidth="4.8" fill="none" />
+              {/* Inline $ — kept as two arcs + a vertical, not a glyph,
+                  so it survives at any rendering size without font fallback */}
+              <path
+                d="M278 184 C268 184 263 192 263 198 C263 204 268 210 281 213 C294 216 299 222 299 228 C299 234 294 242 284 242"
+                stroke="#1A1814" strokeWidth="4.8" strokeLinecap="round" fill="none"
+              />
+              <path d="M281 178 V248" stroke="#1A1814" strokeWidth="4.8" strokeLinecap="round" fill="none" />
+            </g>
+          )}
+
+          {/* Lower line items — always visible (sender's records).
+              Shared across all variants so the marks feel like a
+              family rather than four unrelated illustrations. */}
           <g>
             <path d="M161 297 H213" stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" fill="none" />
             <path d="M161 317 H219" stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" fill="none" />
