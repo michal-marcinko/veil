@@ -77,7 +77,9 @@ describe("Dashboard page", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/Private USDC balance/i)).toBeInTheDocument();
+      // Mint-agnostic match — env default is wSOL on devnet (post-2026-05-04
+       // alignment), USDC on mainnet, possibly other tokens in the future.
+       expect(screen.getByText(/Private (USDC|SOL|wSOL) balance/i)).toBeInTheDocument();
     });
 
     // No red error banner — there should be no element containing the exact
