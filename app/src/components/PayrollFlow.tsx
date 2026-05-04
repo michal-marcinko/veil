@@ -529,6 +529,34 @@ export function PayrollFlow() {
       await ensureReceiverKeyAligned(client);
       setRegOpen(false);
 
+      // Always make sure we know each recipient's registration status
+      // before the loop starts. Without this, an undetected unregistered
+      // recipient falls through to the direct-send path and Umbra rejects
+      // it with 'Receiver is not registered'. Cached detection (set when
+      // the user clicked the chip earlier) is reused; otherwise we run
+      // the probe inline now. RPC-only, no popups.
+      let activeDetection = detection;
+      if (!activeDetection) {
+        setDetecting(true);
+        try {
+          const results = await checkRecipientsRegistration(
+            client,
+            parsed.rows.map((r) => r.wallet),
+          );
+          const rowStatuses = results.map((r) => r.status);
+          const unregisteredIndexes: number[] = [];
+          const unknownIndexes: number[] = [];
+          rowStatuses.forEach((s, idx) => {
+            if (s === "unregistered") unregisteredIndexes.push(idx);
+            if (s === "unknown") unknownIndexes.push(idx);
+          });
+          activeDetection = { rowStatuses, unregisteredIndexes, unknownIndexes };
+          setDetection(activeDetection);
+        } finally {
+          setDetecting(false);
+        }
+      }
+
       const encryptedBalance = await getEncryptedBalance(client, USDC_MINT.toBase58()).catch(
         () => 0n,
       );
@@ -544,7 +572,7 @@ export function PayrollFlow() {
       for (let i = 0; i < parsed.rows.length; i++) {
         const row = parsed.rows[i];
         const prepared = prepareRow(row, i);
-        const status = detection?.rowStatuses[i];
+        const status = activeDetection.rowStatuses[i];
 
         if (status === "unregistered") {
           try {
