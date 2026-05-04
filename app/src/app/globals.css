@@ -178,6 +178,96 @@
     @apply h-px w-full bg-line;
   }
 
+  /* ─── Document Canvas redesign (2026-05-04) ────────────────────── */
+
+  /* Display-size inline-editable input. Real <input>, no border, looks
+     like body text until focus, then a 1.5px ink underline animates in.
+     Used for the "From" and "Bill to" headlines on /create. */
+  .canvas-display-input {
+    @apply w-full bg-transparent border-0 outline-none
+           text-ink placeholder:text-line-2/70
+           font-sans font-medium
+           text-[40px] md:text-[48px]
+           leading-[1.04] tracking-[-0.025em]
+           pb-1 transition-[box-shadow] duration-200;
+    box-shadow: inset 0 -1px 0 transparent;
+  }
+  .canvas-display-input:focus {
+    box-shadow: inset 0 -1.5px 0 #1c1712;
+  }
+
+  /* Optional-detail chips below the items table. Filled = real value,
+     empty = dashed click-to-add. Both behave as buttons (chip row owns
+     the click → expand inline editor in InvoiceForm). */
+  .canvas-chip {
+    @apply inline-flex items-center gap-2
+           px-3.5 py-2 rounded-full
+           font-sans text-[13px] text-ink
+           bg-ink/5 hover:bg-ink/10
+           transition-colors duration-150
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/15;
+  }
+  .canvas-chip-empty {
+    @apply bg-transparent text-muted hover:text-ink
+           border border-dashed border-line;
+  }
+  .canvas-chip-empty:hover {
+    @apply border-line-2;
+  }
+
+  /* Sticky canvas bar — fixed to viewport bottom across all 3 states.
+     backdrop-blur preserves the feeling of paper continuing underneath. */
+  .canvas-action-bar {
+    background: rgba(241, 236, 224, 0.86);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-top: 1px solid rgba(28, 23, 18, 0.08);
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    padding-top: 14px;
+  }
+
+  /* Mono meta tagline on the left of the compose-state bar. */
+  .canvas-bar-meta {
+    @apply font-mono text-[10.5px] tracking-[0.18em] uppercase text-muted;
+  }
+
+  /* Pulsing indicator in publishing state. */
+  .canvas-bar-pulse {
+    @apply inline-block w-2 h-2 rounded-full bg-gold;
+    animation: slow-pulse 1.4s ease-in-out infinite;
+  }
+
+  /* Pay-link strip (success state) — quiet code-style fill, truncates
+     long URLs with ellipsis. */
+  .canvas-pay-link-strip {
+    @apply bg-ink/5 rounded px-3.5 py-2.5
+           font-mono text-[12px] text-ink/75
+           truncate min-w-0;
+  }
+
+  /* Inline kbd hint inside primary buttons (⌘↵, ⌘C). */
+  .canvas-kbd {
+    @apply font-mono text-[10.5px] px-1.5 py-0.5 rounded
+           bg-paper/20 text-paper/90 ml-1;
+  }
+
+  /* Page-content fade for publishing/success states (applied via class
+     toggle on the form wrapper, not the bar). */
+  .canvas-page-fade {
+    @apply transition-opacity duration-500;
+    opacity: 0.55;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .canvas-display-input,
+    .canvas-bar-pulse,
+    .canvas-page-fade {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+
+  /* ─── /Document Canvas redesign ────────────────────────────────── */
+
 }
 
 @layer utilities {
@@ -194,6 +284,49 @@
   @keyframes reveal {
     from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Row state-transition flash — pending → paid.
+     The InvoiceRow toggles `.row-flash` for ~600ms when its status
+     prop changes from pending to paid; the row briefly washes from
+     bg-paper-2 (cream-2, slightly darker) back to the resting
+     bg-paper. Reduced-motion: skip the wash entirely. */
+  @keyframes row-flash {
+    0% { background-color: #e7e0cf; }   /* paper-2 */
+    100% { background-color: transparent; }
+  }
+  .row-flash {
+    animation: row-flash 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Status-dot crossfade — gold → ink over 400ms.
+     Pairs with .row-flash; the StatusDot consumes this class to play
+     the colour swap. Implemented as a keyframe (not just transition)
+     so it always fires even when the colour-class swap has already
+     committed via state. */
+  @keyframes status-dot-flash {
+    0% { background-color: #6a2420; }   /* gold (oxblood) */
+    100% { background-color: #1c1712; } /* ink */
+  }
+  .status-dot-flash {
+    animation: status-dot-flash 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .row-flash,
+    .status-dot-flash,
+    .reveal,
+    .animate-fade-up {
+      animation: none !important;
+    }
+  }
+
+  /* Skeleton loading row — bg-paper-2 with a slow pulse. Used during
+     the initial fetch to hold the layout open without the cartoonish
+     spinner-on-blank-page anti-pattern (NN/G recommends skeleton over
+     spinner for content lists). */
+  .skeleton-bar {
+    @apply bg-paper-2 rounded-[2px] animate-pulse;
   }
 }
 
