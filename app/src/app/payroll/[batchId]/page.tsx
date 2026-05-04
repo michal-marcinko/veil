@@ -7,12 +7,25 @@ import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { fetchInvoicesByCreator } from "@/lib/anchor";
 import { PAYMENT_SYMBOL } from "@/lib/constants";
+import { getOrCreateMetadataMasterSig } from "@/lib/encryption";
+import {
+  buildScopedPayrollAuditUrl,
+  generateScopedGrant,
+  type InScopeInvoice,
+} from "@/lib/auditor-links";
 
 interface BatchInvoice {
   pda: string;
   metadataUri: string;
+  metadataHash: Uint8Array;
   status: "pending" | "paid" | "expired" | "canceled" | string;
   createdAt: number;
+}
+
+interface AuditorLinkPreview {
+  url: string;
+  invoiceCount: number;
+  skippedCount: number;
 }
 
 export default function BatchDashboardPage() {
@@ -24,6 +37,13 @@ export default function BatchDashboardPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  // Auditor link state — gated behind a click so we don't pop a wallet
+  // signature unless the user actually wants to share the batch.
+  const [generatingAudit, setGeneratingAudit] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditPreview, setAuditPreview] = useState<AuditorLinkPreview | null>(null);
+  const [auditCopied, setAuditCopied] = useState(false);
 
   async function refresh() {
     if (!wallet.publicKey) return;
@@ -37,6 +57,10 @@ export default function BatchDashboardPage() {
         .map((a: any) => ({
           pda: a.publicKey.toBase58(),
           metadataUri: a.account.metadataUri as string,
+          metadataHash:
+            a.account.metadataHash instanceof Uint8Array
+              ? a.account.metadataHash
+              : new Uint8Array(a.account.metadataHash ?? []),
           status: Object.keys(a.account.status)[0],
           createdAt: Number(a.account.createdAt),
         }))
@@ -75,6 +99,55 @@ export default function BatchDashboardPage() {
     setTimeout(() => setCopiedIdx(null), 2200);
   }
 
+  async function handleGenerateAuditorLink() {
+    if (!wallet.publicKey) return;
+    if (invoices.length === 0) {
+      setAuditError("No invoices in this batch to share.");
+      return;
+    }
+    setGeneratingAudit(true);
+    setAuditError(null);
+    setAuditPreview(null);
+    try {
+      // Master sig — cached after first use, so this is a no-op popup most
+      // of the time. Used in-process only; never embedded in the URL.
+      const masterSig = await getOrCreateMetadataMasterSig(
+        wallet as any,
+        wallet.publicKey.toBase58(),
+      );
+      const inScope: InScopeInvoice[] = invoices.map((inv) => ({
+        invoicePda: inv.pda,
+        metadataUri: inv.metadataUri,
+        metadataHash: inv.metadataHash,
+      }));
+      const payload = await generateScopedGrant({ masterSig, invoices: inScope });
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      const url = buildScopedPayrollAuditUrl({ origin, batchId, payload });
+      setAuditPreview({
+        url,
+        invoiceCount: payload.invoiceUris.length,
+        skippedCount: invoices.length - payload.invoiceUris.length,
+      });
+    } catch (err: any) {
+      setAuditError(err?.message ?? String(err));
+    } finally {
+      setGeneratingAudit(false);
+    }
+  }
+
+  async function copyAuditUrl() {
+    if (!auditPreview) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(auditPreview.url);
+      }
+      setAuditCopied(true);
+      setTimeout(() => setAuditCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (!wallet.connected) {
     return (
       <Shell>
@@ -110,6 +183,72 @@ export default function BatchDashboardPage() {
         <StatCard label="Invoices" value={stats.total.toString()} />
         <StatCard label="Paid" value={stats.paid.toString()} />
         <StatCard label="Pending" value={stats.pending.toString()} />
+      </div>
+
+      {/* Auditor link generation — opt-in to avoid popping wallet sig until needed. */}
+      <div className="mb-10 border border-line rounded-[3px] p-5 md:p-6 reveal">
+        <div className="flex items-baseline justify-between gap-4 flex-wrap">
+          <div>
+            <span className="eyebrow">Share with auditor</span>
+            <p className="mt-2 text-[13px] text-ink/70 max-w-xl leading-relaxed">
+              Generate a link your auditor can open to see this batch&apos;s
+              decrypted rows. The decryption key is fresh per grant and
+              embedded in the URL fragment — it never leaves the browser
+              until you copy it.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleGenerateAuditorLink}
+            disabled={generatingAudit || invoices.length === 0}
+            className="btn-primary text-[13px] px-5 py-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {generatingAudit ? "Generating…" : "Generate auditor link"}
+          </button>
+        </div>
+
+        {auditError && (
+          <div className="mt-5 flex items-start gap-3 border-l-2 border-brick pl-3 py-1">
+            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+            <span className="text-[13px] text-ink leading-relaxed flex-1">{auditError}</span>
+          </div>
+        )}
+
+        {auditPreview && (
+          <div className="mt-5 border-t border-line pt-5">
+            <div className="flex items-baseline justify-between mb-3">
+              <span className="eyebrow text-sage">Auditor link</span>
+              <span className="font-mono text-[11px] text-dim tnum">
+                {String(auditPreview.invoiceCount).padStart(2, "0")} invoice
+                {auditPreview.invoiceCount === 1 ? "" : "s"}
+                {auditPreview.skippedCount > 0
+                  ? ` · ${auditPreview.skippedCount} skipped`
+                  : ""}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                readOnly
+                value={auditPreview.url}
+                onFocus={(e) => e.currentTarget.select()}
+                onClick={(e) => e.currentTarget.select()}
+                className="flex-1 input-editorial font-mono text-[12px] select-all"
+                aria-label="Auditor URL"
+              />
+              <button
+                type="button"
+                onClick={copyAuditUrl}
+                className="shrink-0 px-4 py-2 border border-line rounded-[3px] font-mono text-[11px] tracking-[0.12em] uppercase text-ink hover:bg-ink hover:text-paper transition-colors"
+              >
+                {auditCopied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted">
+              Send over a trusted channel (Signal, encrypted email). Anyone who
+              has the link can read these rows; treat the URL as the secret.
+            </p>
+          </div>
+        )}
       </div>
 
       {error && (
