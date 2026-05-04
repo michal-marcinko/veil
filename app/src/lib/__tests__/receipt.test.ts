@@ -5,6 +5,7 @@ import {
   buildReceipt,
   encodeReceipt,
   decodeReceipt,
+  parseReceiptInput,
   verifyReceiptSignature,
   canonicalReceiptBytes,
   type PaymentReceipt,
@@ -149,5 +150,69 @@ describe("receipt module", () => {
 
   it("decodeReceipt throws on malformed blob", () => {
     expect(() => decodeReceipt("!!!not-a-valid-blob!!!")).toThrow();
+  });
+
+  describe("parseReceiptInput", () => {
+    async function makeSigned(): Promise<{ signed: SignedReceipt; pda: string }> {
+      const priv = ed.utils.randomPrivateKey();
+      const pub = await ed.getPublicKeyAsync(priv);
+      const pda = fakePda();
+      const receipt = buildReceipt({
+        invoicePda: pda,
+        payerPubkey: bs58.encode(pub),
+        markPaidTxSig: fakeSig(),
+        timestamp: 1_713_650_000,
+        invoiceHash: fakePda(),
+      });
+      const signed = await signWithKey(receipt, priv);
+      return { signed, pda };
+    }
+
+    it("accepts a full verifier URL and surfaces the path PDA", async () => {
+      const { signed, pda } = await makeSigned();
+      const blob = encodeReceipt(signed);
+      const url = `https://veil.app/receipt/${pda}#${blob}`;
+      const parsed = parseReceiptInput(url);
+      expect(parsed.signed).toEqual(signed);
+      expect(parsed.pathPda).toBe(pda);
+    });
+
+    it("accepts a raw base64url blob with no URL framing", async () => {
+      const { signed } = await makeSigned();
+      const blob = encodeReceipt(signed);
+      const parsed = parseReceiptInput(blob);
+      expect(parsed.signed).toEqual(signed);
+      expect(parsed.pathPda).toBeNull();
+    });
+
+    it("accepts a fragment with leading #", async () => {
+      const { signed } = await makeSigned();
+      const blob = encodeReceipt(signed);
+      const parsed = parseReceiptInput(`#${blob}`);
+      expect(parsed.signed).toEqual(signed);
+      expect(parsed.pathPda).toBeNull();
+    });
+
+    it("trims whitespace around the input", async () => {
+      const { signed } = await makeSigned();
+      const blob = encodeReceipt(signed);
+      const parsed = parseReceiptInput(`   ${blob}\n`);
+      expect(parsed.signed).toEqual(signed);
+    });
+
+    it("throws on empty input", () => {
+      expect(() => parseReceiptInput("")).toThrow(/empty/i);
+      expect(() => parseReceiptInput("   ")).toThrow(/empty/i);
+    });
+
+    it("throws on URL with no fragment", () => {
+      expect(() =>
+        parseReceiptInput("https://veil.app/receipt/abcdef"),
+      ).toThrow(/missing/i);
+    });
+
+    it("throws on malformed URL", () => {
+      expect(() => parseReceiptInput("https://[bad")).toThrow();
+    });
   });
 });
