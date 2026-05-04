@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
@@ -9,6 +9,9 @@ import {
   type RegistrationStep,
   type StepStatus,
 } from "@/components/RegistrationModal";
+import { PayrollCanvasBar, type PayrollCanvasBarState } from "@/components/PayrollCanvasBar";
+import { PayrollPublishingModal } from "@/components/PayrollPublishingModal";
+import { VeilDescentMark } from "@/components/VeilDescentMark";
 import { parsePayrollCsv, parseAmountToBaseUnits, type PayrollRow } from "@/lib/csv";
 import {
   getOrCreateClient,
@@ -50,36 +53,41 @@ import {
 } from "@/lib/payroll-claim-links";
 
 /**
- * PayrollFlow — self-contained outgoing-payroll experience.
+ * PayrollFlow — Document Canvas redesign (2026-05-04).
  *
- * Encapsulates: wallet gate, CSV intake, funding-mode selector, run dispatch,
- * registration modal, per-row results ledger, signed-packet export.
+ * The form IS the canvas: continuous editorial layout, no card chrome.
+ * Display-size "Company / payer" headline; CSV textarea with quiet
+ * frame; chip row for advanced options (override funding, run a
+ * registration check); inline run ledger that fills as the run
+ * executes; collapsible explorer comparison ("Why is this private?")
+ * for skeptics + judges.
  *
- * Designed to be embedded inline (e.g. inside /create's narrow column) OR
- * rendered standalone on /payroll/outgoing — the layout is single-column
- * vertical so it works in any width down to ~max-w-3xl.
+ * Persistent surfaces:
+ *  - PayrollCanvasBar (sticky bottom, morphs across compose / running
+ *    / success).
+ *  - PayrollPublishingModal (full-screen overlay during the run + sign
+ *    flow — never disappears across Phantom popups).
  *
- * Animation register matches /create: 700ms cubic-bezier(0.16, 1, 0.3, 1)
- * (Apple ease-out-expo) per-section reveals, staggered. prefers-reduced-motion
- * short-circuits to final state.
+ * Receipt-packet signing is bundled into the publishing flow: after
+ * the last payment settles, the packet is built and signed
+ * automatically. One signed packet, one PDF, one JSON — all dropped
+ * to disk before the modal closes.
  */
 
 type RunMode = "auto" | "shielded" | "public";
+type RunPhase = "idle" | "sending" | "signing";
+type ChipKey = null | "funding" | "registration";
 
 interface PayrollRunRow extends PayrollPacketRow {
   amountDisplay: string;
-  /** Set when this row was paid via the claim-link path. The URL must be
-   *  shared with the recipient (downloadable CSV or PDF). */
+  /** Set when this row was paid via the claim-link path. */
   claimUrl?: string;
-  /** Set when this row used the claim-link path — surfaced in the
-   *  ledger so the employer knows extra setup happened. */
+  /** Set when this row used the claim-link path. */
   registrationStatus?: RegistrationStatus;
 }
 
 interface RegistrationDetectionResult {
-  /** Aligned 1:1 with parsed.rows. */
   rowStatuses: RegistrationStatus[];
-  /** Indexes of rows that need claim links. */
   unregisteredIndexes: number[];
   unknownIndexes: number[];
 }
@@ -97,27 +105,29 @@ export function PayrollFlow() {
   const [csvText, setCsvText] = useState("");
   const [mode, setMode] = useState<RunMode>("auto");
   const [running, setRunning] = useState(false);
-  const [signingPacket, setSigningPacket] = useState(false);
+  const [phase, setPhase] = useState<RunPhase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [rows, setRows] = useState<PayrollRunRow[]>([]);
   const [packet, setPacket] = useState<PayrollPacket | null>(null);
   const [signedPacket, setSignedPacket] = useState<SignedPayrollPacket | null>(null);
   const [packetUrl, setPacketUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
+  const [packetCopied, setPacketCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [regOpen, setRegOpen] = useState(false);
   const [regSteps, setRegSteps] = useState<Record<RegistrationStep, StepStatus>>({
     init: "pending",
     x25519: "pending",
     commitment: "pending",
   });
-
-  // Registration-detection state. Populated by handleDetectRegistration
-  // (called after CSV is valid, before payroll run starts). Lets us
-  // show the per-row status BEFORE the employer commits to the run, so
-  // the cost of unregistered recipients (≈ 0.01 SOL each) is upfront.
   const [detection, setDetection] = useState<RegistrationDetectionResult | null>(null);
   const [detecting, setDetecting] = useState(false);
+
+  const [openChip, setOpenChip] = useState<ChipKey>(null);
+  // Snapshot of total count at run-start, so the modal sub-progress
+  // doesn't jitter if csvText is somehow modified mid-run (it isn't,
+  // because the form is fade-locked while running, but defensive).
+  const [runTotalCount, setRunTotalCount] = useState(0);
 
   const parsed = useMemo(() => parsePayrollCsv(csvText), [csvText]);
   const total = useMemo(() => {
@@ -129,20 +139,52 @@ export function PayrollFlow() {
     return sum;
   }, [parsed.rows]);
 
+  /* ───────────────────── derived state for surfaces ───────────────────── */
+
+  const totalDisplay = `${formatPayrollAmount(total, PAYMENT_DECIMALS)} ${PAYMENT_SYMBOL}`;
+  const rowCount = parsed.rows.length;
+  const canRun =
+    !running && wallet.connected && rowCount > 0 && companyName.trim().length > 0;
+  const inSuccessState = !running && phase === "idle" && packetUrl !== null;
+
+  const canvasBarState: PayrollCanvasBarState = inSuccessState
+    ? {
+        kind: "success",
+        packetUrl,
+        paymentCount: rows.filter((r) => r.status === "paid").length,
+        totalDisplay,
+        copied: packetCopied,
+        onCopy: () => copyPacketUrl(),
+        onDownloadClaimLinks: rows.some((r) => r.claimUrl)
+          ? downloadClaimLinksCsv
+          : undefined,
+      }
+    : running
+      ? {
+          kind: "running",
+          sentCount: rows.length,
+          totalCount: runTotalCount || rowCount,
+          phase: phase === "signing" ? "signing" : "sending",
+          awaitingWallet: true,
+        }
+      : {
+          kind: "compose",
+          rowCount,
+          totalDisplay,
+          canRun,
+        };
+
+  /* ─────────────────────────── run-payroll ─────────────────────────── */
+
   /**
-   * Read-only on-chain query: which recipients are already Umbra-
-   * registered, and which need a claim link? Cheap (no popups, just RPC
-   * reads). Result drives the inline preview status chips and the
-   * "extra setup cost" disclosure.
+   * Read-only on-chain probe per row. Drives the registration chip
+   * preview ("X need claim links"). Cheap (no popups, just RPC reads).
    */
   async function handleDetectRegistration() {
     if (!wallet.publicKey || parsed.rows.length === 0) return;
     setDetecting(true);
     setError(null);
     try {
-      // Re-uses the user's already-loaded Umbra client. The querier
-      // accepts any address — we don't need to spin up another client
-      // per recipient.
       const client = await getOrCreateClient(wallet as any);
       const results = await checkRecipientsRegistration(
         client,
@@ -163,16 +205,12 @@ export function PayrollFlow() {
     }
   }
 
-  // Whenever the CSV changes the previous detection is stale.
-  // We invalidate eagerly via this callback rather than useEffect
-  // so the user can't accidentally re-use a cached detection over
-  // a different recipient set.
   function onCsvTextChange(next: string) {
     setCsvText(next);
     setDetection(null);
   }
 
-  async function runPayroll() {
+  async function handleSubmit() {
     if (!wallet.publicKey) {
       setError("Connect wallet first.");
       return;
@@ -187,12 +225,15 @@ export function PayrollFlow() {
     }
 
     setRunning(true);
+    setPhase("sending");
+    setRunTotalCount(parsed.rows.length);
     setError(null);
     setNotice(null);
     setRows([]);
     setPacket(null);
     setSignedPacket(null);
     setPacketUrl(null);
+    setPacketCopied(false);
 
     const batchId = generatePrivatePayrollBatchId();
     const resultRows: PayrollRunRow[] = [];
@@ -226,15 +267,7 @@ export function PayrollFlow() {
         const prepared = prepareRow(row, i);
         const status = detection?.rowStatuses[i];
 
-        // Branch A: recipient is unregistered → claim-link path. We
-        // generate a one-shot shadow account, fund it, register it,
-        // deposit the payout, then bake the URL into the run result.
-        // The sender pays for everything; the recipient just clicks.
         if (status === "unregistered") {
-          setRows([
-            ...resultRows,
-            { ...prepared, status: "paid", txSignature: null, error: null, registrationStatus: "unregistered" },
-          ]);
           try {
             const claimResult = await sendViaClaimLink({
               prepared,
@@ -268,13 +301,6 @@ export function PayrollFlow() {
           continue;
         }
 
-        // Branch B: recipient is registered (or detection wasn't run / was
-        // "unknown" — we optimistically attempt direct send, the SDK will
-        // throw if the recipient really has no account).
-        setRows([
-          ...resultRows,
-          { ...prepared, status: "paid", txSignature: null, error: null, registrationStatus: status },
-        ]);
         try {
           const payResult = useShieldedForRun
             ? await payInvoiceFromShielded({
@@ -310,6 +336,7 @@ export function PayrollFlow() {
         setRows([...resultRows]);
       }
 
+      // Build packet from completed rows (strip run-only fields).
       const nextPacket: PayrollPacket = {
         version: 1,
         kind: "veil.private-payroll",
@@ -319,32 +346,61 @@ export function PayrollFlow() {
         symbol: PAYMENT_SYMBOL,
         decimals: PAYMENT_DECIMALS,
         createdAt: new Date().toISOString(),
-        // Strip the run-only fields (amountDisplay, claimUrl,
-        // registrationStatus) before signing the packet — the canonical
-        // PayrollPacketRow shape is fixed by the verifier on the
-        // disclosure side, and adding fields here would invalidate
-        // existing receipts.
-        rows: resultRows.map(({ amountDisplay, claimUrl, registrationStatus, ...row }) => row),
+        rows: resultRows.map(
+          ({ amountDisplay, claimUrl, registrationStatus, ...row }) => row,
+        ),
       };
       setPacket(nextPacket);
-      setNotice("Payroll run complete. Sign one packet to create receipts and disclosure links.");
+
+      // Auto-sign + download the receipt packet as the final step. This
+      // bundles signing into the publishing flow so the user gets one
+      // continuous gate from "Run" to "Done" instead of needing a
+      // separate manual click.
+      setPhase("signing");
+      try {
+        const signed = await signPayrollPacket(nextPacket, wallet as any);
+        const blob = encodePayrollPacket(signed);
+        const url = `${window.location.origin}/payroll/packet#${blob}`;
+        setSignedPacket(signed);
+        setPacketUrl(url);
+        downloadPayrollPacketJson(signed);
+
+        const claimUrls: Record<number, string> = {};
+        resultRows.forEach((r, idx) => {
+          if (r.claimUrl) claimUrls[idx] = r.claimUrl;
+        });
+        const hasClaimUrls = Object.keys(claimUrls).length > 0;
+        if (hasClaimUrls) {
+          const [{ pdf }, { PayrollPacketPdfDocument }] = await Promise.all([
+            import("@react-pdf/renderer"),
+            import("@/lib/payrollPacketPdf"),
+          ]);
+          const pdfBlob = await pdf(
+            PayrollPacketPdfDocument({ signed, claimUrls }),
+          ).toBlob();
+          const pdfUrl = URL.createObjectURL(pdfBlob);
+          const a = document.createElement("a");
+          a.href = pdfUrl;
+          a.download = `${signed.packet.batchId}-veil-payroll-packet.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(pdfUrl);
+        } else {
+          await downloadPayrollPacketPdf(signed);
+        }
+      } catch (err: any) {
+        setError(`Packet signing failed: ${err.message ?? String(err)}`);
+      }
     } catch (err: any) {
       setRegOpen(false);
       setError(err.message ?? String(err));
     } finally {
       setRunning(false);
+      setPhase("idle");
     }
   }
 
-  /**
-   * Claim-link path: register a one-shot shadow account, fund it,
-   * deposit the payout into its encrypted balance, and return the URL
-   * Bob will click. Wraps the helpers in payroll-claim-links.ts so the
-   * sequencing + error reporting lives close to the run loop.
-   *
-   * Throws if any sub-step fails. The caller catches and marks the row
-   * as failed in the run ledger.
-   */
   async function sendViaClaimLink(args: {
     prepared: PayrollRunRow;
     payerClient: any;
@@ -355,35 +411,20 @@ export function PayrollFlow() {
     rowIndex: number;
   }): Promise<{ claimUrl: string; depositSignature: string; shadowAddress: string }> {
     const ephemeral = generateEphemeralKeypair();
-
-    // Step 1: fund the shadow with enough SOL to cover its own rent
-    // + register/deposit/withdraw fees. Single Phantom popup for Alice.
     await fundShadowAccount({
       payerWallet: args.payerWallet,
       shadowAddress: ephemeral.address,
       lamports: SHADOW_FUNDING_LAMPORTS,
       connection: args.connection,
     });
-
-    // Step 2: build an in-memory Umbra client signed by the ephemeral
-    // keypair, then run registration. No popups (the SDK uses the
-    // shadow's keypair directly).
     const shadowClient = await buildShadowClient(ephemeral.privateKey);
     await registerShadowAccount({ shadowClient });
-
-    // Step 3: deposit Alice's USDC into the shadow's encrypted balance.
-    // Signer = Alice (her ATA pays); destination = shadow. ONE Phantom
-    // popup for Alice (the deposit tx).
     const deposit = await depositToShadow({
       payerClient: args.payerClient,
       shadowAddress: ephemeral.address,
       mint: USDC_MINT.toBase58(),
       amount: BigInt(args.prepared.amount),
     });
-
-    // Step 4: build the URL Bob will click. Include the amount + sender
-    // in the fragment so the claim page renders something meaningful
-    // before Bob connects a wallet.
     const claimUrl = generateClaimUrl({
       baseUrl: typeof window !== "undefined" ? window.location.origin : "",
       batchId: args.batchId,
@@ -397,8 +438,11 @@ export function PayrollFlow() {
         amountBaseUnits: args.prepared.amount,
       },
     });
-
-    return { claimUrl, depositSignature: deposit.depositSignature, shadowAddress: ephemeral.address };
+    return {
+      claimUrl,
+      depositSignature: deposit.depositSignature,
+      shadowAddress: ephemeral.address,
+    };
   }
 
   function prepareRow(row: PayrollRow, index: number): PayrollRunRow {
@@ -424,76 +468,32 @@ export function PayrollFlow() {
     };
   }
 
-  async function signPacket() {
-    if (!packet) return;
-    setSigningPacket(true);
-    setError(null);
+  async function copyPacketUrl() {
+    if (!packetUrl) return;
     try {
-      const signed = await signPayrollPacket(packet, wallet as any);
-      const blob = encodePayrollPacket(signed);
-      const url = `${window.location.origin}/payroll/packet#${blob}`;
-      setSignedPacket(signed);
-      setPacketUrl(url);
-      downloadPayrollPacketJson(signed);
-      // If any rows used the claim-link path, build a fresh PDF that
-      // includes a "Claim links" appendix. We bypass the standard
-      // downloader (downloadPayrollPacketPdf) when claim URLs exist
-      // so we can pass them through to the PDF document — the standard
-      // downloader doesn't accept claim URLs as a parameter.
-      const claimUrls: Record<number, string> = {};
-      rows.forEach((r, idx) => {
-        if (r.claimUrl) claimUrls[idx] = r.claimUrl;
-      });
-      const hasClaimUrls = Object.keys(claimUrls).length > 0;
-      if (hasClaimUrls) {
-        const [{ pdf }, { PayrollPacketPdfDocument }] = await Promise.all([
-          import("@react-pdf/renderer"),
-          import("@/lib/payrollPacketPdf"),
-        ]);
-        const pdfBlob = await pdf(
-          PayrollPacketPdfDocument({ signed, claimUrls }),
-        ).toBlob();
-        const pdfUrl = URL.createObjectURL(pdfBlob);
-        const a = document.createElement("a");
-        a.href = pdfUrl;
-        a.download = `${signed.packet.batchId}-veil-payroll-packet.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(pdfUrl);
-      } else {
-        await downloadPayrollPacketPdf(signed);
-      }
-    } catch (err: any) {
-      setError(err.message ?? String(err));
-    } finally {
-      setSigningPacket(false);
+      await navigator.clipboard.writeText(packetUrl);
+    } catch {
+      // jsdom / non-secure contexts. Visual feedback still flips.
     }
+    setPacketCopied(true);
+    setTimeout(() => setPacketCopied(false), 2200);
   }
 
   async function copyText(key: string, text: string) {
-    await navigator.clipboard.writeText(text);
-    setCopied(key);
-    setTimeout(() => setCopied(null), 1800);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // ignore
+    }
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1800);
   }
 
-  /**
-   * Download a CSV of every claim link in the run. Lets the employer
-   * hand-deliver the URLs through whatever channel they prefer (their
-   * payroll portal, BambooHR, manual emails). Empty rows in the
-   * `claim_url` column correspond to recipients who were already
-   * registered and got paid directly — included so the file matches
-   * the run ledger 1:1 (same ordering as the input CSV).
-   */
   function downloadClaimLinksCsv() {
     const claimRows: ClaimLinkRow[] = rows.map((row) => ({
       recipient: row.recipient,
       amount: row.amountDisplay,
-      status: row.error
-        ? "failed"
-        : row.claimUrl
-          ? "claim-link"
-          : "direct",
+      status: row.error ? "failed" : row.claimUrl ? "claim-link" : "direct",
       claimUrl: row.claimUrl,
       error: row.error ?? undefined,
     }));
@@ -511,20 +511,21 @@ export function PayrollFlow() {
 
   /* ─────────────────────────────── render ─────────────────────────────── */
 
-  // Wallet gate. The gate IS the first state — we don't render an empty form.
   if (!wallet.connected) {
     return (
-      <div className="payroll-flow-reveal max-w-2xl">
-        <span className="eyebrow">Private payroll</span>
-        <h2 className="mt-3 font-display font-medium text-ink text-[40px] md:text-[52px] leading-[1.03] tracking-[-0.025em]">
-          Connect to run payroll.
-        </h2>
-        <p className="mt-6 text-[17px] md:text-[19px] text-ink/80 leading-[1.5]">
-          This mode sends private Umbra payments out to contractors. It does not
-          create invoice PDAs.
-        </p>
-        <div className="mt-8">
-          <ClientWalletMultiButton />
+      <div className="max-w-2xl">
+        <div className="payroll-flow-reveal">
+          <span className="eyebrow">Private payroll</span>
+          <h2 className="mt-3 font-sans font-medium text-ink text-[40px] md:text-[52px] leading-[1.04] tracking-[-0.025em]">
+            Connect to run payroll.
+          </h2>
+          <p className="mt-6 text-[17px] md:text-[19px] text-ink/80 leading-[1.5]">
+            This mode sends private Umbra payments to contractors. It does not
+            create invoice PDAs.
+          </p>
+          <div className="mt-8">
+            <ClientWalletMultiButton />
+          </div>
         </div>
         <PayrollFlowStyles />
       </div>
@@ -532,378 +533,414 @@ export function PayrollFlow() {
   }
 
   return (
-    <div className="max-w-3xl">
-      {/* Heading */}
-      <header className="payroll-flow-reveal" style={{ animationDelay: "0ms" }}>
-        <span className="eyebrow">Private payroll</span>
-        <h2 className="mt-3 font-display font-medium text-ink text-[40px] md:text-[52px] leading-[1.03] tracking-[-0.025em]">
-          Pay contractors without publishing salaries.
-        </h2>
-        <p className="mt-6 text-[14px] text-ink/75 leading-relaxed max-w-xl">
-          Upload a payroll CSV, send each payment through Umbra, then sign one
-          receipt packet your accountant can verify.
-        </p>
-      </header>
-
-      {/* Form */}
-      <section
-        className="mt-10 md:mt-12 payroll-flow-reveal space-y-8"
-        style={{ animationDelay: "60ms" }}
-      >
-        <div className="space-y-2">
-          <label className="mono-chip">Company / payer</label>
-          <input
-            value={companyName}
-            onChange={(e) => setCompanyName(e.target.value)}
-            className="input-editorial"
-            placeholder="Acme Payroll Ops"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <label className="mono-chip">CSV — wallet,amount,memo</label>
-          <textarea
-            value={csvText}
-            onChange={(e) => onCsvTextChange(e.target.value)}
-            rows={11}
-            className="input-editorial font-mono text-[13px] resize-y"
-            placeholder={SAMPLE_CSV}
-          />
-          <div className="flex flex-wrap items-center justify-between gap-3 text-[12px]">
-            <span className="text-dim">
-              {parsed.rows.length} row(s), total{" "}
-              {formatPayrollAmount(total, PAYMENT_DECIMALS)} {PAYMENT_SYMBOL}
-            </span>
-            <button
-              type="button"
-              onClick={() => onCsvTextChange(SAMPLE_CSV)}
-              className="btn-quiet"
-            >
-              Load sample
-            </button>
-          </div>
-        </div>
-
-        <div className="border border-line bg-paper-3 rounded-[3px] p-5">
-          <div className="flex items-baseline justify-between gap-4 mb-4">
-            <span className="eyebrow">Funding source</span>
-            <span className="font-mono text-[10.5px] text-dim tracking-[0.1em] uppercase">
-              How this batch gets funded
-            </span>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setMode("auto")}
-              className={`px-4 py-2.5 rounded-[3px] border text-[13.5px] transition-colors ${
-                mode === "auto"
-                  ? "border-sage bg-sage/10 text-sage"
-                  : "border-line bg-paper text-muted hover:text-ink hover:border-ink/30"
-              }`}
-            >
-              Smart
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("shielded")}
-              className={`px-4 py-2.5 rounded-[3px] border text-[13.5px] transition-colors ${
-                mode === "shielded"
-                  ? "border-sage bg-sage/10 text-sage"
-                  : "border-line bg-paper text-muted hover:text-ink hover:border-ink/30"
-              }`}
-            >
-              Private balance
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("public")}
-              className={`px-4 py-2.5 rounded-[3px] border text-[13.5px] transition-colors ${
-                mode === "public"
-                  ? "border-sage bg-sage/10 text-sage"
-                  : "border-line bg-paper text-muted hover:text-ink hover:border-ink/30"
-              }`}
-            >
-              Wallet
-            </button>
-          </div>
-
-          <p className="mt-4 text-[13px] text-ink/70 leading-relaxed">
-            {mode === "auto" && (
-              <>
-                <span className="text-ink font-medium">Smart.</span> Pulls from
-                your encrypted Umbra balance when there&apos;s enough; falls back
-                to your wallet otherwise. Recommended for most batches.
-              </>
-            )}
-            {mode === "shielded" && (
-              <>
-                <span className="text-ink font-medium">Private balance only.</span>
-                {" "}Spends your encrypted Umbra balance. No public deposit appears
-                on-chain — only the existing balance is rotated through Umbra&apos;s
-                mixer.
-              </>
-            )}
-            {mode === "public" && (
-              <>
-                <span className="text-ink font-medium">Wallet only.</span> Pulls
-                funds from your public ATA at run time. A deposit transaction
-                appears on-chain; the recipient leg of each payment is still
-                private.
-              </>
-            )}
-          </p>
-        </div>
-
-        {/* Registration detection — read-only on-chain probe per row.
-            Cheap (no popups) and gives the employer an honest cost
-            estimate BEFORE they kick off the run. The "Detect" button
-            is intentionally manual — auto-detect on every keystroke
-            would hammer the RPC for half-typed CSVs. */}
-        <div className="border border-line bg-paper-3 rounded-[3px] p-5">
-          <div className="flex items-baseline justify-between gap-4 mb-3">
-            <span className="eyebrow">Recipient registration</span>
-            <button
-              type="button"
-              onClick={handleDetectRegistration}
-              disabled={detecting || parsed.rows.length === 0}
-              className="btn-quiet text-[11px]"
-            >
-              {detecting
-                ? "Checking..."
-                : detection
-                  ? "Re-check"
-                  : "Check who needs claim links"}
-            </button>
-          </div>
-          {!detection && (
-            <p className="text-[13px] text-ink/70 leading-relaxed">
-              Recipients without an existing Umbra registration will be paid
-              via a one-shot claim link. Click above to see who needs one.
-            </p>
-          )}
-          {detection && (
-            <RegistrationSummary
-              detection={detection}
-              rows={parsed.rows}
-            />
-          )}
-        </div>
-
-        {error && (
-          <div className="flex items-start gap-4 border-l-2 border-brick pl-4 py-2">
-            <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
-            <span className="text-[13.5px] text-ink leading-relaxed">{error}</span>
-          </div>
-        )}
-        {notice && (
-          <div className="flex items-start gap-4 border-l-2 border-sage pl-4 py-2">
-            <span className="mono-chip text-sage shrink-0 pt-0.5">Note</span>
-            <span className="text-[13.5px] text-ink leading-relaxed">{notice}</span>
-          </div>
-        )}
-      </section>
-
-      {/* Run button */}
-      <div
-        className="mt-8 payroll-flow-reveal"
-        style={{ animationDelay: "120ms" }}
-      >
-        <button
-          type="button"
-          onClick={runPayroll}
-          disabled={running || parsed.rows.length === 0}
-          className="btn-primary w-full"
+    <div className="max-w-3xl pb-32">
+      {/* Hero — display-size company name input */}
+      {!inSuccessState && (
+        <form
+          id="payroll-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSubmit();
+          }}
+          className={running ? "canvas-page-fade pointer-events-none" : ""}
         >
-          {running
-            ? "Running private payroll..."
-            : `Run ${parsed.rows.length || "N"} private payment${
-                parsed.rows.length === 1 ? "" : "s"
-              }`}
-        </button>
-      </div>
-
-      {/* Explorer comparison + Run ledger */}
-      <section
-        className="mt-12 border-t border-line pt-10 payroll-flow-reveal"
-        style={{ animationDelay: "180ms" }}
-      >
-        <ExplorerComparison />
-
-        <div className="mt-8 border border-line bg-paper-3 rounded-[4px]">
-          <div className="px-5 md:px-6 py-4 border-b border-line flex items-baseline justify-between gap-4 flex-wrap">
-            <span className="eyebrow">Run ledger</span>
-            <div className="flex items-baseline gap-3">
-              {rows.some((r) => r.claimUrl) && (
-                <button
-                  type="button"
-                  onClick={downloadClaimLinksCsv}
-                  className="btn-ghost px-4 py-2 text-[12px]"
-                >
-                  Download claim links (CSV)
-                </button>
-              )}
-              {packet && (
-                <button
-                  type="button"
-                  onClick={signPacket}
-                  disabled={signingPacket}
-                  className="btn-ghost px-4 py-2 text-[12px]"
-                >
-                  {signingPacket ? "Signing..." : "Sign receipt packet"}
-                </button>
-              )}
-            </div>
+          <div>
+            <label className="eyebrow block mb-2" htmlFor="payroll-company">
+              Company / payer
+            </label>
+            <input
+              id="payroll-company"
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
+              className="canvas-display-input"
+              placeholder="Acme Payroll Ops"
+              required
+              disabled={running}
+              aria-label="Company / payer"
+            />
           </div>
 
-          {rows.length === 0 ? (
-            <div className="p-8 text-center text-[14px] text-muted">
-              Payroll txs will appear here as each Umbra payment settles.
-            </div>
-          ) : (
-            <ul className="divide-y divide-line">
-              {rows.map((row, idx) => {
-                const disclosureUrl =
-                  signedPacket && typeof window !== "undefined"
-                    ? `${window.location.origin}/disclose/payroll#${encodePayrollDisclosure(
-                        buildPayrollDisclosure(signedPacket, idx),
-                      )}`
-                    : null;
-                return (
-                  <li
-                    key={`${row.recipient}-${idx}`}
-                    className="px-5 md:px-6 py-4 payroll-row-reveal"
-                  >
-                    <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
-                      <span className="font-mono text-[11px] text-dim tnum">
-                        {String(idx + 1).padStart(2, "0")}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                          <span className="font-mono text-[13px] text-ink truncate">
-                            {row.recipient.slice(0, 8)}...{row.recipient.slice(-5)}
-                          </span>
-                          <span className="text-[13px] text-ink/80 tnum">
-                            {row.amountDisplay}
-                          </span>
-                          <span className="mono-chip text-dim">{row.mode}</span>
-                          {row.claimUrl && (
-                            <span className="mono-chip text-sage">claim-link</span>
-                          )}
-                        </div>
-                        <div className="mt-1 text-[12.5px] text-muted truncate">
-                          {row.memo || "No memo"}
-                        </div>
-                        {row.error && (
-                          <div className="mt-2 text-[12px] text-brick">{row.error}</div>
-                        )}
-                      </div>
-                      <StatusBadge status={row.status} />
-                    </div>
-                    {(row.txSignature || disclosureUrl || row.claimUrl) && (
-                      <div className="mt-3 flex flex-wrap gap-4 pl-10">
-                        {row.txSignature && (
-                          <a
-                            href={payrollExplorerTxUrl(row.txSignature, NETWORK)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="btn-quiet text-[12px]"
-                          >
-                            Explorer tx
-                          </a>
-                        )}
-                        {disclosureUrl && (
-                          <button
-                            type="button"
-                            onClick={() => copyText(`disclosure-${idx}`, disclosureUrl)}
-                            className="btn-quiet text-[12px]"
-                          >
-                            {copied === `disclosure-${idx}`
-                              ? "Copied disclosure"
-                              : "Copy disclosure link"}
-                          </button>
-                        )}
-                        {row.claimUrl && (
-                          <button
-                            type="button"
-                            onClick={() => copyText(`claim-${idx}`, row.claimUrl!)}
-                            className="btn-quiet text-[12px]"
-                          >
-                            {copied === `claim-${idx}`
-                              ? "Copied claim URL"
-                              : "Copy claim URL"}
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
-        {packetUrl && (
-          <div className="mt-6 border border-sage/40 bg-sage/5 rounded-[4px] p-5 payroll-row-reveal">
-            <div className="flex items-baseline gap-2 mb-1">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-                fill="none"
-                className="text-sage shrink-0 translate-y-[1px]"
-              >
-                <path
-                  d="M3 7.5l3 3 5-6"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span className="eyebrow text-sage">Signed packet ready</span>
-            </div>
-            <p className="mt-2 text-[13.5px] text-ink/75 leading-relaxed">
-              This verifier link reveals the full payroll packet to whoever receives it.
-              Use per-row disclosure links for selective reveal.
-            </p>
-            <div className="mt-4 flex flex-wrap gap-3">
+          {/* CSV — quiet frame, monospace */}
+          <div className="mt-12">
+            <div className="flex items-baseline justify-between mb-2">
+              <span className="eyebrow">Payroll · wallet,amount,memo</span>
               <button
                 type="button"
-                onClick={() => copyText("packet", packetUrl)}
-                className="btn-ghost px-4 py-2 text-[12px]"
+                onClick={() => onCsvTextChange(SAMPLE_CSV)}
+                disabled={running}
+                className="text-[12px] text-muted hover:text-ink transition-colors"
               >
-                {copied === "packet" ? "Copied" : "Copy packet link"}
+                Load sample
               </button>
-              <a href={packetUrl} className="btn-quiet text-[12px]">
-                Open packet verifier
-              </a>
+            </div>
+            <textarea
+              value={csvText}
+              onChange={(e) => onCsvTextChange(e.target.value)}
+              rows={10}
+              disabled={running}
+              className="payroll-csv-input"
+              placeholder={SAMPLE_CSV}
+              aria-label="Payroll CSV"
+            />
+            <div className="mt-2 text-[12px] text-dim">
+              {parsed.rows.length} row(s) · {totalDisplay}
+              {parsed.errors.length > 0 && (
+                <span className="text-brick ml-3">
+                  {parsed.errors.length} parse error
+                  {parsed.errors.length === 1 ? "" : "s"}
+                </span>
+              )}
             </div>
           </div>
-        )}
-      </section>
+
+          {/* Optional chips: override funding / registration check */}
+          <div className="mt-10 flex flex-wrap gap-2.5">
+            <button
+              type="button"
+              onClick={() => setOpenChip(openChip === "funding" ? null : "funding")}
+              disabled={running}
+              className={`canvas-chip ${mode === "auto" ? "canvas-chip-empty" : ""}`}
+              aria-expanded={openChip === "funding"}
+            >
+              {mode === "auto"
+                ? "+ Override funding"
+                : `Funding: ${mode === "shielded" ? "Private balance" : "Wallet"}`}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setOpenChip(openChip === "registration" ? null : "registration");
+                if (!detection && !detecting) handleDetectRegistration();
+              }}
+              disabled={running || rowCount === 0}
+              className={`canvas-chip ${detection ? "" : "canvas-chip-empty"}`}
+              aria-expanded={openChip === "registration"}
+            >
+              {detecting
+                ? "Checking registration…"
+                : detection
+                  ? detection.unregisteredIndexes.length > 0
+                    ? `Checked: ${detection.unregisteredIndexes.length} need claim link${detection.unregisteredIndexes.length === 1 ? "" : "s"}`
+                    : "Checked: all registered"
+                  : "+ Check recipient registration"}
+            </button>
+          </div>
+
+          {/* Inline expansions */}
+          {openChip === "funding" && (
+            <FundingExpander mode={mode} onChange={setMode} />
+          )}
+          {openChip === "registration" && detection && (
+            <div className="mt-5">
+              <RegistrationSummary detection={detection} rows={parsed.rows} />
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2">
+              <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+              <span className="text-[13.5px] text-ink leading-relaxed">{error}</span>
+            </div>
+          )}
+          {notice && (
+            <div className="mt-8 flex items-start gap-4 border-l-2 border-sage pl-4 py-2">
+              <span className="mono-chip text-sage shrink-0 pt-0.5">Note</span>
+              <span className="text-[13.5px] text-ink leading-relaxed">{notice}</span>
+            </div>
+          )}
+        </form>
+      )}
+
+      {/* Success layout — replaces the form when packet is ready. Pairs
+          with the run ledger + collapsible explainer below. */}
+      {inSuccessState && (
+        <SuccessHero
+          paymentCount={rows.filter((r) => r.status === "paid").length}
+          totalDisplay={totalDisplay}
+        />
+      )}
+
+      {/* Inline run ledger — always mounted (compose: empty placeholder
+          rows; running: fills as txs settle; success: full receipt). */}
+      <RunLedger
+        rows={rows}
+        plannedRows={parsed.rows}
+        signedPacket={signedPacket}
+        copiedKey={copiedKey}
+        onCopy={copyText}
+      />
+
+      {/* Collapsible "Why is this private?" — explorer comparison
+          tucked away by default; expandable for skeptics + judges. */}
+      <details className="mt-12 group">
+        <summary className="cursor-pointer text-[13px] text-muted hover:text-ink transition-colors inline-flex items-center gap-2 list-none">
+          <span className="canvas-disclosure-arrow">›</span>
+          Why is this private?
+        </summary>
+        <div className="mt-5">
+          <ExplorerComparison />
+        </div>
+      </details>
 
       <RegistrationModal open={regOpen} steps={regSteps} />
+      <PayrollPublishingModal
+        open={running}
+        totalCount={runTotalCount || rowCount}
+        sentCount={rows.length}
+        phase={phase === "signing" ? "signing" : "sending"}
+        awaitingWallet
+      />
+      <PayrollCanvasBar state={canvasBarState} formId="payroll-form" />
 
       <PayrollFlowStyles />
     </div>
   );
 }
 
-/* ──────────────────────────────────────────────────────────────────────
-   Sub-components — Explorer comparison block + status badge.
-   ────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────── sub-components ─────────────────────────── */
+
+function FundingExpander({
+  mode,
+  onChange,
+}: {
+  mode: RunMode;
+  onChange: (next: RunMode) => void;
+}) {
+  return (
+    <div className="mt-5 max-w-xl">
+      <div className="flex flex-wrap gap-2">
+        {(
+          [
+            { key: "auto" as const, label: "Smart" },
+            { key: "shielded" as const, label: "Private balance" },
+            { key: "public" as const, label: "Wallet" },
+          ]
+        ).map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => onChange(opt.key)}
+            className={`px-3.5 py-2 rounded-full border text-[12.5px] transition-colors ${
+              mode === opt.key
+                ? "border-ink bg-ink text-paper"
+                : "border-line bg-paper text-muted hover:text-ink hover:border-line-2"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-3 text-[13px] text-muted leading-relaxed">
+        {mode === "auto" &&
+          "Pulls from your encrypted Umbra balance when there's enough; falls back to your wallet otherwise. Recommended for most batches."}
+        {mode === "shielded" &&
+          "Spends only your encrypted Umbra balance. No public deposit appears on-chain."}
+        {mode === "public" &&
+          "Pulls from your public ATA at run time. Each payment's recipient leg is still private."}
+      </p>
+    </div>
+  );
+}
+
+function RunLedger({
+  rows,
+  plannedRows,
+  signedPacket,
+  copiedKey,
+  onCopy,
+}: {
+  rows: PayrollRunRow[];
+  plannedRows: PayrollRow[];
+  signedPacket: SignedPayrollPacket | null;
+  copiedKey: string | null;
+  onCopy: (key: string, text: string) => void;
+}) {
+  // While the run hasn't started, render plannedRows as quiet
+  // placeholders. Once rows.length > 0, render real result rows; for
+  // any remaining planned-but-not-yet-run rows, keep the placeholder.
+  const hasResults = rows.length > 0;
+  const pendingPlaceholders = hasResults
+    ? plannedRows.slice(rows.length)
+    : plannedRows;
+
+  if (plannedRows.length === 0 && !hasResults) return null;
+
+  return (
+    <div className="mt-14">
+      <span className="eyebrow">Run ledger</span>
+      <ul className="mt-4 divide-y divide-line/60">
+        {rows.map((row, idx) => (
+          <ResultRow
+            key={`${row.recipient}-${idx}`}
+            row={row}
+            idx={idx}
+            signedPacket={signedPacket}
+            copiedKey={copiedKey}
+            onCopy={onCopy}
+          />
+        ))}
+        {pendingPlaceholders.map((row, idx) => (
+          <PlaceholderRow
+            key={`p-${idx}`}
+            row={row}
+            idx={hasResults ? rows.length + idx : idx}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ResultRow({
+  row,
+  idx,
+  signedPacket,
+  copiedKey,
+  onCopy,
+}: {
+  row: PayrollRunRow;
+  idx: number;
+  signedPacket: SignedPayrollPacket | null;
+  copiedKey: string | null;
+  onCopy: (key: string, text: string) => void;
+}) {
+  const disclosureUrl =
+    signedPacket && typeof window !== "undefined"
+      ? `${window.location.origin}/disclose/payroll#${encodePayrollDisclosure(
+          buildPayrollDisclosure(signedPacket, idx),
+        )}`
+      : null;
+
+  return (
+    <li className="py-4 payroll-row-reveal">
+      <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
+        <span className="font-mono text-[11px] text-dim tnum">
+          {String(idx + 1).padStart(2, "0")}
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="font-mono text-[13px] text-ink truncate">
+              {row.recipient.slice(0, 8)}…{row.recipient.slice(-5)}
+            </span>
+            <span className="text-[13px] text-ink/80 tnum">{row.amountDisplay}</span>
+            <span className="mono-chip text-dim">{row.mode}</span>
+            {row.claimUrl && <span className="mono-chip text-sage">claim-link</span>}
+          </div>
+          <div className="mt-1 text-[12.5px] text-muted truncate">
+            {row.memo || "No memo"}
+          </div>
+          {row.error && <div className="mt-2 text-[12px] text-brick">{row.error}</div>}
+        </div>
+        <StatusBadge status={row.status} />
+      </div>
+      {(row.txSignature || disclosureUrl || row.claimUrl) && (
+        <div className="mt-3 flex flex-wrap gap-4 pl-10">
+          {row.txSignature && (
+            <a
+              href={payrollExplorerTxUrl(row.txSignature, NETWORK)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[12px] text-muted hover:text-ink transition-colors"
+            >
+              Explorer ↗
+            </a>
+          )}
+          {disclosureUrl && (
+            <button
+              type="button"
+              onClick={() => onCopy(`disclosure-${idx}`, disclosureUrl)}
+              className="text-[12px] text-muted hover:text-ink transition-colors"
+            >
+              {copiedKey === `disclosure-${idx}` ? "Copied disclosure" : "Copy disclosure"}
+            </button>
+          )}
+          {row.claimUrl && (
+            <button
+              type="button"
+              onClick={() => onCopy(`claim-${idx}`, row.claimUrl!)}
+              className="text-[12px] text-muted hover:text-ink transition-colors"
+            >
+              {copiedKey === `claim-${idx}` ? "Copied claim URL" : "Copy claim URL"}
+            </button>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function PlaceholderRow({ row, idx }: { row: PayrollRow; idx: number }) {
+  return (
+    <li className="py-4 opacity-50">
+      <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
+        <span className="font-mono text-[11px] text-dim tnum">
+          {String(idx + 1).padStart(2, "0")}
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="font-mono text-[13px] text-muted truncate">
+              {row.wallet.slice(0, 8)}…{row.wallet.slice(-5)}
+            </span>
+            <span className="text-[13px] text-muted tnum">{row.amount}</span>
+          </div>
+          <div className="mt-1 text-[12.5px] text-muted/70 truncate">
+            {row.memo || "No memo"}
+          </div>
+        </div>
+        <span className="font-mono text-[10.5px] text-dim tracking-[0.14em] uppercase">
+          Pending
+        </span>
+      </div>
+    </li>
+  );
+}
+
+function StatusBadge({ status }: { status: PayrollPacketRow["status"] }) {
+  if (status === "paid") {
+    return (
+      <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-sage">
+        Sent
+      </span>
+    );
+  }
+  return (
+    <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-brick">
+      Failed
+    </span>
+  );
+}
+
+function SuccessHero({
+  paymentCount,
+  totalDisplay,
+}: {
+  paymentCount: number;
+  totalDisplay: string;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center pt-4 md:pt-6 pb-8">
+      <VeilDescentMark size={144} variant="batch" />
+      <div className="mt-8 eyebrow text-sage">
+        ✓ Payroll signed · packet ready
+      </div>
+      <div className="mt-3 font-sans font-medium text-ink text-[28px] md:text-[32px] leading-[1.1] tracking-[-0.025em]">
+        <span className="tnum">{paymentCount}</span>
+        <span className="text-muted"> payment{paymentCount === 1 ? "" : "s"} · </span>
+        <span className="tnum">{totalDisplay}</span>
+      </div>
+      <p className="mt-4 text-[14px] leading-[1.55] text-muted max-w-[480px]">
+        Each contractor was paid through Umbra. The packet below verifies the
+        whole batch; per-row disclosure links reveal exactly one entry.
+      </p>
+    </div>
+  );
+}
 
 function ExplorerComparison() {
   return (
-    <div className="border border-line bg-paper-3 rounded-[4px] p-5 md:p-6">
-      <div className="flex items-baseline justify-between gap-4 border-b border-line pb-4">
-        <span className="eyebrow">Explorer comparison</span>
-        <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-sage">
-          Judge demo shot
-        </span>
-      </div>
-      <div className="mt-5 grid md:grid-cols-2 gap-4">
+    <div>
+      <div className="grid md:grid-cols-2 gap-4">
         <div className="border border-brick/30 bg-brick/5 rounded-[3px] p-4">
           <span className="mono-chip text-brick">Normal token payroll</span>
           <dl className="mt-4 space-y-3 text-[12.5px]">
@@ -936,13 +973,6 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-/**
- * Per-row registration summary with an honest cost estimate. Shows
- * up after the user clicks "Check who needs claim links". The
- * lamports → SOL conversion uses the `SHADOW_FUNDING_LAMPORTS`
- * constant directly so the number Alice sees matches the number we
- * actually transfer.
- */
 function RegistrationSummary({
   detection,
   rows,
@@ -952,14 +982,13 @@ function RegistrationSummary({
 }) {
   const unregisteredCount = detection.unregisteredIndexes.length;
   const unknownCount = detection.unknownIndexes.length;
-  const registeredCount =
-    detection.rowStatuses.filter((s) => s === "registered").length;
+  const registeredCount = detection.rowStatuses.filter((s) => s === "registered").length;
   const extraSolPerRow = Number(SHADOW_FUNDING_LAMPORTS) / 1e9;
   const totalExtraSol = (extraSolPerRow * unregisteredCount).toFixed(3);
 
   return (
     <div>
-      <div className="grid grid-cols-3 gap-3 mb-4 text-[12.5px]">
+      <div className="flex flex-wrap gap-3 mb-4 text-[12.5px]">
         <SummaryStat label="Ready" count={registeredCount} tone="sage" />
         <SummaryStat label="Need claim link" count={unregisteredCount} tone="gold" />
         {unknownCount > 0 && (
@@ -970,13 +999,12 @@ function RegistrationSummary({
         <p className="text-[12.5px] text-ink/70 leading-relaxed mb-3">
           {unregisteredCount} recipient{unregisteredCount === 1 ? "" : "s"} will
           get a claim link. Each adds about{" "}
-          <span className="font-mono">{extraSolPerRow.toFixed(3)} SOL</span> for
-          the shadow account&apos;s rent + tx fees{" "}
+          <span className="font-mono">{extraSolPerRow.toFixed(3)} SOL</span>{" "}
+          for the shadow account&apos;s rent + tx fees{" "}
           (<span className="font-mono">~{totalExtraSol} SOL</span> total).
-          They click the link, connect a wallet, and the funds land directly.
         </p>
       )}
-      <ul className="divide-y divide-line text-[12.5px]">
+      <ul className="divide-y divide-line/60 text-[12.5px]">
         {rows.map((row, idx) => {
           const status = detection.rowStatuses[idx];
           return (
@@ -1008,16 +1036,16 @@ function SummaryStat({
 }) {
   const cls =
     tone === "sage"
-      ? "border-sage/40 bg-sage/5 text-sage"
+      ? "text-sage"
       : tone === "gold"
-        ? "border-gold/40 bg-gold/5 text-gold-dim"
-        : "border-line bg-paper text-dim";
+        ? "text-gold-dim"
+        : "text-dim";
   return (
-    <div className={`border rounded-[2px] px-3 py-2 ${cls}`}>
-      <div className="font-mono text-[10px] tracking-[0.12em] uppercase opacity-80">
+    <div className="inline-flex items-baseline gap-2">
+      <span className={`font-sans font-medium text-[16px] tnum ${cls}`}>{count}</span>
+      <span className="font-mono text-[10px] tracking-[0.14em] uppercase text-muted">
         {label}
-      </div>
-      <div className="text-[18px] font-medium mt-0.5">{count}</div>
+      </span>
     </div>
   );
 }
@@ -1032,42 +1060,16 @@ function RegistrationChip({ status }: { status: RegistrationStatus }) {
   return <span className="mono-chip text-dim">unknown</span>;
 }
 
-function StatusBadge({ status }: { status: PayrollPacketRow["status"] }) {
-  const cls =
-    status === "paid"
-      ? "border-sage/40 text-sage bg-sage/5"
-      : "border-brick/40 text-brick bg-brick/5";
-  return (
-    <span
-      className={`inline-block px-2.5 py-1 border rounded-[2px] font-mono text-[10.5px] tracking-[0.12em] uppercase ${cls}`}
-    >
-      {status}
-    </span>
-  );
-}
-
-/* ──────────────────────────────────────────────────────────────────────
-   Reveal animations — Apple ease-out-expo. Honors prefers-reduced-motion.
-
-   payroll-flow-reveal: 700ms cubic-bezier(0.16, 1, 0.3, 1), translateY(40px)→0
-   payroll-row-reveal:  240ms ease-out, plain fade. Used for ledger rows
-                        and the success packet block so newly-arriving rows
-                        don't visually jump.
-   ────────────────────────────────────────────────────────────────────── */
-
 function PayrollFlowStyles() {
   return (
     <style>{`
       .payroll-flow-reveal {
         opacity: 0;
-        transform: translateY(40px);
-        animation: payroll-flow-reveal-anim 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        transform: translateY(24px);
+        animation: payroll-flow-reveal-anim 420ms cubic-bezier(0.165, 0.84, 0.44, 1) forwards;
       }
       @keyframes payroll-flow-reveal-anim {
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
+        to { opacity: 1; transform: translateY(0); }
       }
       .payroll-row-reveal {
         animation: payroll-row-reveal-anim 240ms ease-out both;
@@ -1076,10 +1078,44 @@ function PayrollFlowStyles() {
         from { opacity: 0; transform: translateY(4px); }
         to   { opacity: 1; transform: translateY(0); }
       }
+      .payroll-csv-input {
+        width: 100%;
+        background: transparent;
+        border: 1px solid #d6ceba;
+        border-radius: 3px;
+        padding: 14px 16px;
+        font-family: var(--font-mono), ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #1c1712;
+        resize: vertical;
+        transition: border-color 150ms ease, box-shadow 150ms ease;
+      }
+      .payroll-csv-input::placeholder {
+        color: #a59c84;
+      }
+      .payroll-csv-input:focus {
+        outline: none;
+        border-color: #1c1712;
+        box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.08);
+      }
+      .payroll-csv-input:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .canvas-disclosure-arrow {
+        display: inline-block;
+        transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      details[open] .canvas-disclosure-arrow {
+        transform: rotate(90deg);
+      }
       @media (prefers-reduced-motion: reduce) {
         .payroll-flow-reveal,
-        .payroll-row-reveal {
+        .payroll-row-reveal,
+        .canvas-disclosure-arrow {
           animation: none;
+          transition: none;
           opacity: 1;
           transform: none;
         }
