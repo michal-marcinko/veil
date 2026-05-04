@@ -266,6 +266,33 @@
     }
   }
 
+  /* Back-to-picker chevron. Quiet at rest (line-2 color), deepens to
+     ink on hover. The chevron lifts 3px on hover to telegraph "this
+     takes you up/back" without a label. */
+  .canvas-back-arrow {
+    color: #bdb39b; /* line-2 — present but unobtrusive */
+    transition:
+      color 200ms ease,
+      transform 400ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform;
+  }
+  .canvas-back-arrow:hover {
+    color: #1c1712; /* full ink on hover */
+    transform: translateY(-3px);
+  }
+  .canvas-back-arrow:focus-visible {
+    outline: none;
+    color: #1c1712;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .canvas-back-arrow {
+      transition: color 120ms ease;
+    }
+    .canvas-back-arrow:hover {
+      transform: none;
+    }
+  }
+
   /* ─── /Document Canvas redesign ────────────────────────────────── */
 
 }

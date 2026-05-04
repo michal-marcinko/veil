@@ -328,12 +328,15 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
     <Frame>
       <h1 className="sr-only">Compose a payment</h1>
 
-      {/* Picker — anchored at top. Hidden during invoice success state. */}
-      {!inSuccessState && (
+      {/* Picker — only shown before a mode is selected. Once the user
+          enters Invoice or Payroll, it unmounts (form takes the whole
+          viewport — no peek-through above to break immersion). The
+          big-chevron back button below remounts it on demand. */}
+      {mode === null && (
         <section
           className={[
             "max-w-[1400px] mx-auto px-6 md:px-8 pt-24 md:pt-32 pb-16 md:pb-24",
-            "transition-opacity duration-300",
+            "transition-opacity duration-300 animate-fade-up",
           ].join(" ")}
         >
           <CreateModeSelector onSelect={handleSelectMode} />
@@ -354,14 +357,29 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
           aria-label={mode === "invoice" ? "Create invoice" : "Run payroll"}
         >
           <div className="max-w-[1400px] mx-auto px-6 md:px-8 pt-12 md:pt-16">
-            {/* Choose differently — hidden in invoice success state */}
+            {/* Back to picker — big bare chevron, no label. Hover lifts
+                the chevron a few px to hint at the direction, color
+                deepens from line-2 to ink. Hidden in invoice success
+                state since the page is committed at that point. */}
             {!inSuccessState && (
               <button
                 type="button"
                 onClick={handleBackToPicker}
-                className="inline-flex items-center gap-2 font-mono text-[12.5px] tracking-[0.04em] text-muted hover:text-ink transition-colors"
+                aria-label="Back to picker — choose Invoice or Payroll"
+                className="canvas-back-arrow inline-flex items-center justify-center"
               >
-                <span aria-hidden>↑</span> Choose differently
+                <svg
+                  viewBox="0 0 24 24"
+                  className="w-10 h-10 md:w-12 md:h-12"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M6 15l6-6 6 6" />
+                </svg>
               </button>
             )}
 
