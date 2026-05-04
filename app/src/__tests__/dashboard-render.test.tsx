@@ -112,18 +112,56 @@ describe("Dashboard page", () => {
     });
   });
 
-  it("lets the creator manually confirm a pending invoice", async () => {
+  it("no longer exposes a one-click 'Confirm paid' button (Codex 2026-05-04 fix)", async () => {
+    // The previous build let any creator flip an invoice to Paid with one
+    // click — and the auto-claim handler did the same en-masse for every
+    // pending invoice on any incoming UTXO. Both are gone. The receipt-
+    // import flow is the only path to mark_paid now.
+    render(<DashboardPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Your private payment activity/i)).toBeInTheDocument();
+    });
+
+    const confirmButton = screen.queryByRole("button", { name: /^Confirm paid$/i });
+    expect(confirmButton).toBeNull();
+
+    // Receipt-import UI replaces it.
+    expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(/https:\/\/veil\.app\/receipt/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Apply receipt button is disabled until the textarea has input", async () => {
+    render(<DashboardPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
+    });
+
+    const button = screen.getByRole("button", { name: /Apply receipt/i });
+    expect(button).toBeDisabled();
+  });
+
+  it("rejects malformed receipt input with a Receipt error chip", async () => {
     const anchor = await import("@/lib/anchor");
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Confirm paid/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Apply receipt/i })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Confirm paid/i }));
+    const textarea = screen.getByPlaceholderText(/https:\/\/veil\.app\/receipt/i);
+    fireEvent.change(textarea, { target: { value: "this-is-definitely-not-a-receipt" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Apply receipt/i }));
 
     await waitFor(() => {
-      expect(anchor.markPaidOnChain).toHaveBeenCalled();
+      expect(screen.getByText(/Receipt:/i)).toBeInTheDocument();
     });
+
+    // No on-chain mark_paid call should have happened on bad input.
+    expect(anchor.markPaidOnChain).not.toHaveBeenCalled();
   });
 });
