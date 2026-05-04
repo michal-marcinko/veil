@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
@@ -369,46 +370,87 @@ export function PayrollFlow() {
   }
 
   /**
-   * Drag-drop handlers for the recipients table. Two subtleties:
+   * Page-wide CSV drop zone. Listens at the window level so the user
+   * can drop the file anywhere on the page (not just precisely over the
+   * recipients table). When a file drag enters the window, a full-
+   * viewport overlay lights up; on drop, the file is parsed and the
+   * recipients[] state is replaced.
    *
-   * 1. preventDefault on dragOver is what tells the browser this surface
-   *    accepts drops — without it, the browser shows the "no-drop"
-   *    cursor and the drop event never fires. We also explicitly set
-   *    dropEffect so the cursor reads "copy" not "move".
+   * Two subtleties:
    *
-   * 2. dragLeave fires every time the cursor crosses a child boundary
-   *    (each row, each input), not only when leaving the wrapper. We
-   *    deactivate only when the relatedTarget is genuinely outside the
-   *    wrapper (or null, which means leaving the window). Otherwise the
-   *    overlay flickers off the moment the user moves over a row.
+   * 1. preventDefault on dragover is mandatory — without it the browser
+   *    shows the no-drop cursor and the drop event never fires. We also
+   *    explicitly set dataTransfer.dropEffect = 'copy' so the cursor
+   *    reads correctly across browsers.
+   *
+   * 2. dragenter/dragleave fire repeatedly as the cursor crosses inner
+   *    elements. The standard fix is a counter: dragenter increments,
+   *    dragleave decrements, overlay deactivates only when the counter
+   *    hits zero (= the cursor genuinely left the window). This avoids
+   *    the overlay flicker that happens when the cursor moves between
+   *    children.
+   *
+   * 3. We filter on `e.dataTransfer.types.includes('Files')` so a regular
+   *    text drag-select inside the form doesn't activate the overlay.
+   *
+   * The listeners attach on PayrollFlow mount and detach on unmount —
+   * switching to invoice mode unmounts PayrollFlow, so the page-wide
+   * drop zone goes away with it.
    */
-  function handleDragEnter(e: React.DragEvent<HTMLDivElement>) {
-    e.preventDefault();
+  useEffect(() => {
     if (running) return;
-    setDragActive(true);
-  }
-  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    if (running) return;
-    e.dataTransfer.dropEffect = "copy";
-    setDragActive(true);
-  }
-  function handleDragLeave(e: React.DragEvent<HTMLDivElement>) {
-    const next = e.relatedTarget as Node | null;
-    if (next && e.currentTarget.contains(next)) return;
-    setDragActive(false);
-  }
-  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    setDragActive(false);
-    if (running) return;
-    const file = e.dataTransfer.files?.[0];
-    if (file) {
-      ingestCsvFile(file).catch((err) =>
-        setError(`CSV import failed: ${err?.message ?? String(err)}`),
-      );
+    let counter = 0;
+
+    function isFileDrag(e: DragEvent): boolean {
+      const types = e.dataTransfer?.types;
+      if (!types) return false;
+      // DataTransferItemList doesn't have .includes; iterate.
+      for (let i = 0; i < types.length; i++) {
+        if (types[i] === "Files") return true;
+      }
+      return false;
     }
-  }
+
+    function onEnter(e: DragEvent) {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      counter++;
+      setDragActive(true);
+    }
+    function onOver(e: DragEvent) {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    }
+    function onLeave(e: DragEvent) {
+      if (!isFileDrag(e)) return;
+      counter = Math.max(0, counter - 1);
+      if (counter === 0) setDragActive(false);
+    }
+    function onDrop(e: DragEvent) {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      counter = 0;
+      setDragActive(false);
+      const file = e.dataTransfer?.files?.[0];
+      if (file) {
+        ingestCsvFile(file).catch((err) =>
+          setError(`CSV import failed: ${err?.message ?? String(err)}`),
+        );
+      }
+    }
+
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [running]);
 
   async function handleSubmit() {
     if (!wallet.publicKey) {
@@ -782,15 +824,7 @@ export function PayrollFlow() {
                 )}
               </div>
             </div>
-            <div
-              onDragEnter={handleDragEnter}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              className={`mt-5 border-t border-line relative transition-colors duration-150 ${
-                dragActive ? "bg-paper-3/70" : ""
-              }`}
-            >
+            <div className="mt-5 border-t border-line relative">
               {recipients.map((row, idx) => (
                 <RecipientEditorRow
                   key={idx}
@@ -803,11 +837,6 @@ export function PayrollFlow() {
                   onPasteMulti={(parsedRows) => explodeAt(idx, parsedRows)}
                 />
               ))}
-              {dragActive && (
-                <div className="absolute inset-0 bg-paper/85 backdrop-blur-sm flex items-center justify-center pointer-events-none border border-dashed border-ink/30 rounded-[3px]">
-                  <span className="eyebrow text-ink">Drop CSV to import</span>
-                </div>
-              )}
             </div>
             <div className="mt-4 flex items-center justify-between gap-4 flex-wrap text-[13px]">
               <button
@@ -947,9 +976,50 @@ export function PayrollFlow() {
         awaitingWallet
       />
       <CanvasBar state={canvasBarState} formId="payroll-form" />
+      <DropOverlay active={dragActive && !running} />
 
       <PayrollFlowStyles />
     </div>
+  );
+}
+
+/**
+ * Full-viewport translucent overlay shown when a file is dragged anywhere
+ * on the page. Portal'd to document.body so an ancestor with a transform
+ * (e.g. CreatePageInner's .form-reveal section) can't constrain its
+ * position:fixed to a sub-region of the viewport.
+ *
+ * pointer-events:none lets drop events pass through to the window-level
+ * listener — this is purely a visual affordance, not the drop target.
+ */
+function DropOverlay({ active }: { active: boolean }) {
+  const [container, setContainer] = useState<HTMLElement | null>(null);
+  useEffect(() => setContainer(document.body), []);
+
+  if (!container || !active) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
+      style={{
+        background: "rgba(241, 236, 224, 0.78)",
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
+      }}
+      aria-hidden
+    >
+      <div className="border-2 border-dashed border-ink/35 rounded-[6px] px-12 py-10 bg-paper-3/85 max-w-md text-center">
+        <span className="eyebrow text-ink">Drop CSV to import</span>
+        <p className="mt-3 text-[13.5px] text-muted leading-relaxed">
+          wallet, amount, memo
+          <br />
+          <span className="font-mono text-[11px] text-dim">
+            (one row per line · CSV or TSV)
+          </span>
+        </p>
+      </div>
+    </div>,
+    container,
   );
 }
 
