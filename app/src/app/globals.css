@@ -182,10 +182,12 @@
 
   /* Display-size inline-editable input. Real <input>, no border, looks
      like body text until focus, then a 1.5px ink underline animates in.
-     Used for the "From" and "Bill to" headlines on /create. */
+     Used for the "From" and "Bill to" headlines on /create.
+     Placeholder color is `dim` (#a59c84) — readable as a hint at display
+     size without being mistaken for typed content (which is full ink). */
   .canvas-display-input {
     @apply w-full bg-transparent border-0 outline-none
-           text-ink placeholder:text-line-2/70
+           text-ink placeholder:text-dim
            font-sans font-medium
            text-[40px] md:text-[48px]
            leading-[1.04] tracking-[-0.025em]
