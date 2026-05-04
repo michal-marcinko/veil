@@ -175,7 +175,7 @@ export default function DashboardPage() {
   // instead of "9TjX77RP…9Yeh". Decrypt failures (legacy invoices with the
   // old per-PDA signMessage scheme) leave the entry absent — the list
   // falls back to the truncated PDA in that case.
-  const [labels, setLabels] = useState<Map<string, { payer: string; amount: string }>>(
+  const [labels, setLabels] = useState<Map<string, { payer: string; amount: string; description: string }>>(
     new Map(),
   );
   // One-time-per-session cache: skip the registered/aligned diagnostics
@@ -223,6 +223,18 @@ export default function DashboardPage() {
     total: 0,
     error: null,
   });
+
+  // Invoice list controls — stable sort + filter + search. The raw
+  // `invoices` state is the source of truth; these inputs filter the
+  // displayed slice without refetching.
+  type StatusFilter = "all" | "pending" | "paid" | "cancelled";
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  // Default-collapse the Paid section when there are >10 paid invoices,
+  // so a long history doesn't dominate the page. Threshold is generous
+  // — a creator with 5 paid invoices probably wants to see them all.
+  const PAID_COLLAPSE_THRESHOLD = 10;
+  const [showAllPaid, setShowAllPaid] = useState(false);
 
   async function refresh() {
     if (!wallet.publicKey) return;
@@ -485,7 +497,7 @@ export default function DashboardPage() {
       // User declined the one-time signature — skip labels entirely.
       return;
     }
-    const next = new Map<string, { payer: string; amount: string }>();
+    const next = new Map<string, { payer: string; amount: string; description: string }>();
     await Promise.all(
       invoices.map(async (inv: any) => {
         try {
@@ -498,9 +510,18 @@ export default function DashboardPage() {
           const total = BigInt(md.total);
           const decimals = md.currency?.decimals ?? PAYMENT_DECIMALS;
           const symbol = md.currency?.symbol ?? PAYMENT_SYMBOL;
+          // Concatenate every line-item description for search. Most
+          // invoices have one item; payroll batches and itemised invoices
+          // can have many. Joined with " · " so a substring match on any
+          // single item still hits.
+          const description = (md.line_items ?? [])
+            .map((li) => li.description)
+            .filter(Boolean)
+            .join(" · ");
           next.set(pda, {
             payer: md.payer?.display_name || "Unknown payer",
             amount: `${formatBigintAmount(total, decimals)} ${symbol}`,
+            description,
           });
         } catch {
           // Legacy invoice (per-PDA signMessage key) or fetch/parse error.
@@ -743,14 +764,55 @@ export default function DashboardPage() {
     );
   }
 
-  const incoming = invoices.map((i) => ({
-    pda: i.pda.toBase58(),
-    creator: i.account.creator.toBase58(),
-    metadataUri: i.account.metadataUri,
-    status: Object.keys(i.account.status)[0] as any,
-    createdAt: Number(i.account.createdAt),
-  }));
-  const pendingInvoices = incoming.filter((invoice) => invoice.status === "pending");
+  // Stable sort by createdAt DESC. Memoized so a re-render that
+  // doesn't change the underlying invoice list never reshuffles the
+  // visible rows (the underlying `getProgramAccounts` returns no
+  // guaranteed order). PDA tiebreaker on equal timestamps gives a
+  // deterministic order even on rapidly-issued invoices.
+  const incoming = useMemo(() => {
+    const mapped = invoices.map((i) => ({
+      pda: i.pda.toBase58(),
+      creator: i.account.creator.toBase58(),
+      metadataUri: i.account.metadataUri,
+      status: Object.keys(i.account.status)[0] as any,
+      createdAt: Number(i.account.createdAt),
+    }));
+    mapped.sort((a, b) => {
+      if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+      return a.pda < b.pda ? -1 : a.pda > b.pda ? 1 : 0;
+    });
+    return mapped;
+  }, [invoices]);
+  const pendingInvoices = useMemo(
+    () => incoming.filter((invoice) => invoice.status === "pending"),
+    [incoming],
+  );
+  const paidInvoices = useMemo(
+    () => incoming.filter((invoice) => invoice.status === "paid"),
+    [incoming],
+  );
+
+  // Filter + search applied to the displayed list. ~30 invoices is
+  // small enough that filtering on every keystroke is essentially free
+  // — no debounce needed. Search matches:
+  //   - the decrypted payer/recipient display name (from labels)
+  //   - the decrypted line-item descriptions (from labels)
+  //   - the invoice PDA (first 8 chars suffices for typical paste-prefix)
+  const filteredInvoices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return incoming.filter((inv) => {
+      if (statusFilter !== "all" && inv.status !== statusFilter) return false;
+      if (!q) return true;
+      const label = labels.get(inv.pda);
+      const haystack = [
+        inv.pda.toLowerCase(),
+        label?.payer?.toLowerCase() ?? "",
+        label?.description?.toLowerCase() ?? "",
+        label?.amount?.toLowerCase() ?? "",
+      ].join(" ");
+      return haystack.includes(q);
+    });
+  }, [incoming, statusFilter, searchQuery, labels]);
 
   // Group by batch_id (carried on the URI as a ?batch= query param, stamped
   // there by /payroll/new). Invoices without batch=... are single invoices
@@ -781,7 +843,7 @@ export default function DashboardPage() {
   const unmatchedClaims = Math.max(0, claimedCount - matchedReceiptCount);
 
   return (
-    <Shell>
+    <Shell pendingCount={pendingInvoices.length}>
       <ClaimProgressModal
         open={claimModal.open}
         current={claimModal.current}
@@ -909,7 +971,170 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <DashboardList title="Invoices you created" invoices={incoming} labels={labels} />
+          {/* Filter + search controls — sit above the list, never refetch.
+              The status dropdown is a plain <select> styled to match the
+              existing mono-uppercase chip aesthetic; debounce isn't
+              necessary at ~30 invoices. */}
+          {incoming.length > 0 && (
+            <div className="mb-5 flex flex-col sm:flex-row gap-3 sm:items-center max-w-3xl">
+              <label className="flex items-center gap-2 shrink-0">
+                <span className="font-mono text-[10.5px] tracking-[0.12em] uppercase text-dim">
+                  Status
+                </span>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                  className="font-mono text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink focus:outline-none focus:border-ink cursor-pointer tracking-[0.04em]"
+                  aria-label="Filter invoices by status"
+                >
+                  <option value="all">All</option>
+                  <option value="pending">Pending</option>
+                  <option value="paid">Paid</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </label>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by description, recipient, or PDA prefix"
+                className="flex-1 font-mono text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink placeholder:text-dim focus:outline-none focus:border-ink"
+                aria-label="Search invoices"
+              />
+              {(statusFilter !== "all" || searchQuery) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatusFilter("all");
+                    setSearchQuery("");
+                  }}
+                  className="btn-quiet text-[11px] shrink-0"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* List body. When the user is browsing flat-filter (no status
+              filter, no search) AND the paid pile is large, we split out
+              Pending vs Paid and collapse Paid behind a "Show all"
+              expander to keep the page short. Otherwise a single sorted
+              list does the job — the filter chips already make the
+              status visible per row. */}
+          {(() => {
+            const isFlatBrowse =
+              statusFilter === "all" && searchQuery.trim() === "";
+            const shouldSplit =
+              isFlatBrowse && paidInvoices.length > PAID_COLLAPSE_THRESHOLD;
+            if (!shouldSplit) {
+              const titleBase =
+                statusFilter === "all"
+                  ? "Invoices you created"
+                  : `${statusFilter[0].toUpperCase()}${statusFilter.slice(1)} invoices`;
+              // When the user has narrowed the list to zero, show a
+              // search/filter-aware empty state (DashboardList's default
+              // empty state pitches "Create your first invoice", which
+              // is wrong here — the user has 30 invoices, just none
+              // match their query).
+              if (
+                incoming.length > 0 &&
+                filteredInvoices.length === 0
+              ) {
+                return (
+                  <div>
+                    <div className="flex items-baseline justify-between mb-4">
+                      <span className="eyebrow">{titleBase}</span>
+                      <span className="font-mono text-[11px] text-dim tnum">
+                        00 / {String(incoming.length).padStart(2, "0")}
+                      </span>
+                    </div>
+                    <div className="border border-dashed border-line rounded-[4px] p-10 text-center">
+                      <p className="text-[14px] text-muted">
+                        No invoices match your filters.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter("all");
+                          setSearchQuery("");
+                        }}
+                        className="mt-3 btn-quiet text-[12px]"
+                      >
+                        Clear filters
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <DashboardList
+                  title={titleBase}
+                  invoices={filteredInvoices}
+                  labels={labels}
+                />
+              );
+            }
+            // Split view: Pending up top, Paid collapsed by default.
+            const nonPaidPending = incoming.filter(
+              (i) => i.status !== "paid",
+            );
+            const visiblePaid = showAllPaid ? paidInvoices : [];
+            return (
+              <div className="space-y-10">
+                <DashboardList
+                  title={`Pending (${pendingInvoices.length})`}
+                  invoices={nonPaidPending}
+                  labels={labels}
+                />
+                <div>
+                  {showAllPaid ? (
+                    <>
+                      <div className="flex items-baseline justify-end mb-2 -mt-1">
+                        <button
+                          type="button"
+                          onClick={() => setShowAllPaid(false)}
+                          className="btn-quiet text-[11px]"
+                          aria-expanded={true}
+                        >
+                          Hide
+                        </button>
+                      </div>
+                      <DashboardList
+                        title={`Paid (${paidInvoices.length})`}
+                        invoices={visiblePaid}
+                        labels={labels}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-baseline justify-between mb-4">
+                        <span className="eyebrow">
+                          Paid ({paidInvoices.length})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowAllPaid(true)}
+                          className="btn-quiet text-[11px]"
+                          aria-expanded={false}
+                        >
+                          Show all {paidInvoices.length} paid invoices
+                        </button>
+                      </div>
+                      <div className="border border-dashed border-line rounded-[4px] p-6 text-center max-w-2xl">
+                        <p className="text-[13px] text-muted leading-relaxed">
+                          {paidInvoices.length} paid invoice
+                          {paidInvoices.length === 1 ? "" : "s"} hidden to
+                          keep the overview short. Use the status filter or
+                          expand above to see them.
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {pendingInvoices.length > 0 && (
             <div className="mt-10 border border-gold/30 bg-gold/5 rounded-[4px] p-5 max-w-3xl">
@@ -1129,7 +1354,19 @@ function extractBatchIdFromUri(uri: string): string | null {
   return search.get("batch");
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({
+  children,
+  pendingCount = 0,
+}: {
+  children: React.ReactNode;
+  /**
+   * Number of pending invoices on the connected wallet's dashboard.
+   * Rendered as `Activity (N pending)` next to the nav link so the
+   * user can spot unhandled work without opening the page. Hidden
+   * when zero to avoid noise.
+   */
+  pendingCount?: number;
+}) {
   return (
     <main className="min-h-screen relative pb-32">
       <nav className="sticky top-0 z-10 backdrop-blur-sm bg-paper/80 border-b border-line">
@@ -1144,9 +1381,18 @@ function Shell({ children }: { children: React.ReactNode }) {
             </a>
             <a
               href="/dashboard"
-              className="hidden sm:inline-block px-3 py-2 text-[13px] text-ink"
+              className="hidden sm:inline-flex items-center gap-2 px-3 py-2 text-[13px] text-ink"
             >
-              Activity
+              <span>Activity</span>
+              {pendingCount > 0 && (
+                <span
+                  className="font-mono text-[10px] tracking-[0.06em] tnum text-gold border border-gold/40 bg-gold/5 rounded-full px-1.5 py-[1px] leading-none"
+                  aria-label={`${pendingCount} pending invoices`}
+                  title={`${pendingCount} pending invoice${pendingCount === 1 ? "" : "s"}`}
+                >
+                  {pendingCount} pending
+                </span>
+              )}
             </a>
             <a
               href="/payroll/outgoing"
