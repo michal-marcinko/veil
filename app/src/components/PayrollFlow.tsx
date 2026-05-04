@@ -115,6 +115,43 @@ const SAMPLE_RECIPIENTS: RecipientRow[] = [
 ];
 
 /**
+ * Extract the most informative message we can from a Solana / Umbra SDK
+ * thrown error. Solana web3 errors usually expose `.logs` (the program
+ * logs from simulation) and sometimes `.cause.logs`; the message alone
+ * is often the generic wrapper "Transaction simulation failed". Pulling
+ * the last few logs lets the user see WHY simulation failed (insufficient
+ * lamports, custom program error 0x1, missing account, etc.) instead of
+ * staring at an opaque string.
+ *
+ * Also detects two specific patterns that map to common UX failures and
+ * appends a hint:
+ *   - "insufficient" / "0x1" → likely public-balance funding gap
+ *   - "AccountNotFound" / "account does not exist" → unwrapped wSOL ATA
+ */
+function formatTxError(err: any): string {
+  const baseMsg = err?.message ?? String(err);
+  const logs: string[] | undefined =
+    err?.logs ?? err?.cause?.logs ?? err?.transactionLogs;
+  let detail = "";
+  if (Array.isArray(logs) && logs.length > 0) {
+    // Last 3 logs typically include the failure reason.
+    const tail = logs.slice(-3).join(" · ");
+    detail = ` — ${tail}`;
+  }
+  const combined = `${baseMsg}${detail}`;
+  // Heuristic hint for the common case: public-funding shortfall on
+  // claim-link rows. The deposit pulls from the sender's PUBLIC token
+  // ATA (e.g. wSOL on devnet), not native SOL or encrypted balance.
+  if (
+    /insufficient|0x1\b|0x1$/i.test(combined) ||
+    /AccountNotFound|account does not exist|TokenAccountNotFound/i.test(combined)
+  ) {
+    return `${combined}\nHint: claim-link rows pull from your PUBLIC ${PAYMENT_SYMBOL} ATA. Wrap more SOL or top up that ATA before re-running.`;
+  }
+  return combined;
+}
+
+/**
  * Parse multi-line text pasted into a wallet field. Accepts CSV
  * (`wallet,amount,memo`), TSV (tab-separated — what Google Sheets and
  * Excel deliver on cell-range copies), and forgives an optional header
@@ -535,7 +572,7 @@ export function PayrollFlow() {
               status: "failed",
               mode: "public",
               txSignature: null,
-              error: `Claim-link path failed: ${err.message ?? String(err)}`,
+              error: `Claim-link path failed: ${formatTxError(err)}`,
               registrationStatus: "unregistered",
             });
           }
@@ -571,7 +608,7 @@ export function PayrollFlow() {
             status: "failed",
             mode: useShieldedForRun ? "shielded" : "public",
             txSignature: null,
-            error: err.message ?? String(err),
+            error: formatTxError(err),
             registrationStatus: status,
           });
         }
