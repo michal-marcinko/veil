@@ -356,20 +356,28 @@ export default function CreatePage() {
         at the end so the form reads as "settling in" rather than snapping.
         prefers-reduced-motion users get the final state instantly.
       */}
-      <style>{`
+      {/*
+        Use dangerouslySetInnerHTML to bypass React's HTML-entity escaping
+        for the CSS body. Without it, characters like " ' < inside the CSS
+        comments get encoded to &quot; &#x27; &lt; on the server but render
+        as raw on the client, triggering a hydration mismatch warning. CSS
+        does not need HTML entity encoding inside <style> tags.
+      */}
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
         .form-reveal {
           opacity: 0;
           transform: translateY(40px);
           animation: form-reveal-anim 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
         /*
-          Exit pair to the reveal — runs when "Choose differently" is
-          clicked. From state matches the post-reveal resting position
-          (opacity 1, translateY 0) so the handoff is seamless; to state
-          fades out and drifts down 24px. Curve is ease-in-expo (mirror
-          of the reveal's ease-out-expo), so the section "leaves" with
-          the same character it arrived. 600ms exit < 900ms unmount
-          delay, so the section is fully invisible before it unmounts.
+          Exit pair to the reveal: runs when the user clicks the back
+          button. From state matches the post-reveal resting position so
+          the handoff is seamless; to state fades out and drifts down
+          24px. Curve mirrors the reveal so the section leaves with the
+          same character it arrived. 600ms exit is shorter than 900ms
+          unmount delay, so the section is fully invisible before unmount.
         */
         .form-reveal.is-exiting {
           animation: form-exit-anim 600ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
@@ -398,7 +406,9 @@ export default function CreatePage() {
             transform: none;
           }
         }
-      `}</style>
+      `,
+        }}
+      />
     </Frame>
   );
 }
