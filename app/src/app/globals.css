@@ -328,6 +328,32 @@
   .skeleton-bar {
     @apply bg-paper-2 rounded-[2px] animate-pulse;
   }
+
+  /* Refresh-button rotations.
+     `animate-spin-once`  — 360° over 600ms with the same easing curve
+                             as the editorial reveal. Keyed remount on
+                             the consumer side replays the animation
+                             on each click.
+     `animate-spin-slow`  — continuous 1.4s linear rotation while the
+                             button is in `loading` state. Subtle
+                             enough not to draw attention but signals
+                             work in progress. */
+  @keyframes spin-once {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  .animate-spin-once {
+    animation: spin-once 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .animate-spin-slow {
+    animation: spin-once 1400ms linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-spin-once,
+    .animate-spin-slow {
+      animation: none !important;
+    }
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import {
   DATE_BUCKET_ORDER,
 } from "@/components/DateGroupHeader";
 import { SlideOverPanel } from "@/components/SlideOverPanel";
+import { RefreshButton } from "@/components/RefreshButton";
 import { fetchInvoicesByCreator, markPaidOnChain } from "@/lib/anchor";
 import {
   sha256,
@@ -44,6 +45,11 @@ import {
 import bs58 from "bs58";
 
 type DashboardTab = "invoices" | "payroll";
+
+// Status filter values — lifted to module scope so child components
+// (FilterBar, LedgerSection) can type their props against the same union
+// the page does. Keep in sync with the on-chain Status enum's variants.
+type StatusFilter = "all" | "pending" | "paid" | "cancelled";
 
 // localStorage key for the apply-receipt textarea draft. Per-wallet so a
 // draft from another wallet doesn't leak. The slide-over hydrates from
@@ -243,8 +249,8 @@ export default function DashboardPage() {
 
   // Invoice list controls — stable sort + filter + search. The raw
   // `invoices` state is the source of truth; these inputs filter the
-  // displayed slice without refetching.
-  type StatusFilter = "all" | "pending" | "paid" | "cancelled";
+  // displayed slice without refetching. `StatusFilter` lives at module
+  // scope so the FilterBar component can share the type.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -1002,24 +1008,31 @@ export default function DashboardPage() {
       </SlideOverPanel>
 
       {/* Page header — Boska serif on the H1 ONLY (per editorial spec).
-          Section sub-headers below use Switzer with letter-spacing. */}
-      <div className="flex items-baseline justify-between mb-10 reveal">
+          2026-05-04 refinement: dropped the redundant "Activity" eyebrow
+          (the H1 was already "Activity" — felt stuttered). The eyebrow
+          now carries the connected wallet shorthand in mono small-caps,
+          which is information the user actually needs at a glance. The
+          subtitle was rewritten to drop the "Your private payment
+          ledger" prefix (the H1 + nav already convey "this is yours")
+          in favor of the cryptographic guarantee, which is the
+          differentiator. */}
+      <div className="flex items-start justify-between gap-6 mb-10 reveal">
         <div>
-          <span className="eyebrow">Activity</span>
+          {wallet.publicKey && (
+            <span className="font-mono text-[10.5px] tracking-[0.18em] uppercase text-ink/40 tabular-nums">
+              {`${wallet.publicKey.toBase58().slice(0, 4)}…${wallet.publicKey.toBase58().slice(-4)}`}
+            </span>
+          )}
           <h1 className="mt-3 font-display text-ink text-[44px] md:text-[60px] leading-[1.0] tracking-[-0.02em]">
             Activity
           </h1>
           <p className="mt-3 text-[14.5px] text-ink/55 max-w-lg leading-[1.5]">
-            Your private payment ledger — read directly from Solana.
+            Read directly from Solana. Encrypted to you.
           </p>
         </div>
-        <button
-          onClick={refresh}
-          disabled={loading}
-          className="btn-ghost text-[13px] px-4 py-2"
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        <div className="pt-2 shrink-0">
+          <RefreshButton onClick={refresh} loading={loading} />
+        </div>
       </div>
 
       {/* Tab bar — austere mono, hairline rule, 2px ink underline on active */}
@@ -1129,59 +1142,23 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Filter + search controls — sit above the list, never refetch.
-              The status dropdown is a plain <select> styled to match the
-              existing mono-uppercase chip aesthetic; debounce isn't
-              necessary at ~30 invoices. */}
+          {/* Filter + search controls — modern command-bar feel.
+              2026-05-04 refinement: replaced the chunky <select> with
+              inline pill segments (Linear / Phantom inspired); search
+              shed its border for an icon + bottom-rule underline that
+              deepens to gold on focus; "Bind receipt" demoted from a
+              boxed btn-ghost to a quiet text link with arrow. The whole
+              row reads airy now — typography carries the structure, not
+              borders. */}
           {incoming.length > 0 && (
-            <div className="mb-5 flex flex-col sm:flex-row gap-3 sm:items-center max-w-3xl">
-              <label className="flex items-center gap-2 shrink-0">
-                <span className="font-sans text-[10.5px] tracking-[0.18em] uppercase text-ink/45">
-                  Status
-                </span>
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-                  className="font-sans text-[12px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink focus:outline-none focus:border-ink cursor-pointer"
-                  aria-label="Filter invoices by status"
-                >
-                  <option value="all">All</option>
-                  <option value="pending">Pending</option>
-                  <option value="paid">Paid</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </label>
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by description, recipient, or PDA prefix"
-                className="flex-1 font-sans text-[13px] bg-paper border border-line rounded-[3px] px-3 py-1.5 text-ink placeholder:text-dim focus:outline-none focus:border-ink"
-                aria-label="Search invoices"
-              />
-              {(statusFilter !== "all" || searchQuery) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setStatusFilter("all");
-                    setSearchQuery("");
-                  }}
-                  className="btn-quiet text-[11px] shrink-0"
-                >
-                  Clear
-                </button>
-              )}
-              {pendingInvoices.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => openReceiptPanel()}
-                  className="btn-ghost text-[12px] px-3 py-1.5 shrink-0"
-                  aria-label="Open the apply-receipt panel"
-                >
-                  Bind receipt
-                </button>
-              )}
-            </div>
+            <FilterBar
+              statusFilter={statusFilter}
+              setStatusFilter={setStatusFilter}
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              pendingCount={pendingInvoices.length}
+              onBindReceipt={() => openReceiptPanel()}
+            />
           )}
 
           {/* List body. */}
@@ -1214,13 +1191,13 @@ export default function DashboardPage() {
               );
             }
 
-            const titleBase =
-              statusFilter === "all"
-                ? "Invoices you created"
-                : `${statusFilter[0].toUpperCase()}${statusFilter.slice(1)} invoices`;
+            // 2026-05-04 redesign: dropped the section title — the
+            // FilterBar above already shows which status is active and
+            // the date-group headers carry the structure inside the
+            // list. Adding a "Pending invoices" caption right above
+            // them was redundant noise.
             return (
               <LedgerSection
-                title={titleBase}
                 invoices={filteredInvoices}
                 labels={labels}
                 onBindReceipt={(pda) => openReceiptPanel(pda)}
@@ -1289,76 +1266,301 @@ export default function DashboardPage() {
  * Ledger section — title + grouped editorial rows.
  *
  * Rows are bucketed by createdAt into Today/Yesterday/This week/...
- * with sticky DateGroupHeader for each non-empty bucket. Stagger
+ * with thin DateGroupHeader for each non-empty bucket. Stagger
  * fade-up on initial mount (animation-delay per index, capped at
  * 600ms).
+ *
+ * 2026-05-04 refinement: PayPal-style collapse — Today + Yesterday are
+ * always shown inline. Everything older (This week / This month /
+ * Earlier) collapses behind a single "Earlier · N invoices ▾" toggle,
+ * which when expanded reveals those buckets in their natural order.
+ * Default is collapsed because most users only care about the recent
+ * window; older invoices are reachable in a single click.
  */
+type LedgerInvoice = {
+  pda: string;
+  status: string;
+  createdAt: number;
+};
+
+const RECENT_BUCKETS: ReadonlyArray<string> = ["Today", "Yesterday"];
+
 function LedgerSection({
-  title,
   invoices,
   labels,
   onBindReceipt,
 }: {
-  title: string;
-  invoices: Array<{
-    pda: string;
-    status: string;
-    createdAt: number;
-  }>;
+  invoices: Array<LedgerInvoice>;
   labels: Map<string, { payer: string; amount: string; description: string }>;
   onBindReceipt: (pda: string) => void;
 }) {
   // Bucket the (already sorted DESC by createdAt) list. Empty buckets
   // are skipped at render time but the order is fixed by
   // DATE_BUCKET_ORDER.
-  const buckets = new Map<string, typeof invoices>();
+  const buckets = new Map<string, LedgerInvoice[]>();
   for (const inv of invoices) {
     const key = bucketByCreatedAt(inv.createdAt);
     const arr = buckets.get(key) ?? [];
     arr.push(inv);
     buckets.set(key, arr);
   }
+
+  // Split into recent (always shown inline) vs older (behind the
+  // collapse toggle). The order within each group still follows
+  // DATE_BUCKET_ORDER so Today appears above Yesterday, This week above
+  // This month, etc.
+  const recentBuckets = DATE_BUCKET_ORDER.filter(
+    (label) => RECENT_BUCKETS.includes(label) && (buckets.get(label)?.length ?? 0) > 0,
+  );
+  const olderBuckets = DATE_BUCKET_ORDER.filter(
+    (label) => !RECENT_BUCKETS.includes(label) && (buckets.get(label)?.length ?? 0) > 0,
+  );
+  const olderCount = olderBuckets.reduce(
+    (sum, label) => sum + (buckets.get(label)?.length ?? 0),
+    0,
+  );
+
+  // Default closed when there ARE recent invoices — most usage is
+  // checking what came in today. When there's nothing recent, default
+  // open so the user isn't staring at a single italic line + a
+  // collapsed toggle (which would feel broken). The PayPal pattern
+  // that landed well in the spec assumes the recent slice is the
+  // headline; if it's empty the older slice IS the headline.
+  const [olderOpen, setOlderOpen] = useState(recentBuckets.length === 0);
+
+  // `runningIndex` drives the stagger animation delay across BOTH the
+  // recent and older sections so when older expands the rows continue
+  // the visual cascade rather than restart at index 0.
   let runningIndex = 0;
+
+  function renderBucket(bucketLabel: string): JSX.Element[] {
+    const rows = buckets.get(bucketLabel);
+    if (!rows || rows.length === 0) return [];
+    const out: JSX.Element[] = [
+      <DateGroupHeader
+        key={`hdr-${bucketLabel}`}
+        label={bucketLabel}
+        count={`${String(rows.length).padStart(2, "0")}`}
+      />,
+    ];
+    for (const inv of rows) {
+      const idx = runningIndex++;
+      const delay = Math.min(idx * 50, 600);
+      out.push(
+        <InvoiceRow
+          key={inv.pda}
+          pda={inv.pda}
+          status={inv.status}
+          createdAt={inv.createdAt}
+          label={labels.get(inv.pda)}
+          animationDelayMs={delay}
+          onBindReceipt={onBindReceipt}
+        />,
+      );
+    }
+    return out;
+  }
+
   return (
     <div>
-      <div className="flex items-baseline justify-between mb-4">
-        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-          {title}
-        </span>
-        <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
-          {String(invoices.length).padStart(2, "0")}
-        </span>
-      </div>
-      <ul className="divide-y divide-ink/5">
-        {DATE_BUCKET_ORDER.flatMap((bucketLabel) => {
-          const rows = buckets.get(bucketLabel);
-          if (!rows || rows.length === 0) return [];
-          const elements = [
-            <DateGroupHeader
-              key={`hdr-${bucketLabel}`}
-              label={bucketLabel}
-              count={`${String(rows.length).padStart(2, "0")}`}
-            />,
-            ...rows.map((inv) => {
-              const idx = runningIndex++;
-              const delay = Math.min(idx * 50, 600);
-              return (
-                <InvoiceRow
-                  key={inv.pda}
-                  pda={inv.pda}
-                  status={inv.status}
-                  createdAt={inv.createdAt}
-                  label={labels.get(inv.pda)}
-                  animationDelayMs={delay}
-                  onBindReceipt={onBindReceipt}
-                />
-              );
-            }),
-          ];
-          return elements;
-        })}
-      </ul>
+      {/* Recent section — Today + Yesterday inline, no surrounding chrome.
+          The DateGroupHeaders are now thin enough that they can carry the
+          structure without an outer section title. */}
+      {recentBuckets.length > 0 && (
+        <ul className="divide-y divide-ink/5">
+          {recentBuckets.flatMap(renderBucket)}
+        </ul>
+      )}
+
+      {/* Empty-recent fallback: if the user has older invoices but
+          nothing today/yesterday, show a small italic line so the page
+          doesn't look broken — the toggle right below it surfaces the
+          older history. */}
+      {recentBuckets.length === 0 && olderBuckets.length > 0 && (
+        <p className="font-display italic text-ink/50 text-[15px] py-6 px-4 border-b border-ink/5">
+          Nothing today or yesterday.
+        </p>
+      )}
+
+      {/* Older toggle — PayPal-style accordion. Default collapsed. */}
+      {olderBuckets.length > 0 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setOlderOpen((v) => !v)}
+            aria-expanded={olderOpen}
+            aria-controls="ledger-older-section"
+            className={[
+              "group w-full flex items-center justify-between",
+              "px-4 py-3 rounded-[3px]",
+              "font-mono text-[10.5px] tracking-[0.18em] uppercase",
+              "text-ink/50 hover:text-ink hover:bg-paper-2/60",
+              "transition-colors duration-150",
+              "focus:outline-none focus-visible:ring-2 focus-visible:ring-gold/30",
+            ].join(" ")}
+          >
+            <span className="inline-flex items-center gap-3">
+              <span>Earlier</span>
+              <span className="text-ink/30">·</span>
+              <span className="tabular-nums text-ink/40">
+                {String(olderCount).padStart(2, "0")} invoice{olderCount === 1 ? "" : "s"}
+              </span>
+            </span>
+            <ChevronIcon open={olderOpen} />
+          </button>
+          {olderOpen && (
+            <ul
+              id="ledger-older-section"
+              className="divide-y divide-ink/5 mt-1 animate-fade-up"
+            >
+              {olderBuckets.flatMap(renderBucket)}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * Filter bar — modern command-bar layout.
+ *
+ * Status as inline pill segments (no <select>), search as icon + bottom
+ * underline (no boxed input), Bind receipt as quiet text link with
+ * arrow. The whole row reads airy — typography, not borders, carries
+ * the structure.
+ */
+function FilterBar({
+  statusFilter,
+  setStatusFilter,
+  searchQuery,
+  setSearchQuery,
+  pendingCount,
+  onBindReceipt,
+}: {
+  statusFilter: StatusFilter;
+  setStatusFilter: (v: StatusFilter) => void;
+  searchQuery: string;
+  setSearchQuery: (v: string) => void;
+  pendingCount: number;
+  onBindReceipt: () => void;
+}) {
+  const segments: ReadonlyArray<{ value: StatusFilter; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "paid", label: "Paid" },
+    { value: "cancelled", label: "Cancelled" },
+  ];
+  return (
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6 max-w-3xl">
+      {/* Status pill segments — bg-paper-2/70 on the active pill, mono
+          small-caps for label, rounded-full. Click to switch. */}
+      <div
+        role="tablist"
+        aria-label="Filter invoices by status"
+        className="inline-flex items-center gap-1 self-start sm:self-auto"
+      >
+        {segments.map((seg) => {
+          const active = statusFilter === seg.value;
+          return (
+            <button
+              key={seg.value}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setStatusFilter(seg.value)}
+              className={[
+                "px-3 py-1.5 rounded-full",
+                "font-mono text-[10.5px] tracking-[0.14em] uppercase",
+                "transition-colors duration-150",
+                active
+                  ? "bg-paper-2 text-ink"
+                  : "text-ink/45 hover:text-ink hover:bg-paper-2/40",
+              ].join(" ")}
+            >
+              {seg.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Search — icon + underline only. No box. The bottom rule
+          deepens to ink on focus; gold caret. */}
+      <label className="group relative flex-1 flex items-center gap-2 border-b border-line/70 pb-1.5 focus-within:border-ink transition-colors duration-150">
+        <SearchIcon className="text-ink/35 group-focus-within:text-ink/65 transition-colors" />
+        <input
+          type="search"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search…"
+          aria-label="Search invoices"
+          className="w-full bg-transparent border-0 outline-none font-sans text-[13.5px] text-ink placeholder:text-ink/30 caret-gold py-0.5"
+        />
+        {searchQuery && (
+          <button
+            type="button"
+            onClick={() => setSearchQuery("")}
+            aria-label="Clear search"
+            className="font-mono text-[10px] tracking-[0.14em] uppercase text-ink/35 hover:text-ink transition-colors shrink-0"
+          >
+            Clear
+          </button>
+        )}
+      </label>
+
+      {/* Bind receipt — quiet text link with arrow, not a boxed
+          button. Hidden when there are no pending invoices to bind. */}
+      {pendingCount > 0 && (
+        <button
+          type="button"
+          onClick={onBindReceipt}
+          aria-label="Open the apply-receipt panel"
+          className="self-start sm:self-auto font-mono text-[11px] tracking-[0.14em] uppercase text-gold hover:text-ink transition-colors inline-flex items-center gap-1.5 shrink-0"
+        >
+          <span>bind receipt</span>
+          <span aria-hidden>&rarr;</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 10 10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+      aria-hidden
+    >
+      <path d="M2 3.5l3 3 3-3" />
+    </svg>
+  );
+}
+
+function SearchIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 13 13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <circle cx="5.5" cy="5.5" r="3.5" />
+      <path d="M11.5 11.5L8 8" />
+    </svg>
   );
 }
 

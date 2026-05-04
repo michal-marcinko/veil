@@ -82,10 +82,11 @@ describe("Dashboard page", () => {
 
     await waitFor(() => {
       // Page was renamed Dashboard → Activity; the editorial-ledger
-      // redesign (2026-05-04) uses Boska "Activity" as the H1 and a
-      // subtitle of "Your private payment ledger — read directly from
-      // Solana." Either marker confirms the page rendered.
-      expect(screen.getByText(/Your private payment ledger/i)).toBeInTheDocument();
+      // redesign (2026-05-04) uses Boska "Activity" as the H1 with a
+      // wallet-shorthand mono eyebrow above and the subtitle "Read
+      // directly from Solana. Encrypted to you." Match against the
+      // subtitle — it's the most stable marker for "page rendered".
+      expect(screen.getByText(/Read directly from Solana\./i)).toBeInTheDocument();
     });
 
     await waitFor(() => {
@@ -136,7 +137,7 @@ describe("Dashboard page", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Your private payment ledger/i)).toBeInTheDocument();
+      expect(screen.getByText(/Read directly from Solana\./i)).toBeInTheDocument();
     });
 
     const confirmButton = screen.queryByRole("button", { name: /^Confirm paid$/i });
