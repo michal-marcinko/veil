@@ -1135,6 +1135,19 @@ export function summarizeScan(scan: {
 export interface ClaimArgs {
   client: UmbraClient;
   utxos: any[]; // ScannedUtxoData[] — opaque to us
+  /**
+   * Optional per-UTXO progress callback. When provided, UTXOs are
+   * processed sequentially (one SDK `claim([utxo])` call each) so the
+   * caller can drive a UI progress indicator without coupling to SDK
+   * internals. Without this callback, the SDK is invoked once with the
+   * full array (legacy/batched path).
+   *
+   * Fires with `(0, total)` before the first claim and `(i, total)`
+   * after each successful UTXO. Each Phantom popup corresponds to one
+   * UTXO — the callback bumps `current` once that popup is signed and
+   * its tx submitted.
+   */
+  onProgress?: (current: number, total: number) => void;
 }
 
 export async function claimUtxos(args: ClaimArgs) {
@@ -1158,6 +1171,23 @@ export async function claimUtxos(args: ClaimArgs) {
     { client: args.client },
     { zkProver, relayer, fetchBatchMerkleProof } as any,
   );
+
+  // Progress mode: drive sequential single-UTXO claims so the modal
+  // can show "3 of 6 done" after each Phantom popup is signed. Returns
+  // the LAST per-UTXO claim result (matches legacy behaviour where the
+  // dashboard only inspects the result blob for stable signatures).
+  if (args.onProgress) {
+    const total = args.utxos.length;
+    args.onProgress(0, total);
+    let lastResult: any = null;
+    for (let i = 0; i < total; i++) {
+      const utxo = args.utxos[i];
+      lastResult = await claim([utxo] as any);
+      args.onProgress(i + 1, total);
+    }
+    return lastResult;
+  }
+
   return claim(args.utxos as any);
 }
 
