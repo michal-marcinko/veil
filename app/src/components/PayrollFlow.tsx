@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
@@ -342,6 +342,50 @@ export function PayrollFlow() {
   function loadSample() {
     setRecipients(SAMPLE_RECIPIENTS.map((r) => ({ ...r })));
     setDetection(null);
+  }
+
+  /* ───────────── CSV file import (click + drag-drop) ───────────── */
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragActive, setDragActive] = useState(false);
+
+  async function ingestCsvFile(file: File) {
+    const text = await file.text();
+    const parsed = parsePastedRecipients(text);
+    if (parsed.length > 0) {
+      setRecipients(parsed);
+      setDetection(null);
+    }
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) {
+      ingestCsvFile(file).catch((err) =>
+        setError(`CSV import failed: ${err?.message ?? String(err)}`),
+      );
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    if (running) return;
+    e.preventDefault();
+    setDragActive(true);
+  }
+  function handleDragLeave(_e: React.DragEvent<HTMLDivElement>) {
+    setDragActive(false);
+  }
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    if (running) return;
+    e.preventDefault();
+    setDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      ingestCsvFile(file).catch((err) =>
+        setError(`CSV import failed: ${err?.message ?? String(err)}`),
+      );
+    }
   }
 
   async function handleSubmit() {
@@ -696,14 +740,15 @@ export function PayrollFlow() {
 
           {/* Recipients — editable row table. Sablier-inspired structure
               in the Mercury editorial register: borderless rows, hairline
-              separators, inline wallet validation chips, paste-explode on
-              any wallet field (paste multi-line CSV or TSV from Sheets and
-              it expands into N rows in place). */}
+              separators, inline wallet validation chips. Three input
+              paths: type a row, paste multi-line text from Sheets into
+              any wallet field (explodes into N rows in place), or drop
+              a CSV file on the table / click 'Import CSV'. */}
           <div className="mt-14">
-            <div className="flex items-baseline justify-between mb-3 gap-4 flex-wrap">
+            <div className="flex items-baseline justify-between gap-4 flex-wrap">
               <span className="eyebrow">Recipients</span>
               <div className="flex items-baseline gap-3 text-[12px]">
-                <span className="text-dim">
+                <span className="text-dim tabular-nums">
                   {parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} ·{" "}
                   {totalDisplay}
                 </span>
@@ -715,14 +760,14 @@ export function PayrollFlow() {
                 )}
               </div>
             </div>
-            <div className="border-t border-line">
-              <div className="hidden md:grid grid-cols-[1.5rem_1.4fr_7rem_1fr_1.5rem] gap-4 py-2.5 border-b border-line/40 items-baseline">
-                <div />
-                <div className="mono-chip">Wallet</div>
-                <div className="mono-chip text-right">Amount · {PAYMENT_SYMBOL}</div>
-                <div className="mono-chip">Memo</div>
-                <div />
-              </div>
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`mt-5 border-t border-line relative transition-colors duration-150 ${
+                dragActive ? "bg-paper-3/70" : ""
+              }`}
+            >
               {recipients.map((row, idx) => (
                 <RecipientEditorRow
                   key={idx}
@@ -735,8 +780,13 @@ export function PayrollFlow() {
                   onPasteMulti={(parsedRows) => explodeAt(idx, parsedRows)}
                 />
               ))}
+              {dragActive && (
+                <div className="absolute inset-0 bg-paper/85 backdrop-blur-sm flex items-center justify-center pointer-events-none border border-dashed border-ink/30 rounded-[3px]">
+                  <span className="eyebrow text-ink">Drop CSV to import</span>
+                </div>
+              )}
             </div>
-            <div className="mt-3 flex items-baseline justify-between gap-4 flex-wrap text-[13px]">
+            <div className="mt-4 flex items-center justify-between gap-4 flex-wrap text-[13px]">
               <button
                 type="button"
                 onClick={addRecipient}
@@ -745,20 +795,34 @@ export function PayrollFlow() {
               >
                 + Add row
               </button>
-              <span className="text-[12px] text-muted">
-                Or{" "}
+              <div className="flex items-center gap-3 text-[12px] text-muted">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={running}
+                  className="hover:text-ink transition-colors"
+                >
+                  Import CSV
+                </button>
+                <span className="text-line-2">·</span>
                 <button
                   type="button"
                   onClick={loadSample}
                   disabled={running}
-                  className="text-muted hover:text-ink transition-colors underline-offset-2 hover:underline"
+                  className="hover:text-ink transition-colors"
                 >
-                  load sample
+                  Load sample
                 </button>
-                . Paste a list from a spreadsheet into any wallet field to
-                explode into rows.
-              </span>
+              </div>
             </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.tsv,.txt"
+              onChange={handleFileChange}
+              className="hidden"
+              aria-label="Import payroll CSV"
+            />
           </div>
 
           {/* Optional chips: override funding / registration check */}
@@ -1153,23 +1217,24 @@ function ResultRow({
 
 function PlaceholderRow({ row, idx }: { row: PayrollRow; idx: number }) {
   return (
-    <li className="py-4 opacity-50">
+    <li className="py-4">
       <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
         <span className="font-mono text-[11px] text-dim tnum">
           {String(idx + 1).padStart(2, "0")}
         </span>
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="font-mono text-[13px] text-muted truncate">
+            <span className="font-mono text-[13px] text-ink/75 truncate">
               {row.wallet.slice(0, 8)}…{row.wallet.slice(-5)}
             </span>
             <span className="text-[13px] text-muted tnum">{row.amount}</span>
           </div>
-          <div className="mt-1 text-[12.5px] text-muted/70 truncate">
+          <div className="mt-1 text-[12.5px] text-muted truncate">
             {row.memo || "No memo"}
           </div>
         </div>
-        <span className="font-mono text-[10.5px] text-dim tracking-[0.14em] uppercase">
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-muted tracking-[0.14em] uppercase">
+          <span className="inline-block w-1.5 h-1.5 rounded-full border border-line-2 bg-paper" />
           Pending
         </span>
       </div>
