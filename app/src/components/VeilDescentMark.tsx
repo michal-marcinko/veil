@@ -5,16 +5,27 @@ import { useEffect, useState } from "react";
 /**
  * Celebratory veil-descent animation for the /create success state.
  * Adapted from `CreateModeSelector`'s VeilMark: same visual composition
- * (paper + bust figure + line items) but the veil descends automatically
+ * (paper + figure(s) + line items) but the veil descends automatically
  * on mount, instead of on hover.
  *
- * Sized at 144x144 by default — large enough to be the visual focal
- * point of the success layout. Render inside a centered container.
+ * `variant`:
+ *  - `single` (default) — one bust figure. Used by the invoice success
+ *    state ("X requested from one payer").
+ *  - `batch` — three figures. Used by the payroll success state
+ *    ("N payments · X total").
+ *
+ * Sized at 144x144 by default. Render inside a centered container.
  *
  * Hides itself for `prefers-reduced-motion` users by snapping straight
  * to the descended state with no transition.
  */
-export function VeilDescentMark({ size = 144 }: { size?: number }) {
+export function VeilDescentMark({
+  size = 144,
+  variant = "single",
+}: {
+  size?: number;
+  variant?: "single" | "batch";
+}) {
   const [descended, setDescended] = useState(false);
 
   useEffect(() => {
@@ -90,19 +101,56 @@ export function VeilDescentMark({ size = 144 }: { size?: number }) {
           <path d="M380 257 V358" stroke="#1A1814" strokeWidth="6.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
         </g>
 
-        {/* PAGE CONTENT (clipped) — single bust + line items */}
+        {/* PAGE CONTENT (clipped) — figure(s) + line items.
+            single: one bust front-and-center.
+            batch: three figures, center taller, drawn last so it sits in front. */}
         <g clipPath="url(#vdm-pageClip)">
-          <g>
-            <circle cx="259" cy="155" r="28" stroke="#1A1814" strokeWidth="5.2" fill="none" />
-            <path
-              d="M190 275 C190 220 213 195 259 195 C305 195 328 220 328 275"
-              stroke="#1A1814"
-              strokeWidth="5.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              fill="none"
-            />
-          </g>
+          {variant === "single" ? (
+            <g>
+              <circle cx="259" cy="155" r="28" stroke="#1A1814" strokeWidth="5.2" fill="none" />
+              <path
+                d="M190 275 C190 220 213 195 259 195 C305 195 328 220 328 275"
+                stroke="#1A1814"
+                strokeWidth="5.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            </g>
+          ) : (
+            <g>
+              {/* Left figure */}
+              <circle cx="192" cy="160" r="18" stroke="#1A1814" strokeWidth="5.2" fill="none" />
+              <path
+                d="M162 275 C162 232 174 220 192 220 C210 220 222 232 222 275"
+                stroke="#1A1814"
+                strokeWidth="5.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+              {/* Right figure (mirror) */}
+              <circle cx="326" cy="160" r="18" stroke="#1A1814" strokeWidth="5.2" fill="none" />
+              <path
+                d="M296 275 C296 232 308 220 326 220 C344 220 356 232 356 275"
+                stroke="#1A1814"
+                strokeWidth="5.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+              {/* Center figure — taller, drawn last */}
+              <circle cx="259" cy="148" r="20" stroke="#1A1814" strokeWidth="5.2" fill="none" />
+              <path
+                d="M225 275 C225 222 240 202 259 202 C278 202 293 222 293 275"
+                stroke="#1A1814"
+                strokeWidth="5.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            </g>
+          )}
           <g>
             <path d="M161 297 H213" stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" fill="none" />
             <path d="M161 317 H219" stroke="#1A1814" strokeWidth="5.2" strokeLinecap="round" fill="none" />
