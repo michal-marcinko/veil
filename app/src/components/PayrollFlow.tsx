@@ -92,17 +92,63 @@ interface RegistrationDetectionResult {
   unknownIndexes: number[];
 }
 
-const SAMPLE_CSV =
-  "wallet,amount,memo\n" +
-  "4w85uvq3GeKRWKeeB2CyH4FeSYtWsvumHt3XB2TaZdFg,100.00,April contractor retainer\n" +
-  "8hQ5k9sDZQx7WkZpPRM6MeQpM9tYfWnGf6bYj1Gx9zQm,250.00,Design sprint bonus";
+interface RecipientRow {
+  wallet: string;
+  amount: string;
+  memo: string;
+}
+
+const EMPTY_RECIPIENT: RecipientRow = { wallet: "", amount: "", memo: "" };
+
+const SAMPLE_RECIPIENTS: RecipientRow[] = [
+  {
+    wallet: "4w85uvq3GeKRWKeeB2CyH4FeSYtWsvumHt3XB2TaZdFg",
+    amount: "100.00",
+    memo: "April contractor retainer",
+  },
+  {
+    wallet: "8hQ5k9sDZQx7WkZpPRM6MeQpM9tYfWnGf6bYj1Gx9zQm",
+    amount: "250.00",
+    memo: "Design sprint bonus",
+  },
+];
+
+/**
+ * Parse multi-line text pasted into a wallet field. Accepts CSV
+ * (`wallet,amount,memo`), TSV (tab-separated — what Google Sheets and
+ * Excel deliver on cell-range copies), and forgives an optional header
+ * row. Used by the row table's paste-explode handler so a paste from
+ * the user's spreadsheet expands into N recipient rows automatically.
+ */
+function parsePastedRecipients(text: string): RecipientRow[] {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return [];
+  // Skip a header row if the first line starts with "wallet" — handles
+  // both `wallet,amount,memo` (CSV) and `wallet\tamount\tmemo` (TSV).
+  const startIdx = /^wallet[,\t\s]/i.test(lines[0]) ? 1 : 0;
+  return lines.slice(startIdx).map((line) => {
+    const parts = line.split(/[,\t]/).map((p) => p.trim());
+    return {
+      wallet: parts[0] ?? "",
+      amount: parts[1] ?? "",
+      memo: parts[2] ?? "",
+    };
+  });
+}
 
 export function PayrollFlow() {
   const wallet = useWallet();
   const { connection } = useConnection();
 
   const [companyName, setCompanyName] = useState("");
-  const [csvText, setCsvText] = useState("");
+  const [recipients, setRecipients] = useState<RecipientRow[]>([
+    { ...EMPTY_RECIPIENT },
+  ]);
   const [mode, setMode] = useState<RunMode>("auto");
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState<RunPhase>("idle");
@@ -129,7 +175,31 @@ export function PayrollFlow() {
   // because the form is fade-locked while running, but defensive).
   const [runTotalCount, setRunTotalCount] = useState(0);
 
-  const parsed = useMemo(() => parsePayrollCsv(csvText), [csvText]);
+  // Derive parsed result from the recipient rows by converting to CSV
+  // and feeding the existing parser. Keeps runPayroll + the registration
+  // detector unchanged (both consume parsed.rows / parsed.errors). Empty
+  // rows (the trailing blank one users always have while typing) are
+  // filtered out so we don't surface "Row 2: wallet is blank" mid-typing.
+  const parsed = useMemo(() => {
+    const nonEmpty = recipients.filter(
+      (r) => r.wallet.trim() || r.amount.trim() || r.memo.trim(),
+    );
+    if (nonEmpty.length === 0) return { rows: [], errors: [] };
+    const csv =
+      "wallet,amount,memo\n" +
+      nonEmpty
+        .map((r) => {
+          const wallet = r.wallet.trim();
+          const amount = r.amount.trim();
+          // Memos can't contain commas (parsePayrollCsv splits on comma);
+          // sanitize by replacing with spaces so a paste from Sheets that
+          // includes a comma in the description doesn't blow up parsing.
+          const memo = (r.memo || "").trim().replace(/,/g, " ");
+          return `${wallet},${amount},${memo}`;
+        })
+        .join("\n");
+    return parsePayrollCsv(csv);
+  }, [recipients]);
   const total = useMemo(() => {
     let sum = 0n;
     for (const row of parsed.rows) {
@@ -220,8 +290,57 @@ export function PayrollFlow() {
     }
   }
 
-  function onCsvTextChange(next: string) {
-    setCsvText(next);
+  /* ───────────── recipient-row editing helpers ───────────── */
+
+  /** Mutate one recipient row + invalidate cached registration detection. */
+  function updateRecipient(idx: number, field: keyof RecipientRow, value: string) {
+    setRecipients((rs) =>
+      rs.map((r, i) => (i === idx ? { ...r, [field]: value } : r)),
+    );
+    setDetection(null);
+  }
+
+  /** Append a fresh blank row at the end. */
+  function addRecipient() {
+    setRecipients((rs) => [...rs, { ...EMPTY_RECIPIENT }]);
+  }
+
+  /** Drop one row (clamped to one-row minimum). */
+  function removeRecipient(idx: number) {
+    setRecipients((rs) =>
+      rs.length === 1 ? [{ ...EMPTY_RECIPIENT }] : rs.filter((_, i) => i !== idx),
+    );
+    setDetection(null);
+  }
+
+  /**
+   * Paste-explode: replace the row at `idx` with the parsed list, splicing
+   * any subsequent rows after. Lets the user paste a multi-line CSV/TSV
+   * from Excel or Sheets into any wallet field and have it expand into N
+   * editable rows in place.
+   */
+  function explodeAt(idx: number, parsedRows: RecipientRow[]) {
+    if (parsedRows.length === 0) return;
+    setRecipients((rs) => {
+      const before = rs.slice(0, idx);
+      const after = rs.slice(idx + 1);
+      // If the trailing row is the standard empty-trailing-blank, drop it
+      // so the paste lands clean (no orphan empty row at the bottom).
+      const tail =
+        after.length > 0 &&
+        !after[0].wallet.trim() &&
+        !after[0].amount.trim() &&
+        !after[0].memo.trim()
+          ? after.slice(1)
+          : after;
+      return [...before, ...parsedRows, ...tail];
+    });
+    setDetection(null);
+  }
+
+  /** Replace the row list with the sample data. */
+  function loadSample() {
+    setRecipients(SAMPLE_RECIPIENTS.map((r) => ({ ...r })));
     setDetection(null);
   }
 
@@ -575,46 +694,70 @@ export function PayrollFlow() {
             />
           </div>
 
-          {/* CSV — borderless canvas. Hairline-top + hairline-bottom
-              rules give it visual containment without the 2010s
-              bordered-card register. Monospace text reads like a notebook
-              page; the sample CSV in the placeholder teaches the format
-              by example. */}
+          {/* Recipients — editable row table. Sablier-inspired structure
+              in the Mercury editorial register: borderless rows, hairline
+              separators, inline wallet validation chips, paste-explode on
+              any wallet field (paste multi-line CSV or TSV from Sheets and
+              it expands into N rows in place). */}
           <div className="mt-14">
-            <div className="flex items-baseline justify-between mb-3">
-              <span className="eyebrow">Payroll CSV</span>
-              {!csvText && !running && (
-                <button
-                  type="button"
-                  onClick={() => onCsvTextChange(SAMPLE_CSV)}
-                  className="text-[12px] text-muted hover:text-ink transition-colors"
-                >
-                  Load sample →
-                </button>
-              )}
+            <div className="flex items-baseline justify-between mb-3 gap-4 flex-wrap">
+              <span className="eyebrow">Recipients</span>
+              <div className="flex items-baseline gap-3 text-[12px]">
+                <span className="text-dim">
+                  {parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} ·{" "}
+                  {totalDisplay}
+                </span>
+                {parsed.errors.length > 0 && (
+                  <span className="text-brick">
+                    {parsed.errors.length} error
+                    {parsed.errors.length === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="border-t border-line">
-              <textarea
-                value={csvText}
-                onChange={(e) => onCsvTextChange(e.target.value)}
-                rows={9}
-                disabled={running}
-                className="csv-canvas-input"
-                placeholder={SAMPLE_CSV}
-                aria-label="Payroll CSV"
-              />
+              <div className="hidden md:grid grid-cols-[1.5rem_1.4fr_7rem_1fr_1.5rem] gap-4 py-2.5 border-b border-line/40 items-baseline">
+                <div />
+                <div className="mono-chip">Wallet</div>
+                <div className="mono-chip text-right">Amount · {PAYMENT_SYMBOL}</div>
+                <div className="mono-chip">Memo</div>
+                <div />
+              </div>
+              {recipients.map((row, idx) => (
+                <RecipientEditorRow
+                  key={idx}
+                  row={row}
+                  idx={idx}
+                  canRemove={recipients.length > 1 || !!row.wallet || !!row.amount || !!row.memo}
+                  disabled={running}
+                  onChange={(field, value) => updateRecipient(idx, field, value)}
+                  onRemove={() => removeRecipient(idx)}
+                  onPasteMulti={(parsedRows) => explodeAt(idx, parsedRows)}
+                />
+              ))}
             </div>
-            <div className="border-t border-line pt-2 flex items-baseline justify-between gap-4 flex-wrap">
-              <span className="text-[12px] text-dim">
-                {parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} ·{" "}
-                {totalDisplay}
+            <div className="mt-3 flex items-baseline justify-between gap-4 flex-wrap text-[13px]">
+              <button
+                type="button"
+                onClick={addRecipient}
+                disabled={running}
+                className="text-muted hover:text-ink transition-colors"
+              >
+                + Add row
+              </button>
+              <span className="text-[12px] text-muted">
+                Or{" "}
+                <button
+                  type="button"
+                  onClick={loadSample}
+                  disabled={running}
+                  className="text-muted hover:text-ink transition-colors underline-offset-2 hover:underline"
+                >
+                  load sample
+                </button>
+                . Paste a list from a spreadsheet into any wallet field to
+                explode into rows.
               </span>
-              {parsed.errors.length > 0 && (
-                <span className="text-[12px] text-brick">
-                  {parsed.errors.length} parse error
-                  {parsed.errors.length === 1 ? "" : "s"}
-                </span>
-              )}
             </div>
           </div>
 
@@ -724,6 +867,119 @@ export function PayrollFlow() {
 }
 
 /* ─────────────────────────── sub-components ─────────────────────────── */
+
+/**
+ * One editable row in the recipients table. Three transparent inputs
+ * (wallet / amount / memo) + a delete button + a wallet-validity dot.
+ *
+ * The wallet input intercepts multi-line paste events: when the user
+ * pastes from a spreadsheet (CSV or TSV with N rows), the row table
+ * explodes into N rows in place via `onPasteMulti`. Single-line pastes
+ * fall through to default browser behavior.
+ */
+function RecipientEditorRow({
+  row,
+  idx,
+  canRemove,
+  disabled,
+  onChange,
+  onRemove,
+  onPasteMulti,
+}: {
+  row: RecipientRow;
+  idx: number;
+  canRemove: boolean;
+  disabled: boolean;
+  onChange: (field: keyof RecipientRow, value: string) => void;
+  onRemove: () => void;
+  onPasteMulti: (rows: RecipientRow[]) => void;
+}) {
+  const isValidWallet = useMemo<null | boolean>(() => {
+    const trimmed = row.wallet.trim();
+    if (!trimmed) return null;
+    try {
+      new PublicKey(trimmed);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [row.wallet]);
+
+  const isValidAmount = useMemo<null | boolean>(() => {
+    const trimmed = row.amount.trim();
+    if (!trimmed) return null;
+    return parseAmountToBaseUnits(trimmed, PAYMENT_DECIMALS) !== null;
+  }, [row.amount]);
+
+  function handleWalletPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const text = e.clipboardData.getData("text");
+    if (!text.includes("\n")) return; // single-line, normal browser paste
+    e.preventDefault();
+    const parsed = parsePastedRecipients(text);
+    if (parsed.length > 0) onPasteMulti(parsed);
+  }
+
+  return (
+    <div className="grid md:grid-cols-[1.5rem_1.4fr_7rem_1fr_1.5rem] gap-4 py-2.5 border-b border-line/40 items-baseline">
+      <span className="font-mono text-[11px] text-dim tnum md:pt-2">
+        {String(idx + 1).padStart(2, "0")}
+      </span>
+      <div className="flex items-baseline gap-2 min-w-0">
+        <input
+          value={row.wallet}
+          onChange={(e) => onChange("wallet", e.target.value)}
+          onPaste={handleWalletPaste}
+          placeholder="Solana wallet address"
+          className="recipient-input font-mono text-[13px] flex-1 min-w-0"
+          disabled={disabled}
+          aria-label={`Wallet for row ${idx + 1}`}
+          spellCheck={false}
+          autoComplete="off"
+        />
+        {isValidWallet === true && (
+          <span className="recipient-dot bg-sage" aria-label="Valid wallet" />
+        )}
+        {isValidWallet === false && (
+          <span className="recipient-dot bg-brick" aria-label="Invalid wallet" />
+        )}
+      </div>
+      <input
+        value={row.amount}
+        onChange={(e) => onChange("amount", e.target.value)}
+        placeholder="0.00"
+        inputMode="decimal"
+        className={`recipient-input text-right font-mono tabular-nums text-[13px] ${
+          isValidAmount === false ? "text-brick" : ""
+        }`}
+        disabled={disabled}
+        aria-label={`Amount for row ${idx + 1}`}
+        spellCheck={false}
+        autoComplete="off"
+      />
+      <input
+        value={row.memo}
+        onChange={(e) => onChange("memo", e.target.value)}
+        placeholder="Optional"
+        className="recipient-input text-[13px] text-ink/85"
+        disabled={disabled}
+        aria-label={`Memo for row ${idx + 1}`}
+        spellCheck={false}
+      />
+      {canRemove && !disabled ? (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-dim hover:text-brick transition-colors text-[18px] leading-none md:pt-0.5"
+          aria-label={`Remove row ${idx + 1}`}
+        >
+          ×
+        </button>
+      ) : (
+        <span aria-hidden />
+      )}
+    </div>
+  );
+}
 
 function FundingExpander({
   mode,
@@ -1103,26 +1359,37 @@ function PayrollFlowStyles() {
         from { opacity: 0; transform: translateY(4px); }
         to   { opacity: 1; transform: translateY(0); }
       }
-      .csv-canvas-input {
-        display: block;
-        width: 100%;
+      /* Editable recipient-row inputs. Borderless at rest (read as
+         inline text), subtle paper-tint background on focus to signal
+         the active cell — no border, no box-shadow ring. Matches the
+         canvas-display-input register from /create invoice. */
+      .recipient-input {
         background: transparent;
         border: 0;
         outline: none;
-        padding: 18px 0;
-        font-family: var(--font-mono), ui-monospace, monospace;
-        font-size: 13px;
-        line-height: 1.7;
+        width: 100%;
         color: #1c1712;
-        resize: vertical;
-        min-height: 200px;
+        padding: 4px 6px;
+        margin-left: -6px;
+        border-radius: 2px;
+        transition: background-color 120ms ease;
       }
-      .csv-canvas-input::placeholder {
+      .recipient-input::placeholder {
         color: #a59c84;
-        white-space: pre;
       }
-      .csv-canvas-input:disabled {
+      .recipient-input:focus {
+        background: rgba(28, 23, 18, 0.04);
+      }
+      .recipient-input:disabled {
         cursor: not-allowed;
+      }
+      /* Wallet-validity dot — sage when parseable, brick when not. */
+      .recipient-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        flex-shrink: 0;
       }
       .canvas-disclosure-arrow {
         display: inline-block;
