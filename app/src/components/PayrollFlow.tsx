@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, type Transaction, type VersionedTransaction } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import {
   RegistrationModal,
@@ -40,18 +40,33 @@ import {
   downloadPayrollPacketPdf,
 } from "@/lib/payrollPacketDownload";
 import {
+  buildBatchedFundTxV0,
+  buildFundShadowTx,
   buildShadowClient,
   checkRecipientsRegistration,
   depositToShadow,
+  deriveShadowRegistrationValues,
   fundShadowAccount,
   generateClaimUrl,
   generateEphemeralKeypair,
+  lookupRegisteredReceiver,
+  prewarmZkAssets,
   registerShadowAccount,
+  resetRegisteredReceiverCache,
   rowsToClaimLinkCsv,
   SHADOW_FUNDING_LAMPORTS,
+  submitSignedBatchedFundTxV0,
+  submitSignedFundShadowTx,
+  type BuiltBatchedFundTx,
+  type BuiltFundShadowTx,
   type ClaimLinkRow,
+  type EphemeralKeypair,
+  type RegisteredReceiverValues,
   type RegistrationStatus,
+  type ShadowRegistrationValues,
 } from "@/lib/payroll-claim-links";
+import { persistPayrollRun } from "@/lib/payroll-runs-storage";
+import { formatTxError, type SdkErrorDetail } from "@/lib/sdk-error";
 
 /**
  * PayrollFlow — Document Canvas redesign (2026-05-04).
@@ -90,7 +105,36 @@ interface PayrollRunRow extends PayrollPacketRow {
    *  shape (PayrollPacketRow), but the runtime row also carries the
    *  full logs + phase so a "Show details" expander can render them.
    *  Discarded when the packet is built (see `runRowToPacketRow`). */
-  errorDetail?: RowErrorDetail;
+  errorDetail?: SdkErrorDetail;
+}
+
+/**
+ * Per-row pre-flight metadata for the direct-registered path (Phase C).
+ * Built before the single-popup signAllTransactions call when the
+ * recipient is already an Umbra user — bypasses the entire
+ * shadow-funding + shadow-register dance and targets the recipient's
+ * on-chain x25519 view key directly via `payInvoiceCpi`'s
+ * `ProofOverrides`.
+ *
+ * Mirrors the shape of `prefundedShadows` entries for claim-link rows
+ * but with neither an ephemeral keypair nor a fund step — the
+ * recipient is the direct ix target, no indirection.
+ */
+interface DirectRegisteredEntry {
+  /** Receiver values pulled fresh from chain by `lookupRegisteredReceiver`. */
+  values: RegisteredReceiverValues;
+  /** Build / sign error from the unified pre-flight, if any. When set,
+   *  the row's processing branch surfaces this as the failure cause and
+   *  doesn't attempt to submit. */
+  buildError: string | null;
+  /** Pre-signed VeilPay deposit tx + cached metadata for submission
+   *  after the single-popup signAllTransactions returns. There's no
+   *  register-wait gate for direct rows so submission runs as soon as
+   *  signing completes. */
+  signedDeposit?: {
+    tx: VersionedTransaction;
+    built: any; // BuiltPayInvoiceCpiTx
+  };
 }
 
 interface RegistrationDetectionResult {
@@ -120,122 +164,15 @@ const SAMPLE_RECIPIENTS: RecipientRow[] = [
   },
 ];
 
-/**
- * Structured payload for a failed row. Carries the headline message,
- * the program logs (when we can find them), and an optional phase
- * marker telling us WHICH step of the claim-link sub-flow failed
- * (fund / register / deposit) — useful because each phase touches a
- * different program and the right next step depends on which one
- * tripped.
- */
-interface RowErrorDetail {
-  /** Single-line summary surfaced in the row chip. */
-  summary: string;
-  /** Sub-step that threw, when known. */
-  phase?: "fund" | "register" | "deposit" | "shielded" | "public";
-  /** Last ~20 program logs from simulation, when present. Joined
-   *  with newlines for the disclosure UI. */
-  logs?: string[];
-  /** Raw error message from the thrower, before we added hints. */
-  rawMessage: string;
-}
+/* ─────────────────────────────────────────────────────────────────────
+   Payroll-run persistence — see `lib/payroll-runs-storage.ts` for the
+   real implementation. The persistence + cross-device-sync logic
+   lives there; this file just calls into it.
+   ───────────────────────────────────────────────────────────────────── */
 
-/**
- * Extract the most informative message we can from a Solana / Umbra SDK
- * thrown error. Solana web3 errors usually expose `.logs` (the program
- * logs from simulation) and sometimes `.cause.logs`; the message alone
- * is often the generic wrapper "Transaction simulation failed". Pulling
- * the last few logs lets the user see WHY simulation failed (insufficient
- * lamports, custom program error 0x1, missing account, etc.) instead of
- * staring at an opaque string.
- *
- * Also detects two specific patterns that map to common UX failures and
- * appends a hint:
- *   - "insufficient" / "0x1" → likely public-balance funding gap
- *   - "AccountNotFound" / "account does not exist" → unwrapped wSOL ATA
- *
- * Phase tagging: when called from `sendViaClaimLink` we already know
- * which sub-step threw, so we forward that as `phase` so the row can
- * label the chip ("fund / register / deposit") rather than just
- * "claim-link path failed".
- */
-async function formatTxError(
-  err: any,
-  opts?: { phase?: RowErrorDetail["phase"]; connection?: any },
-): Promise<RowErrorDetail> {
-  const baseMsg = err?.message ?? String(err);
-
-  // Always log the raw object so DevTools shows the full structure
-  // even if our shape-matching below misses something. The user's
-  // first instinct on a failure is "open console", and we shouldn't
-  // hide what we got from the wallet adapter / SDK.
-  // eslint-disable-next-line no-console
-  console.error("[payroll] row failed", { phase: opts?.phase, err });
-
-  // Walk every error-shape we've seen surface logs through:
-  //   - `err.logs`                            web3.js BlockheightExceededError, anchor errors
-  //   - `err.cause.logs`                      wallet-adapter SendTransactionError
-  //   - `err.transactionLogs`                 some custom rejection paths
-  //   - `err.error.logs`                      nested SDK wrappers
-  //   - `err.simulation.logs` / `err.simulationResponse.logs`
-  //                                           direct simulateTransaction-thrown
-  //   - `await err.getLogs(connection)`       newer @solana/web3.js (≥1.95)
-  //                                           SendTransactionError exposes a
-  //                                           lazy fetcher that loads logs from
-  //                                           the network when the throw site
-  //                                           didn't include them inline.
-  let logs: string[] | undefined =
-    err?.logs ??
-    err?.cause?.logs ??
-    err?.transactionLogs ??
-    err?.error?.logs ??
-    err?.simulation?.logs ??
-    err?.simulationResponse?.logs;
-
-  if ((!logs || logs.length === 0) && typeof err?.getLogs === "function" && opts?.connection) {
-    try {
-      const fetched = await err.getLogs(opts.connection);
-      if (Array.isArray(fetched) && fetched.length > 0) {
-        logs = fetched;
-      }
-    } catch {
-      // getLogs() can itself throw (network blip, expired blockhash).
-      // We already have the base message — no point bubbling further.
-    }
-  }
-
-  // Anchor-style errors sometimes pack the actual reason in `.error.errorMessage`.
-  const anchorReason =
-    err?.error?.errorMessage ||
-    err?.errorLogs?.find?.((l: string) => /^Program log: AnchorError/.test(l));
-
-  let summary = baseMsg;
-  if (anchorReason) summary = `${summary} — ${anchorReason}`;
-  if (logs && logs.length > 0) {
-    // Tail of the logs is where the failure reason lands — surface
-    // up to 3 trailing lines in the chip; full list goes into the
-    // disclosure UI under the row.
-    const tail = logs.slice(-3).join(" · ");
-    summary = `${summary} — ${tail}`;
-  }
-
-  // Heuristic hint for the common case: public-funding shortfall on
-  // claim-link rows. The deposit pulls from the sender's PUBLIC token
-  // ATA (e.g. wSOL on devnet), not native SOL or encrypted balance.
-  if (
-    /insufficient|0x1\b|0x1$/i.test(summary) ||
-    /AccountNotFound|account does not exist|TokenAccountNotFound/i.test(summary)
-  ) {
-    summary = `${summary}\nHint: claim-link rows pull from your PUBLIC ${PAYMENT_SYMBOL} ATA. Wrap more SOL or top up that ATA before re-running.`;
-  }
-
-  return {
-    summary,
-    phase: opts?.phase,
-    logs,
-    rawMessage: baseMsg,
-  };
-}
+// (Per-row error detail is just SdkErrorDetail — no narrowing needed.
+// The row chip renders `detail.phase` as a string, accepting any
+// vocabulary the formatter emitted.)
 
 /**
  * Parse multi-line text pasted into a wallet field. Accepts CSV
@@ -265,7 +202,19 @@ function parsePastedRecipients(text: string): RecipientRow[] {
   });
 }
 
-export function PayrollFlow() {
+/**
+ * Optional callback for the parent layout to react to PayrollFlow's
+ * internal success state. Used by `CreatePageInner` to hide the
+ * "back to picker" chevron once a packet has been signed — the
+ * payroll success surface has its own bottom-bar nav and the chevron
+ * sitting alone above the centred hero looks orphaned. Null means
+ * "no parent cares about this signal".
+ */
+export interface PayrollFlowProps {
+  onSuccessChange?: (inSuccess: boolean) => void;
+}
+
+export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
   const wallet = useWallet();
   const { connection } = useConnection();
 
@@ -298,6 +247,17 @@ export function PayrollFlow() {
   // doesn't jitter if csvText is somehow modified mid-run (it isn't,
   // because the form is fade-locked while running, but defensive).
   const [runTotalCount, setRunTotalCount] = useState(0);
+
+  // Per-row sub-step tracking. Used by the publishing modal to show
+  // honest progress copy ("Generating ZK proof for shadow registration…")
+  // and to drive `awaitingWallet` accurately — it should be TRUE only
+  // when a Phantom popup is genuinely open, not while we're crunching
+  // ZK proofs locally. The prior version hardcoded awaitingWallet=true
+  // throughout the run and lied to the user during the slowest step.
+  // `null` means "no row is mid-step" (between rows or pre-loop).
+  type RunSubStep = "fund" | "register" | "deposit" | "shielded" | "public" | null;
+  const [runSubStep, setRunSubStep] = useState<RunSubStep>(null);
+  const [runRowIndex, setRunRowIndex] = useState<number>(0);
 
   // Derive parsed result from the recipient rows by converting to CSV
   // and feeding the existing parser. Keeps runPayroll + the registration
@@ -341,6 +301,14 @@ export function PayrollFlow() {
     !running && wallet.connected && rowCount > 0 && companyName.trim().length > 0;
   const inSuccessState = !running && phase === "idle" && packetUrl !== null;
 
+  // Notify the parent (CreatePageInner) so it can suppress its
+  // "back to picker" chevron once the payroll surface enters its
+  // own success state. Without this signal the parent has no way
+  // to know — packetUrl lives entirely inside this component.
+  useEffect(() => {
+    onSuccessChange?.(inSuccessState);
+  }, [inSuccessState, onSuccessChange]);
+
   // Map the local payroll state to the shared CanvasBar's discriminated
   // union. Same component is reused on /create invoice and /create
   // payroll; per-flow specifics (button copy, copy label, ghost extras)
@@ -363,15 +331,39 @@ export function PayrollFlow() {
     : running
       ? {
           kind: "publishing",
-          stepLabel:
-            phase === "signing"
-              ? "Signing receipt packet"
-              : `Sending payment ${rows.length + 1} of ${totalCountForRun}`,
+          // Step label honors the per-row substep so the bar mirrors
+          // the publishing modal's copy. The bar is the only thing
+          // visible on small viewports if the modal scrolls, so we
+          // don't want it stuck on a generic "Sending payment 1 of 3"
+          // while the modal shows "Generating ZK proof…".
+          stepLabel: (() => {
+            if (phase === "signing") return "Signing receipt packet";
+            const human = (runRowIndex ?? 0) + 1;
+            const tail = `row ${human} of ${totalCountForRun}`;
+            switch (runSubStep) {
+              case "fund":
+                return `Funding shadow account · ${tail}`;
+              case "register":
+                return `Generating zero-knowledge proof · ${tail}`;
+              case "deposit":
+                return `Depositing into encrypted balance · ${tail}`;
+              case "shielded":
+                return `Sending shielded payment · ${tail}`;
+              case "public":
+                return `Sending public payment · ${tail}`;
+              default:
+                return `Sending payment ${rows.length + 1} of ${totalCountForRun}`;
+            }
+          })(),
           stepCounter:
             phase === "signing"
               ? "FINAL"
               : `${String(rows.length).padStart(2, "0")} / ${String(totalCountForRun).padStart(2, "0")}`,
-          awaitingWallet: true,
+          // Suppress the gold "Waiting on wallet" line during local-
+          // only compute (the long ZK proof step is not waiting on a
+          // popup — there isn't one open). The bar's "In progress"
+          // copy is more honest there.
+          awaitingWallet: phase === "signing" || runSubStep !== "register",
         }
       : {
           kind: "compose",
@@ -520,6 +512,17 @@ export function PayrollFlow() {
    * switching to invoice mode unmounts PayrollFlow, so the page-wide
    * drop zone goes away with it.
    */
+  // Pre-warm Umbra's ZK proving assets the moment the user opens this
+  // form. The first claim-link row of any batch otherwise eats a
+  // ~60–90s download cost mid-prove (zkey alone is ~30 MB). Fired
+  // once per mount; the helper is module-level memoised so re-mounts
+  // and concurrent calls coalesce into a single in-flight fetch.
+  // Best-effort: any failure leaves the SDK to fall back to its own
+  // download path during proving.
+  useEffect(() => {
+    void prewarmZkAssets();
+  }, []);
+
   useEffect(() => {
     if (running) return;
     let counter = 0;
@@ -600,6 +603,12 @@ export function PayrollFlow() {
     setPacketUrl(null);
     setPacketCopied(false);
 
+    // Phase C: drop any registered-receiver lookups left over from a
+    // prior run. Otherwise a recipient who registered between runs would
+    // still be cached as `null` (= claim-link path) and we'd build an
+    // unnecessary shadow for them.
+    resetRegisteredReceiverCache();
+
     const batchId = generatePrivatePayrollBatchId();
     const resultRows: PayrollRunRow[] = [];
 
@@ -655,12 +664,660 @@ export function PayrollFlow() {
           : `Using public wallet balance for this payroll.`,
       );
 
-      for (let i = 0; i < parsed.rows.length; i++) {
+      // Parallel row execution.
+      //
+      // We run up to PAYROLL_PARALLEL_LIMIT rows concurrently. Each row
+      // is independent — its own ephemeral keypair, its own ZK proof,
+      // its own RPC submissions — so we can overlap the slowest steps
+      // (ZK proof generation + Arcium MPC compute) across rows. On a
+      // 3-row batch this drops wall-clock from ~4 min (all rows
+      // serial) to ~90s (single-row cost dominates).
+      //
+      // Phantom serializes signTransaction calls automatically: when
+      // the user signs popup #1, popup #2 opens, etc. So the popup UX
+      // stays sequential — the user just keeps clicking through. The
+      // win is purely background compute parallelism.
+      //
+      // Cap of 3 keeps memory/network tame and avoids overwhelming
+      // Phantom's popup queue (which can occasionally drop popups
+      // beyond ~5 in flight per the Phantom team's docs).
+      //
+      // Result ordering: we MUST preserve input order in resultRows
+      // because the signed packet's row order is canonical. We
+      // pre-allocate a length-N slot array and write by index — not
+      // by completion order — so the packet shape stays deterministic.
+      const PAYROLL_PARALLEL_LIMIT = 3;
+      const slots: Array<PayrollRunRow | null> = parsed.rows.map(() => null);
+
+      // Capture detection in a guaranteed-non-null const so the closure
+      // below doesn't trip TypeScript's narrowing reset across closures.
+      const detectionForRun = activeDetection;
+
+      // Phase C: per-row direct-path eligibility lookup.
+      //
+      // For each row we fetch the recipient's on-chain x25519 token-
+      // encryption key + userCommitment via `lookupRegisteredReceiver`.
+      // When non-null, the recipient is fully registered with Umbra and
+      // we can build a deposit ix that targets their wallet directly —
+      // no shadow indirection, no claim URL, no shadow→recipient hop.
+      //
+      // Run in parallel (Promise.all): each lookup is one
+      // `connection.getAccountInfo` round-trip. Failures bucket as
+      // `null` (= row falls back to the shadow / claim-link path).
+      //
+      // The existing `detectionForRun.rowStatuses` is still used for
+      // UI display ("X need claim links"). It runs the SAME chain
+      // probe (`getUserAccountQuerierFunction`) but only reads the
+      // status flags, not the field values — we need the actual
+      // x25519 + userCommitment to feed `payInvoiceCpi` overrides.
+      // Having both queries side-by-side is cheap on devnet RPC.
+      // eslint-disable-next-line no-console
+      console.time(`[payroll] direct-path lookup (${parsed.rows.length} rows)`);
+      const lookupResults: Array<RegisteredReceiverValues | null> =
+        await Promise.all(
+          parsed.rows.map((row) =>
+            lookupRegisteredReceiver(row.wallet, connection).catch(() => null),
+          ),
+        );
+      // eslint-disable-next-line no-console
+      console.timeEnd(`[payroll] direct-path lookup (${parsed.rows.length} rows)`);
+
+      const registeredReceivers = new Map<number, RegisteredReceiverValues>();
+      lookupResults.forEach((result, idx) => {
+        if (result) registeredReceivers.set(idx, result);
+      });
+
+      // Deposit batching: when the wallet supports signAllTransactions
+      // AND we're going to use the VeilPay CPI deposit path AND there
+      // are 2+ claim-link rows (otherwise batching saves nothing), we
+      // defer the per-row deposit and run a post-pool batched deposit
+      // phase. Cuts N deposit popups to 1.
+      //
+      // The shielded direct path doesn't go through this — its txs
+      // are encapsulated by the SDK's creator function and aren't
+      // amenable to extraction without an SDK-internals refactor.
+      const useVeilPayCpiForDeposits =
+        process.env.NEXT_PUBLIC_USE_VEIL_PAY_CPI !== "false";
+      // Phase C: claim-link path is now the "lookup returned null"
+      // bucket. The rowStatuses-based count above is kept as a
+      // sanity check during transition — they should agree (a row
+      // whose lookup is null should also have status === "unregistered").
+      const claimLinkCount = parsed.rows.filter(
+        (_, idx) => !registeredReceivers.has(idx),
+      ).length;
+      const batchedDepositEnabled =
+        !!wallet.signAllTransactions &&
+        useVeilPayCpiForDeposits &&
+        claimLinkCount >= 1;
+
+      // Map keyed by row index — populated by claim-link workers when
+      // they finish register and need to wait for the batched-deposit
+      // phase. Each entry carries enough context to (a) build the
+      // unsigned VeilPay tx and (b) finalise slots[i] after the batch
+      // submits.
+      const pendingDeposits = new Map<
+        number,
+        {
+          shadowAddress: string;
+          claimUrl: string;
+          prepared: PayrollRunRow;
+        }
+      >();
+
+      // ────────────────────────────────────────────────────────────────
+      // SINGLE-POPUP PRE-FLIGHT (Phase 1 of the 1-popup plan).
+      //
+      // We sign EVERYTHING that needs Alice's signature in ONE
+      // Phantom popup at t=0:
+      //   - 1 batched fund tx (multi-instruction v0 — N transfers)
+      //   - N VeilPay deposit txs (one per claim-link row)
+      //
+      // Building deposit txs at t=0 (BEFORE the shadow has been
+      // registered on chain) is enabled by `deriveShadowRegistrationValues`
+      // — we compute the shadow's x25519 + userCommitment locally
+      // from its master seed using the SDK's own derivers. The values
+      // exactly match what register would write to chain, so ZK
+      // verification is unaffected.
+      //
+      // Submission is deferred per-row:
+      //   1. Submit the batched fund tx, wait for confirm.
+      //   2. Worker pool runs register sub-txs in parallel
+      //      (signed by shadow's in-memory keypair, no popups).
+      //   3. After all registers settle, submit the pre-signed
+      //      deposit txs in parallel.
+      //
+      // Result: 1 popup for all-claim-link batches, regardless of N.
+      //
+      // Per-row error model: a build/sign/submit failure for one row
+      // marks that row's slot failed; other rows still settle.
+      //
+      // Fallback: if `signAllTransactions` is missing on the wallet
+      // adapter (rare), each row falls back to the per-row fund +
+      // deposit pattern (the legacy 3-popup-per-row flow).
+      const prefundedShadows = new Map<
+        number,
+        {
+          ephemeral: EphemeralKeypair;
+          shadowClient?: any;
+          fundError: string | null;
+          /** Pre-signed VeilPay deposit tx + metadata for submission
+           *  after register completes. Populated only on successful
+           *  build + sign in the unified pre-flight. */
+          signedDeposit?: {
+            tx: VersionedTransaction;
+            built: any; // BuiltPayInvoiceCpiTx
+          };
+        }
+      >();
+      // Phase C: row classification is now driven by `registeredReceivers`
+      // (= the lookup map) rather than the legacy registration-status
+      // strings. A row with no lookup entry means we couldn't read a
+      // fully-registered Umbra user account on chain → it must go
+      // through the shadow / claim-link flow.
+      const claimLinkIndexes = parsed.rows
+        .map((_, idx) => idx)
+        .filter((idx) => !registeredReceivers.has(idx));
+
+      // Path A: shielded rows that should join the same single popup.
+      // These are rows where (a) Alice is paying from her encrypted
+      // balance (useShieldedForRun) AND (b) the recipient is already
+      // a registered Umbra user (lookup returned values). Public-source
+      // rows targeting registered recipients now go down the Phase C
+      // direct path (see `directRegisteredIndexes` below) instead of
+      // the legacy `payInvoice` flow.
+      //
+      // For each shielded row we build 2-3 unsigned txs via
+      // payShieldedCpi (close-existing? + proof + utxo) and stash them
+      // in `prebuiltShielded`. They join the main signAllTransactions
+      // popup; submission runs sequentially in the worker pool's
+      // direct path.
+      const shieldedIndexes = useShieldedForRun
+        ? parsed.rows
+            .map((_, idx) => idx)
+            .filter((idx) => registeredReceivers.has(idx))
+        : [];
+
+      // Phase C: registered recipients on the public-source pay path.
+      // We pre-build the deposit ix here (just like claim-link rows)
+      // using `payInvoiceCpi` with `ProofOverrides` so the chain fetch
+      // of the receiver account is skipped (we already have the
+      // x25519 + userCommitment from the earlier lookup). The deposit
+      // joins the same single-popup signAllTransactions batch as
+      // claim-link + shielded rows, then submits AS SOON AS the popup
+      // returns — there's no fund/register sequencing to wait on
+      // because there's no shadow.
+      //
+      // Mutually exclusive with shielded for a given row: if
+      // useShieldedForRun is true, registered recipients take the
+      // shielded path instead. Public-source registered recipients
+      // are the ones who join this set.
+      const directRegisteredIndexes = useShieldedForRun
+        ? []
+        : parsed.rows
+            .map((_, idx) => idx)
+            .filter((idx) => registeredReceivers.has(idx));
+
+      // Per-row direct-path bookkeeping. Mirrors `prefundedShadows`
+      // but with no ephemeral / fund / register state — just the
+      // values pulled from chain plus the eventual signed deposit.
+      const directRegistered = new Map<number, DirectRegisteredEntry>();
+
+      // Map keyed by row index. Populated by pre-flight; consumed by
+      // processRow's direct path when the row has a pre-built+
+      // pre-signed shielded bundle.
+      const prebuiltShielded = new Map<
+        number,
+        {
+          built: any; // BuiltShieldedCpiTxs (lazy-imported below)
+          signedClose?: VersionedTransaction;
+          signedProof?: VersionedTransaction;
+          signedUtxo?: VersionedTransaction;
+          buildError?: string;
+        }
+      >();
+
+      // Pre-flight runs whenever there's ANYTHING to batch — claim-link
+      // rows, shielded rows, AND Phase C direct-registered rows.
+      // Without a wallet that supports signAllTransactions we fall
+      // back to the legacy per-row SDK paths (cold-cache fallback for
+      // claim-link; direct payInvoiceFromShielded for shielded; and
+      // payInvoice's own SDK orchestration for direct-registered).
+      const hasBatchableRows =
+        claimLinkIndexes.length +
+          shieldedIndexes.length +
+          directRegisteredIndexes.length >
+        0;
+
+      if (hasBatchableRows && wallet.signAllTransactions) {
+        setRunSubStep("fund");
+        setRunRowIndex(0);
+
+        const { buildPayInvoiceCpiTx } = await import("@/lib/payInvoiceCpi");
+
+        // Phase 2 (durable nonces) — DISABLED.
+        //
+        // The original plan: anchor each deposit tx to a per-wallet
+        // durable nonce so the tx never expires regardless of how
+        // long the shadow's register takes. This would have given
+        // true 1-popup robustness even with a cold IDB cache (90s+
+        // register).
+        //
+        // Why it doesn't fit:
+        //   `nonceAdvance` invokes `SystemProgram` as its programId.
+        //   Solana protocol requires invoked program IDs in the
+        //   STATIC account list (the validator resolves BPF programs
+        //   at message-deserialize time). `compileToV0Message` enforces
+        //   this with the `!isInvoked` filter in extractTableLookup —
+        //   even if SystemProgram is in the ALT entries, it can't be
+        //   ALT-resolved. That forces a +32-byte SystemProgram pubkey
+        //   into the deposit tx's static keys, pushing it 19 bytes
+        //   over the 1232-byte cap. No client-side workaround exists.
+        //
+        // Path forward when revisiting:
+        //   Have VeilPay program internalize nonceAdvance via CPI
+        //   (eliminates the outer ix). Real protocol change; not
+        //   hackathon-week scope.
+        //
+        // What we rely on instead:
+        //   1. `prewarmZkAssets()` on page-load (see useEffect at
+        //      mount) — keeps the IDB cache warm so register is fast
+        //      (~15-25s) in nearly all real-world flows.
+        //   2. Cold-cache fallback in `submit pre-signed deposits`
+        //      below — if a blockhash does expire, refresh + re-sign
+        //      in a single fallback popup.
+        //
+        // Net experience: 1 popup in the warm path (>99% of cases),
+        // 2 popups when the cache is genuinely cold and register
+        // outruns the blockhash window.
+        const nonces: null = null;
+        const nonceAltAddress: undefined = undefined;
+
+        // Phase A: parallel setup per claim-link row.
+        //   1. Generate ephemeral keypair + build shadow client.
+        //   2. Derive registration values locally from the shadow's
+        //      master seed.
+        //   3. Build the deposit VeilPay tx using those values
+        //      (chain fetch of receiver skipped via overrides).
+        //
+        // ZK proof generation is the slow part — we run them all in
+        // parallel because each row has independent inputs (different
+        // shadow x25519, different commitments).
+        // eslint-disable-next-line no-console
+        console.time(`[payroll] preflight setup (${claimLinkIndexes.length} rows)`);
+        type RowSetup = {
+          idx: number;
+          ephemeral: EphemeralKeypair;
+          shadowClient: any;
+          depositBuilt: any; // BuiltPayInvoiceCpiTx
+          buildError?: string;
+        };
+        const setups: RowSetup[] = await Promise.all(
+          claimLinkIndexes.map(async (idx, rowIndexInClaimLink): Promise<RowSetup> => {
+            const ephemeral = generateEphemeralKeypair();
+            try {
+              // `prepareRow` converts the display amount ("0.10") to
+              // base units ("100000000") via parseAmountToBaseUnits +
+              // also validates the recipient pubkey. We MUST use the
+              // prepared amount here because BigInt() on a decimal
+              // string ("0.10") throws SyntaxError. Earlier per-row
+              // path used `BigInt(args.prepared.amount)` for the same
+              // reason — the bug was in this pre-flight passing the
+              // raw input row instead of the prepared row.
+              const prepared = prepareRow(parsed.rows[idx], idx);
+              const shadowClient = await buildShadowClient(ephemeral.privateKey);
+              const regValues = await deriveShadowRegistrationValues(shadowClient);
+              // Nonce config intentionally omitted — see Phase-2-disabled
+              // comment block above. Deposits use regular blockhashes;
+              // cold-cache fallback below catches the rare expiry case.
+              // `nonces` and `nonceAltAddress` are kept in scope so a
+              // future re-enable doesn't need to re-thread variables.
+              void nonces;
+              void nonceAltAddress;
+              void rowIndexInClaimLink;
+              const depositBuilt = await buildPayInvoiceCpiTx(
+                {
+                  client,
+                  recipientAddress: ephemeral.address,
+                  mint: USDC_MINT.toBase58(),
+                  amount: BigInt(prepared.amount),
+                },
+                {
+                  receiverX25519PublicKey: regValues.x25519PublicKey,
+                  receiverUserCommitment: regValues.userCommitment,
+                },
+              );
+              return { idx, ephemeral, shadowClient, depositBuilt };
+            } catch (err: any) {
+              return {
+                idx,
+                ephemeral,
+                shadowClient: null,
+                depositBuilt: null,
+                buildError: err?.message ?? String(err),
+              };
+            }
+          }),
+        );
+        // eslint-disable-next-line no-console
+        console.timeEnd(`[payroll] preflight setup (${claimLinkIndexes.length} rows)`);
+
+        // Stash all successfully-built setups into prefundedShadows,
+        // failed builds go straight to fundError so processRow shorts.
+        for (const s of setups) {
+          prefundedShadows.set(s.idx, {
+            ephemeral: s.ephemeral,
+            shadowClient: s.shadowClient,
+            fundError: s.buildError ? `deposit-build: ${s.buildError}` : null,
+          });
+        }
+
+        const goodSetups = setups.filter((s) => !s.buildError);
+
+        // Phase A.5: parallel shielded build (Path A). For each
+        // shielded row (Alice paying from her encrypted balance,
+        // recipient is registered) we use the proxied-client SDK
+        // capture pattern in payShieldedCpi to produce 2-3 unsigned
+        // VersionedTransactions (close-existing? + proof + utxo)
+        // ready to join the same signAllTransactions popup as fund
+        // + claim-link deposits.
+        type ShieldedSetup = {
+          idx: number;
+          built: any | null; // BuiltShieldedCpiTxs
+          buildError?: string;
+        };
+        let shieldedSetups: ShieldedSetup[] = [];
+        if (shieldedIndexes.length > 0) {
+          // eslint-disable-next-line no-console
+          console.time(
+            `[payroll] preflight shielded build (${shieldedIndexes.length} rows)`,
+          );
+          const { buildShieldedCpiTxs } = await import("@/lib/payShieldedCpi");
+          shieldedSetups = await Promise.all(
+            shieldedIndexes.map(async (idx): Promise<ShieldedSetup> => {
+              try {
+                const prepared = prepareRow(parsed.rows[idx], idx);
+                const built = await buildShieldedCpiTxs({
+                  client,
+                  recipientAddress: prepared.recipient,
+                  mint: USDC_MINT.toBase58(),
+                  amount: BigInt(prepared.amount),
+                });
+                return { idx, built };
+              } catch (err: any) {
+                return {
+                  idx,
+                  built: null,
+                  buildError: err?.message ?? String(err),
+                };
+              }
+            }),
+          );
+          // eslint-disable-next-line no-console
+          console.timeEnd(
+            `[payroll] preflight shielded build (${shieldedIndexes.length} rows)`,
+          );
+          // Stash successful builds; failed ones fall through to the
+          // legacy payInvoiceFromShielded path in processRow's direct
+          // branch (so a bad ZK build doesn't block the whole batch).
+          for (const s of shieldedSetups) {
+            if (!s.buildError) {
+              prebuiltShielded.set(s.idx, { built: s.built });
+            } else {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[payroll row ${s.idx + 1}] shielded build failed; falling back to legacy SDK path: ${s.buildError}`,
+              );
+            }
+          }
+        }
+        const goodShielded = shieldedSetups.filter((s) => !s.buildError);
+
+        // Phase A.6 — parallel direct-registered build (Phase C).
+        // For each row whose recipient is fully Umbra-registered AND
+        // the run isn't using shielded balance, we pre-fetch their
+        // x25519 + userCommitment via `lookupRegisteredReceiver`
+        // (already done above; cached in `registeredReceivers`) and
+        // build a `payInvoiceCpi` deposit tx directly to the recipient
+        // wallet — no shadow involved. The same `ProofOverrides`
+        // mechanism the claim-link path uses lets us skip the chain
+        // fetch inside `generateProofAndCommitments` since we already
+        // hold the values.
+        type DirectSetup = {
+          idx: number;
+          values: RegisteredReceiverValues;
+          depositBuilt: any | null; // BuiltPayInvoiceCpiTx
+          buildError?: string;
+        };
+        let directSetups: DirectSetup[] = [];
+        if (directRegisteredIndexes.length > 0) {
+          // eslint-disable-next-line no-console
+          console.time(
+            `[payroll] preflight direct-registered build (${directRegisteredIndexes.length} rows)`,
+          );
+          directSetups = await Promise.all(
+            directRegisteredIndexes.map(async (idx): Promise<DirectSetup> => {
+              const values = registeredReceivers.get(idx)!;
+              try {
+                const prepared = prepareRow(parsed.rows[idx], idx);
+                const depositBuilt = await buildPayInvoiceCpiTx(
+                  {
+                    client,
+                    recipientAddress: prepared.recipient,
+                    mint: USDC_MINT.toBase58(),
+                    amount: BigInt(prepared.amount),
+                  },
+                  {
+                    receiverX25519PublicKey: values.x25519PublicKey,
+                    receiverUserCommitment: values.userCommitment,
+                  },
+                );
+                return { idx, values, depositBuilt };
+              } catch (err: any) {
+                return {
+                  idx,
+                  values,
+                  depositBuilt: null,
+                  buildError: err?.message ?? String(err),
+                };
+              }
+            }),
+          );
+          // eslint-disable-next-line no-console
+          console.timeEnd(
+            `[payroll] preflight direct-registered build (${directRegisteredIndexes.length} rows)`,
+          );
+          for (const s of directSetups) {
+            directRegistered.set(s.idx, {
+              values: s.values,
+              buildError: s.buildError
+                ? `direct-deposit-build: ${s.buildError}`
+                : null,
+            });
+          }
+        }
+        const goodDirect = directSetups.filter((s) => !s.buildError);
+
+        // Mixed-batch entry condition: enter the popup branch if we
+        // have at least ONE successful build (claim-link, shielded,
+        // or direct-registered). The fund tx is conditional on having
+        // claim-link rows.
+        if (
+          goodSetups.length > 0 ||
+          goodShielded.length > 0 ||
+          goodDirect.length > 0
+        ) {
+          // Build the batched fund tx (one v0 tx with N transfers).
+          // Skipped when there are no claim-link rows — pure shielded
+          // batches don't need to fund any shadow accounts.
+          let fundBuilt: BuiltBatchedFundTx | null = null;
+          if (goodSetups.length > 0) {
+            try {
+              fundBuilt = await buildBatchedFundTxV0({
+                payerPubkey: wallet.publicKey!,
+                shadows: goodSetups.map((s) => ({
+                  address: s.ephemeral.address,
+                  lamports: SHADOW_FUNDING_LAMPORTS,
+                })),
+                connection: connection as any,
+              });
+            } catch (err: any) {
+              const msg = err?.message ?? String(err);
+              for (const s of goodSetups) {
+                const entry = prefundedShadows.get(s.idx);
+                if (entry) entry.fundError = `fund-build: ${msg}`;
+              }
+            }
+          }
+
+          // We can proceed to sign as long as the build set isn't
+          // entirely empty. The claim-link branch needs fundBuilt;
+          // the shielded branch doesn't.
+          const fundOk = goodSetups.length === 0 || fundBuilt !== null;
+          if (fundOk) {
+            // ── THE SINGLE POPUP ──
+            // Phantom shows: (optional fund) + N claim-link deposits +
+            // (close? + proof + utxo) per shielded row + N direct-
+            // registered deposits. User signs once.
+            //
+            // Order matters for routing signed txs back: fund first,
+            // then claim-link deposits in goodSetups order, then for
+            // each shielded row in goodShielded order: close (if any),
+            // proof, utxo, then direct-registered deposits in
+            // goodDirect order. The cursor logic after signing mirrors
+            // this.
+            const txArray: VersionedTransaction[] = [];
+            if (fundBuilt) txArray.push(fundBuilt.tx);
+            for (const s of goodSetups) txArray.push(s.depositBuilt.tx);
+            for (const s of goodShielded) {
+              if (s.built.closeTx) txArray.push(s.built.closeTx);
+              txArray.push(s.built.proofTx);
+              txArray.push(s.built.utxoTx);
+            }
+            for (const s of goodDirect) txArray.push(s.depositBuilt.tx);
+            const popupLabel = `[payroll] SINGLE POPUP signAll (${txArray.length} txs: ${fundBuilt ? "1 fund + " : ""}${goodSetups.length} claim-link + ${goodShielded.length} shielded + ${goodDirect.length} direct)`;
+            // eslint-disable-next-line no-console
+            console.time(popupLabel);
+            let signedTxs: VersionedTransaction[] = [];
+            try {
+              signedTxs = await wallet.signAllTransactions(txArray);
+            } catch (err: any) {
+              const msg = err?.message ?? String(err);
+              for (const s of goodSetups) {
+                const entry = prefundedShadows.get(s.idx);
+                if (entry) entry.fundError = `combined-sign: ${msg}`;
+              }
+              for (const s of goodShielded) {
+                const entry = prebuiltShielded.get(s.idx);
+                if (entry) entry.buildError = `combined-sign: ${msg}`;
+              }
+              for (const s of goodDirect) {
+                const entry = directRegistered.get(s.idx);
+                if (entry) entry.buildError = `combined-sign: ${msg}`;
+              }
+            } finally {
+              // eslint-disable-next-line no-console
+              console.timeEnd(popupLabel);
+            }
+
+            if (signedTxs.length === txArray.length) {
+              // Walk the signed array with a cursor that mirrors the
+              // build order above.
+              let cursor = 0;
+              const signedFund = fundBuilt ? signedTxs[cursor++] : null;
+              for (let i = 0; i < goodSetups.length; i++) {
+                const s = goodSetups[i];
+                const entry = prefundedShadows.get(s.idx);
+                if (entry) {
+                  entry.signedDeposit = {
+                    tx: signedTxs[cursor++],
+                    built: s.depositBuilt,
+                  };
+                }
+              }
+              for (const s of goodShielded) {
+                const entry = prebuiltShielded.get(s.idx);
+                if (!entry) {
+                  // Skip — failed build was filtered out earlier; if
+                  // we reach here something's inconsistent.
+                  if (s.built.closeTx) cursor++;
+                  cursor += 2;
+                  continue;
+                }
+                if (s.built.closeTx) entry.signedClose = signedTxs[cursor++];
+                entry.signedProof = signedTxs[cursor++];
+                entry.signedUtxo = signedTxs[cursor++];
+              }
+              for (const s of goodDirect) {
+                const entry = directRegistered.get(s.idx);
+                if (entry) {
+                  entry.signedDeposit = {
+                    tx: signedTxs[cursor++],
+                    built: s.depositBuilt,
+                  };
+                }
+              }
+
+              // Submit the batched fund tx and confirm. After this
+              // returns, every shadow has lamports — register can
+              // run. Skipped on shielded-only batches.
+              if (signedFund && fundBuilt) {
+                try {
+                  await submitSignedBatchedFundTxV0({
+                    signedTx: signedFund,
+                    built: fundBuilt,
+                    connection: connection as any,
+                  });
+                } catch (err: any) {
+                  const msg = err?.message ?? String(err);
+                  for (const s of goodSetups) {
+                    const entry = prefundedShadows.get(s.idx);
+                    if (entry) entry.fundError = `fund-submit: ${msg}`;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Helper that processes ONE row to completion and writes its
+      // result into `slots[i]`. Idempotent on retry. The setRows()
+      // call after each completion drives the modal's sentCount
+      // counter ("Sending payment N of M") — the count is computed
+      // from non-null slot length.
+      async function processRow(i: number): Promise<void> {
         const row = parsed.rows[i];
         const prepared = prepareRow(row, i);
-        const status = activeDetection.rowStatuses[i];
+        const status = detectionForRun.rowStatuses[i];
+        // Phase C: row classification follows the lookup map. If we
+        // couldn't read a fully-registered Umbra account on chain for
+        // this recipient, the row goes through the shadow / claim-link
+        // flow regardless of what the registration-status string says.
+        const isRegistered = registeredReceivers.has(i);
 
-        if (status === "unregistered") {
+        if (!isRegistered) {
+          // If the pre-flight batched-fund step caught a fund-side
+          // error for this row, short-circuit before sendViaClaimLink
+          // tries to register a shadow with no lamports.
+          const prefund = prefundedShadows.get(i);
+          if (prefund?.fundError) {
+            slots[i] = {
+              ...prepared,
+              status: "failed",
+              mode: "public",
+              path: "claim-link",
+              txSignature: null,
+              error: `Claim-link fund step failed: ${prefund.fundError}`,
+              errorDetail: {
+                summary: `Claim-link fund step failed: ${prefund.fundError}`,
+                phase: "fund",
+                rawMessage: prefund.fundError,
+              },
+              registrationStatus: "unregistered",
+            };
+            flushSlots();
+            return;
+          }
           try {
             const claimResult = await sendViaClaimLink({
               prepared,
@@ -670,16 +1327,42 @@ export function PayrollFlow() {
               companyName,
               batchId,
               rowIndex: i,
+              // Reuse the pre-funded ephemeral if one exists. When
+              // present, sendViaClaimLink skips its own fund step
+              // entirely (the shadow already has lamports from the
+              // batched pre-flight popup) and goes straight to
+              // register + deposit.
+              prefundedEphemeral: prefund?.ephemeral,
+              // Skip the per-row deposit if the coordinator will
+              // batch all deposits across rows in one signAllTxs
+              // popup after registers complete. Only enabled when
+              // we have a wallet with signAllTransactions support
+              // AND there's at least one claim-link row to batch.
+              deferDeposit: batchedDepositEnabled,
             });
-            resultRows.push({
+            // When deferDeposit is true, the call above returned
+            // before depositing. Stage the row for the post-pool
+            // batched-deposit phase. Slot stays null until the
+            // batched phase actually settles the deposit.
+            if (claimResult.deferred) {
+              pendingDeposits.set(i, {
+                shadowAddress: claimResult.shadowAddress,
+                claimUrl: claimResult.claimUrl,
+                prepared,
+              });
+              flushSlots();
+              return;
+            }
+            slots[i] = {
               ...prepared,
               status: "paid",
               mode: "public",
+              path: "claim-link",
               txSignature: claimResult.depositSignature,
               error: null,
               claimUrl: claimResult.claimUrl,
               registrationStatus: "unregistered",
-            });
+            };
           } catch (err: any) {
             const detail = await formatTxError(err, {
               phase: err?.__veilPhase ?? undefined,
@@ -688,20 +1371,164 @@ export function PayrollFlow() {
             const phaseLabel = detail.phase
               ? `Claim-link ${detail.phase} step failed`
               : "Claim-link path failed";
-            resultRows.push({
+            slots[i] = {
               ...prepared,
               status: "failed",
               mode: "public",
+              path: "claim-link",
               txSignature: null,
               error: `${phaseLabel}: ${detail.summary}`,
               errorDetail: { ...detail, summary: `${phaseLabel}: ${detail.summary}` },
               registrationStatus: "unregistered",
-            });
+            };
           }
-          setRows([...resultRows]);
-          continue;
+          flushSlots();
+          return;
         }
 
+        // Phase C: direct-registered path. The recipient is already a
+        // fully-registered Umbra user; the deposit ix targets their
+        // wallet directly and was pre-built + pre-signed in the
+        // single-popup pre-flight. We just submit the cached signed
+        // tx — no fund/register dance, no claim URL.
+        if (!useShieldedForRun) {
+          const direct = directRegistered.get(i);
+          if (direct?.buildError) {
+            slots[i] = {
+              ...prepared,
+              status: "failed",
+              mode: "public",
+              path: "direct-registered",
+              txSignature: null,
+              error: `Direct path build/sign failed: ${direct.buildError}`,
+              errorDetail: {
+                summary: `Direct path build/sign failed: ${direct.buildError}`,
+                phase: "deposit",
+                rawMessage: direct.buildError,
+              },
+              registrationStatus: status,
+            };
+            flushSlots();
+            return;
+          }
+          if (direct?.signedDeposit) {
+            // eslint-disable-next-line no-console
+            console.time(`[payroll row ${i + 1}] direct-registered submit pre-signed`);
+            try {
+              const { submitSignedPayInvoiceCpiTx } = await import(
+                "@/lib/payInvoiceCpi"
+              );
+              const result = await submitSignedPayInvoiceCpiTx({
+                signedTx: direct.signedDeposit.tx,
+                built: direct.signedDeposit.built,
+              });
+              slots[i] = {
+                ...prepared,
+                status: "paid",
+                mode: "public",
+                path: "direct-registered",
+                txSignature: result.createUtxoSignature,
+                error: null,
+                registrationStatus: status,
+              };
+            } catch (err: any) {
+              const detail = await formatTxError(err, {
+                phase: "deposit",
+                connection,
+              });
+              slots[i] = {
+                ...prepared,
+                status: "failed",
+                mode: "public",
+                path: "direct-registered",
+                txSignature: null,
+                error: `Direct path deposit-submit failed: ${detail.summary}`,
+                errorDetail: detail,
+                registrationStatus: status,
+              };
+            } finally {
+              // eslint-disable-next-line no-console
+              console.timeEnd(`[payroll row ${i + 1}] direct-registered submit pre-signed`);
+            }
+            flushSlots();
+            return;
+          }
+          // No pre-built bundle (e.g. wallet adapter without
+          // signAllTransactions). Fall through to the legacy
+          // payInvoice path below — it'll produce the same on-chain
+          // outcome, just at the cost of a per-row Phantom popup.
+        }
+
+        // Direct path (recipient is already a Veil/Umbra user).
+        //
+        // Path A integration: if this row is shielded AND the
+        // pre-flight successfully built+signed its sub-txs, we just
+        // submit the pre-signed bundle in order — NO popup is fired
+        // here, the user already approved during the unified
+        // signAllTransactions popup. Falls through to the legacy
+        // payInvoiceFromShielded path on missing/failed bundle.
+        const shieldedBundle = useShieldedForRun
+          ? prebuiltShielded.get(i)
+          : undefined;
+        if (
+          shieldedBundle &&
+          !shieldedBundle.buildError &&
+          shieldedBundle.signedProof &&
+          shieldedBundle.signedUtxo
+        ) {
+          // eslint-disable-next-line no-console
+          console.time(`[payroll row ${i + 1}] shielded submit pre-signed`);
+          try {
+            const { submitSignedShieldedTxsInOrder } = await import(
+              "@/lib/payShieldedCpi"
+            );
+            const result = await submitSignedShieldedTxsInOrder({
+              signedClose: shieldedBundle.signedClose,
+              signedProof: shieldedBundle.signedProof,
+              signedUtxo: shieldedBundle.signedUtxo,
+              built: shieldedBundle.built,
+            });
+            slots[i] = {
+              ...prepared,
+              status: "paid",
+              mode: "shielded",
+              path: "shielded",
+              txSignature: result.utxoSignature,
+              error: null,
+              registrationStatus: status,
+            };
+          } catch (err: any) {
+            const detail = await formatTxError(err, {
+              phase: "shielded",
+              connection,
+            });
+            slots[i] = {
+              ...prepared,
+              status: "failed",
+              mode: "shielded",
+              path: "shielded",
+              txSignature: null,
+              error: detail.summary,
+              errorDetail: detail,
+              registrationStatus: status,
+            };
+          } finally {
+            // eslint-disable-next-line no-console
+            console.timeEnd(`[payroll row ${i + 1}] shielded submit pre-signed`);
+          }
+          flushSlots();
+          return;
+        }
+
+        // Legacy SDK path — used for non-shielded direct pays AND
+        // shielded rows whose pre-build failed or wasn't attempted
+        // (wallet adapter without signAllTransactions support).
+        // For non-shielded direct pays this is equivalent to the new
+        // Phase C direct-registered path: same on-chain outcome,
+        // just without the single-popup batching win (each row gets
+        // its own popup).
+        // eslint-disable-next-line no-console
+        console.time(`[payroll row ${i + 1}] ${useShieldedForRun ? "shielded" : "public"} payInvoice`);
         try {
           const payResult = useShieldedForRun
             ? await payInvoiceFromShielded({
@@ -716,31 +1543,318 @@ export function PayrollFlow() {
                 mint: USDC_MINT.toBase58(),
                 amount: BigInt(prepared.amount),
               });
-          resultRows.push({
+          slots[i] = {
             ...prepared,
             status: "paid",
             mode: useShieldedForRun ? "shielded" : "public",
+            path: useShieldedForRun ? "shielded" : "direct-registered",
             txSignature: payResult.createUtxoSignature,
             error: null,
             registrationStatus: status,
-          });
+          };
         } catch (err: any) {
           const detail = await formatTxError(err, {
             phase: useShieldedForRun ? "shielded" : "public",
             connection,
           });
-          resultRows.push({
+          slots[i] = {
             ...prepared,
             status: "failed",
             mode: useShieldedForRun ? "shielded" : "public",
+            path: useShieldedForRun ? "shielded" : "direct-registered",
             txSignature: null,
             error: detail.summary,
             errorDetail: detail,
             registrationStatus: status,
-          });
+          };
+        } finally {
+          // eslint-disable-next-line no-console
+          console.timeEnd(`[payroll row ${i + 1}] ${useShieldedForRun ? "shielded" : "public"} payInvoice`);
         }
-        setRows([...resultRows]);
+        flushSlots();
       }
+
+      // Push completed slots into the live `rows` state in order.
+      // Trailing nulls are sliced off so the modal counter only sees
+      // settled rows — partial state stays out of the canonical row
+      // list until each row's processing function fully resolves.
+      function flushSlots() {
+        const settled: PayrollRunRow[] = [];
+        for (const slot of slots) {
+          if (slot != null) settled.push(slot);
+          else break; // first null breaks the prefix; later filled
+                       // slots will publish when earlier ones finish
+        }
+        setRows(settled);
+      }
+
+      // Worker-pool driver. Each "worker" pulls the next pending row
+      // index from a shared cursor and processes it; when the queue
+      // is empty the worker exits. Promise.all over the worker
+      // promises waits for every row to settle before we move on to
+      // packet signing.
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < parsed.rows.length) {
+          const i = cursor++;
+          await processRow(i);
+        }
+      };
+      const workers: Promise<void>[] = [];
+      const workerCount = Math.min(PAYROLL_PARALLEL_LIMIT, parsed.rows.length);
+      for (let w = 0; w < workerCount; w++) {
+        workers.push(worker());
+      }
+      // Set rowIndex to 0 — with parallel rows the per-row pointer is
+      // less meaningful, but we keep it set so the modal's "row N of
+      // M" copy points at the first incomplete row. Not authoritative
+      // for parallel mode; the count drives progress.
+      setRunRowIndex(0);
+      setRunSubStep(null); // clear single-row substep — meaningless in parallel
+      await Promise.all(workers);
+
+      // ────────────────────────────────────────────────────────────────
+      // Submit pre-signed deposits, with cold-cache fallback (Phase 1).
+      //
+      // Happy path (warm cache): the deposit txs were signed in the
+      // SAME Phantom popup as the fund tx during pre-flight. By now,
+      // every shadow has been registered. We just submit the cached
+      // signed txs in parallel — no popup, no signing.
+      //
+      // Cold-cache fallback: if register took >60s (cold IDB cache
+      // makes the first row's register run ~90s on a brand-new
+      // device), the pre-signed deposit tx's blockhash has expired
+      // by the time we submit. Detected via "Blockhash not found"
+      // in the submission error. Falls back to:
+      //   1. Refresh just the blockhash on the affected deposit
+      //      txs (reuses the cached ZK proof + codama instructions
+      //      — fast, ~50ms vs. ~10-20s for a full rebuild).
+      //   2. Sign all the refreshed deposits in ONE fallback popup
+      //      via wallet.signAllTransactions.
+      //   3. Submit the refreshed signed txs.
+      //
+      // Cold-cache thus pays a 2nd popup, but only the first time
+      // ZK assets cold-load. Every subsequent run on the same
+      // browser hits the warm path and the 1-popup goal stands.
+      if (pendingDeposits.size > 0) {
+        setRunSubStep("deposit");
+        // eslint-disable-next-line no-console
+        console.time(
+          `[payroll] submit pre-signed deposits (${pendingDeposits.size} txs)`,
+        );
+        const {
+          refreshPayInvoiceCpiTxBlockhash,
+          submitSignedPayInvoiceCpiTx,
+        } = await import("@/lib/payInvoiceCpi");
+
+        type SubmitOutcome =
+          | { ok: true; rowIndex: number; signature: string }
+          | { ok: false; rowIndex: number; err: any; needsRefresh: boolean };
+
+        // First pass — try the pre-signed txs.
+        const firstPass: SubmitOutcome[] = await Promise.all(
+          [...pendingDeposits.entries()].map(
+            async ([rowIndex, info]): Promise<SubmitOutcome> => {
+              const prefund = prefundedShadows.get(rowIndex);
+              if (!prefund?.signedDeposit) {
+                return {
+                  ok: false,
+                  rowIndex,
+                  err: new Error(
+                    "pre-flight signed-deposit slot was empty",
+                  ),
+                  needsRefresh: false,
+                };
+              }
+              try {
+                const result = await submitSignedPayInvoiceCpiTx({
+                  signedTx: prefund.signedDeposit.tx,
+                  built: prefund.signedDeposit.built,
+                });
+                return {
+                  ok: true,
+                  rowIndex,
+                  signature: result.createUtxoSignature,
+                };
+              } catch (err: any) {
+                // Detect blockhash-expiry → eligible for refresh.
+                // The error object's message OR cause's message
+                // typically carries "Blockhash not found".
+                const msg = String(err?.message ?? err ?? "");
+                const causeMsg = String(err?.cause?.message ?? "");
+                const needsRefresh =
+                  /Blockhash not found|BlockhashNotFound/i.test(msg) ||
+                  /Blockhash not found|BlockhashNotFound/i.test(causeMsg);
+                return { ok: false, rowIndex, err, needsRefresh };
+              }
+            },
+          ),
+        );
+
+        // Settle the happy-path rows immediately.
+        for (const r of firstPass) {
+          if (r.ok) {
+            const info = pendingDeposits.get(r.rowIndex)!;
+            slots[r.rowIndex] = {
+              ...info.prepared,
+              status: "paid",
+              mode: "public",
+              path: "claim-link",
+              txSignature: r.signature,
+              error: null,
+              claimUrl: info.claimUrl,
+              registrationStatus: "unregistered",
+            };
+          }
+        }
+        flushSlots();
+
+        // Collect rows that need a blockhash refresh.
+        const refreshable = firstPass.filter(
+          (r): r is Extract<SubmitOutcome, { ok: false }> =>
+            !r.ok && r.needsRefresh,
+        );
+        const unrecoverable = firstPass.filter(
+          (r): r is Extract<SubmitOutcome, { ok: false }> =>
+            !r.ok && !r.needsRefresh,
+        );
+
+        // Surface unrecoverable failures (not blockhash-related).
+        for (const r of unrecoverable) {
+          const info = pendingDeposits.get(r.rowIndex)!;
+          const detail = await formatTxError(r.err, {
+            phase: "deposit",
+            connection,
+          });
+          slots[r.rowIndex] = {
+            ...info.prepared,
+            status: "failed",
+            mode: "public",
+            path: "claim-link",
+            txSignature: null,
+            error: `Claim-link deposit-submit step failed: ${detail.summary}`,
+            errorDetail: detail,
+            claimUrl: info.claimUrl,
+            registrationStatus: "unregistered",
+          };
+        }
+        flushSlots();
+
+        // Cold-cache fallback: refresh blockhashes + re-sign in one popup.
+        if (refreshable.length > 0 && wallet.signAllTransactions) {
+          // eslint-disable-next-line no-console
+          console.time(
+            `[payroll] cold-cache refresh signAll (${refreshable.length} txs)`,
+          );
+          const refreshed = await Promise.all(
+            refreshable.map(async (r) => {
+              const prefund = prefundedShadows.get(r.rowIndex)!;
+              const fresh = await refreshPayInvoiceCpiTxBlockhash(
+                prefund.signedDeposit!.built,
+              );
+              return { rowIndex: r.rowIndex, fresh };
+            }),
+          );
+
+          let signedFresh: VersionedTransaction[] = [];
+          let signError: string | null = null;
+          try {
+            signedFresh = await wallet.signAllTransactions(
+              refreshed.map((r) => r.fresh.tx),
+            );
+          } catch (err: any) {
+            signError = err?.message ?? String(err);
+          } finally {
+            // eslint-disable-next-line no-console
+            console.timeEnd(
+              `[payroll] cold-cache refresh signAll (${refreshable.length} txs)`,
+            );
+          }
+
+          if (signError) {
+            // User rejected fallback popup → mark all refresh rows failed.
+            for (const r of refreshable) {
+              const info = pendingDeposits.get(r.rowIndex)!;
+              slots[r.rowIndex] = {
+                ...info.prepared,
+                status: "failed",
+                mode: "public",
+                path: "claim-link",
+                txSignature: null,
+                error: `Claim-link deposit-fallback-sign step failed: ${signError}`,
+                errorDetail: {
+                  summary: `Claim-link deposit-fallback-sign step failed: ${signError}`,
+                  phase: "deposit",
+                  rawMessage: signError,
+                },
+                claimUrl: info.claimUrl,
+                registrationStatus: "unregistered",
+              };
+            }
+          } else {
+            // Submit the freshly-signed txs in parallel.
+            await Promise.all(
+              refreshed.map(async (r, idx) => {
+                const info = pendingDeposits.get(r.rowIndex)!;
+                const signed = signedFresh[idx];
+                try {
+                  const result = await submitSignedPayInvoiceCpiTx({
+                    signedTx: signed,
+                    built: r.fresh,
+                  });
+                  slots[r.rowIndex] = {
+                    ...info.prepared,
+                    status: "paid",
+                    mode: "public",
+                    path: "claim-link",
+                    txSignature: result.createUtxoSignature,
+                    error: null,
+                    claimUrl: info.claimUrl,
+                    registrationStatus: "unregistered",
+                  };
+                } catch (err: any) {
+                  const detail = await formatTxError(err, {
+                    phase: "deposit",
+                    connection,
+                  });
+                  slots[r.rowIndex] = {
+                    ...info.prepared,
+                    status: "failed",
+                    mode: "public",
+                    path: "claim-link",
+                    txSignature: null,
+                    error: `Claim-link deposit-fallback-submit step failed: ${detail.summary}`,
+                    errorDetail: detail,
+                    claimUrl: info.claimUrl,
+                    registrationStatus: "unregistered",
+                  };
+                }
+              }),
+            );
+          }
+          flushSlots();
+        }
+
+        // eslint-disable-next-line no-console
+        console.timeEnd(
+          `[payroll] submit pre-signed deposits (${pendingDeposits.size} txs)`,
+        );
+      }
+
+      // After all rows settle, build the final ordered list. flushSlots
+      // already published the prefix as it filled in; this final write
+      // ensures any out-of-order completions are visible.
+      const resultRowsFinal: PayrollRunRow[] = slots.filter(
+        (s): s is PayrollRunRow => s != null,
+      );
+      // Replace the in-flight resultRows we previously pushed into; we
+      // keep the variable name for the downstream packet-build code.
+      resultRows.length = 0;
+      resultRows.push(...resultRowsFinal);
+      setRows([...resultRows]);
+      // Loop done — clear sub-step so the modal flips to "Sign receipt
+      // packet" instead of holding the last row's per-step copy.
+      setRunSubStep(null);
 
       // Build packet from completed rows (strip run-only fields).
       const nextPacket: PayrollPacket = {
@@ -769,6 +1883,23 @@ export function PayrollFlow() {
         const url = `${window.location.origin}/payroll/packet#${blob}`;
         setSignedPacket(signed);
         setPacketUrl(url);
+        // Persist locally + upload encrypted to Arweave so the dashboard's
+        // "Activity → Payroll runs" tab picks it up on this device AND
+        // any other device the wallet logs in from. The localStorage
+        // cache is the fast path (renders instantly); Arweave is the
+        // source of truth for cross-device sync. See
+        // `lib/payroll-runs-storage.ts` for the crypto contract.
+        // This call is fire-and-forget against the UI: the run is
+        // already shown via the in-memory `signedPacket` state; the
+        // upload + cache write happen in the background.
+        if (wallet.publicKey) {
+          const walletBase58 = wallet.publicKey.toBase58();
+          void persistPayrollRun({
+            wallet: wallet as any,
+            walletBase58,
+            signed,
+          });
+        }
         downloadPayrollPacketJson(signed);
 
         const claimUrls: Record<number, string> = {};
@@ -804,6 +1935,8 @@ export function PayrollFlow() {
     } finally {
       setRunning(false);
       setPhase("idle");
+      setRunSubStep(null);
+      setRunRowIndex(0);
     }
   }
 
@@ -815,8 +1948,25 @@ export function PayrollFlow() {
     companyName: string;
     batchId: string;
     rowIndex: number;
-  }): Promise<{ claimUrl: string; depositSignature: string; shadowAddress: string }> {
-    const ephemeral = generateEphemeralKeypair();
+    /** Pre-funded ephemeral keypair, if the run() coordinator already
+     *  funded this shadow via a batched signAllTransactions popup.
+     *  When set, we skip the per-row fund step entirely. */
+    prefundedEphemeral?: EphemeralKeypair;
+    /** If true, return without doing the deposit step. The coordinator
+     *  is going to batch all deposit txs across rows into one
+     *  `wallet.signAllTransactions` popup after every row's register
+     *  has completed. */
+    deferDeposit?: boolean;
+  }): Promise<{
+    claimUrl: string;
+    depositSignature: string;
+    shadowAddress: string;
+    /** True when the call returned early (deferDeposit) and the
+     *  caller still needs to run the batched deposit phase. */
+    deferred?: boolean;
+  }> {
+    const ephemeral = args.prefundedEphemeral ?? generateEphemeralKeypair();
+    const isPrefunded = !!args.prefundedEphemeral;
 
     // Each step gets its own try/catch so the thrown error carries
     // a `phase` tag we can surface in the row UI. Without this,
@@ -825,27 +1975,93 @@ export function PayrollFlow() {
     // tripped — and they hit different programs with different
     // failure modes (system program, Umbra registration, Umbra
     // deposit).
-    try {
-      await fundShadowAccount({
-        payerWallet: args.payerWallet,
-        shadowAddress: ephemeral.address,
-        lamports: SHADOW_FUNDING_LAMPORTS,
-        connection: args.connection,
-      });
-    } catch (err: any) {
-      err.__veilPhase = "fund";
-      throw err;
+    //
+    // Each step also flips `runSubStep` so the publishing modal can
+    // (a) tell the user what's actually running and (b) drive
+    // `awaitingWallet` correctly: TRUE only when a Phantom popup is
+    // genuinely open. ZK proof generation in `registerShadowAccount`
+    // takes 30–90s with no popup, and the prior UI was lying with
+    // "Waiting on wallet" through the whole stretch.
+    //
+    // `console.time/timeEnd` markers around each step give us hard
+    // wall-clock data in DevTools — useful when triaging "it's slow"
+    // reports (e.g. is ZK eating 90s, or is the deposit Arcium-side
+    // computation eating 60s?).
+    const tag = (label: string) => `[payroll row ${args.rowIndex + 1}] ${label}`;
+
+    if (isPrefunded) {
+      // Coordinator already funded this shadow via the batched
+      // signAllTransactions pre-flight popup. Skip the per-row fund
+      // step entirely — going through fundShadowAccount here would
+      // fire ANOTHER popup and undo the batching win.
+      // eslint-disable-next-line no-console
+      console.log(tag("fund — prefunded by coordinator, skipped"));
+    } else {
+      setRunSubStep("fund");
+      // eslint-disable-next-line no-console
+      console.time(tag("fund"));
+      try {
+        await fundShadowAccount({
+          payerWallet: args.payerWallet,
+          shadowAddress: ephemeral.address,
+          lamports: SHADOW_FUNDING_LAMPORTS,
+          connection: args.connection,
+        });
+      } catch (err: any) {
+        err.__veilPhase = "fund";
+        throw err;
+      } finally {
+        // eslint-disable-next-line no-console
+        console.timeEnd(tag("fund"));
+      }
     }
 
     const shadowClient = await buildShadowClient(ephemeral.privateKey);
 
+    setRunSubStep("register");
+    // eslint-disable-next-line no-console
+    console.time(tag("register (ZK proof + 3 txs)"));
     try {
       await registerShadowAccount({ shadowClient });
     } catch (err: any) {
       err.__veilPhase = "register";
       throw err;
+    } finally {
+      // eslint-disable-next-line no-console
+      console.timeEnd(tag("register (ZK proof + 3 txs)"));
     }
 
+    // If the coordinator wants to batch deposits across rows in a
+    // single signAllTransactions popup, it'll set deferDeposit=true.
+    // We return WITHOUT firing the per-row deposit; the caller
+    // collects the ready-for-deposit info and runs the batched
+    // deposit phase after all rows have completed register.
+    if (args.deferDeposit) {
+      const claimUrl = generateClaimUrl({
+        baseUrl: typeof window !== "undefined" ? window.location.origin : "",
+        batchId: args.batchId,
+        row: args.rowIndex,
+        ephemeralPrivateKey: ephemeral.privateKey,
+        metadata: {
+          amount: args.prepared.amountDisplay.replace(` ${PAYMENT_SYMBOL}`, ""),
+          symbol: PAYMENT_SYMBOL,
+          sender: args.companyName || args.payerWallet.publicKey.toBase58(),
+          mint: USDC_MINT.toBase58(),
+          amountBaseUnits: args.prepared.amount,
+        },
+      });
+      return {
+        claimUrl,
+        // Caller fills this in after the batched deposit phase.
+        depositSignature: "",
+        shadowAddress: ephemeral.address,
+        deferred: true,
+      };
+    }
+
+    setRunSubStep("deposit");
+    // eslint-disable-next-line no-console
+    console.time(tag("deposit"));
     let deposit: { depositSignature: string };
     try {
       deposit = await depositToShadow({
@@ -857,6 +2073,9 @@ export function PayrollFlow() {
     } catch (err: any) {
       err.__veilPhase = "deposit";
       throw err;
+    } finally {
+      // eslint-disable-next-line no-console
+      console.timeEnd(tag("deposit"));
     }
     const claimUrl = generateClaimUrl({
       baseUrl: typeof window !== "undefined" ? window.location.origin : "",
@@ -966,7 +2185,14 @@ export function PayrollFlow() {
   }
 
   return (
-    <div className="max-w-3xl pb-32">
+    // Centre the column on success — the SuccessHero block is
+    // text-center'd internally, so when the parent column is
+    // left-aligned the centred icon + headline sit visually offset
+    // from the left-aligned run ledger below them. `mx-auto` on
+    // success state keeps the whole column visually balanced. Compose
+    // mode keeps left-alignment because the editorial-form pattern
+    // wants a stable left edge as the user types.
+    <div className={`max-w-3xl pb-32${inSuccessState ? " mx-auto" : ""}`}>
       {/* Hero — display-size company name input */}
       {!inSuccessState && (
         <form
@@ -1142,12 +2368,25 @@ export function PayrollFlow() {
           settledTotalMicros,
           PAYMENT_DECIMALS,
         )} ${PAYMENT_SYMBOL}`;
+        // Phase C — count rows by sender-side delivery path. Only
+        // counts settled rows so a failed direct/claim-link attempt
+        // doesn't inflate the breakdown. Older rows missing `path`
+        // (legacy in-memory state from a previous build) fall back
+        // to the claim-URL heuristic.
+        const directCount = settled.filter(
+          (r) => r.path === "direct-registered",
+        ).length;
+        const claimLinkCount = settled.filter(
+          (r) => r.path === "claim-link" || (!r.path && !!r.claimUrl),
+        ).length;
         return (
           <SuccessHero
             settledCount={settled.length}
             failedCount={failed.length}
             totalCount={rows.length}
             settledTotalDisplay={settledTotalDisplay}
+            directCount={directCount}
+            claimLinkCount={claimLinkCount}
           />
         );
       })()}
@@ -1163,16 +2402,23 @@ export function PayrollFlow() {
       />
 
       {/* Collapsible "Why is this private?" — explorer comparison
-          tucked away by default; expandable for skeptics + judges. */}
-      <details className="mt-12 group">
-        <summary className="cursor-pointer text-[13px] text-muted hover:text-ink transition-colors inline-flex items-center gap-2 list-none">
-          <span className="canvas-disclosure-arrow">›</span>
-          Why is this private?
-        </summary>
-        <div className="mt-5">
-          <ExplorerComparison />
-        </div>
-      </details>
+          tucked away for compose-mode skeptics + judges. Hidden on
+          success because by then the user has the signed packet
+          itself (the proof of privacy) and the surface is already
+          long enough with the run ledger; an explainer disclosure
+          below it just pads the page without adding value the
+          packet's existence doesn't already convey. */}
+      {!inSuccessState && (
+        <details className="mt-12 group">
+          <summary className="cursor-pointer text-[13px] text-muted hover:text-ink transition-colors inline-flex items-center gap-2 list-none">
+            <span className="canvas-disclosure-arrow">›</span>
+            Why is this private?
+          </summary>
+          <div className="mt-5">
+            <ExplorerComparison />
+          </div>
+        </details>
+      )}
 
       <RegistrationModal open={regOpen} steps={regSteps} />
       <PayrollPublishingModal
@@ -1180,6 +2426,11 @@ export function PayrollFlow() {
         totalCount={runTotalCount || rowCount}
         sentCount={rows.length}
         phase={phase === "signing" ? "signing" : "sending"}
+        subStep={runSubStep}
+        rowIndex={runRowIndex}
+        // Pass `true` so the modal can decide per-step whether to show
+        // "Waiting on wallet" — internally it suppresses that line
+        // during the ZK proof step where no popup is genuinely open.
         awaitingWallet
       />
       <CanvasBar state={canvasBarState} formId="payroll-form" />
@@ -1457,6 +2708,15 @@ function ResultRow({
         )}`
       : null;
 
+  // Phase C: branch the path-chip + bottom-note rendering on the
+  // sender-side delivery path. Direct-registered rows skipped the
+  // entire shadow setup and target the recipient's on-chain x25519
+  // key — they get a "direct" chip and a sage note explaining that
+  // the recipient will see the payment in their dashboard's
+  // pending-claims section (no claim URL was issued).
+  const isDirectRegistered = row.path === "direct-registered";
+  const isClaimLink = row.path === "claim-link" || (!row.path && !!row.claimUrl);
+
   return (
     <li className="py-4 payroll-row-reveal">
       <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
@@ -1470,11 +2730,21 @@ function ResultRow({
             </span>
             <span className="text-[13px] text-ink/80 tnum">{row.amountDisplay}</span>
             <span className="mono-chip text-dim">{row.mode}</span>
-            {row.claimUrl && <span className="mono-chip text-sage">claim-link</span>}
+            {isDirectRegistered && (
+              <span className="mono-chip text-sage">direct</span>
+            )}
+            {isClaimLink && (
+              <span className="mono-chip text-sage">claim-link</span>
+            )}
           </div>
           <div className="mt-1 text-[12.5px] text-muted truncate">
             {row.memo || "No memo"}
           </div>
+          {isDirectRegistered && row.status === "paid" && (
+            <div className="mt-1 text-[12px] text-sage/80">
+              Sent directly to recipient&apos;s private balance.
+            </div>
+          )}
           {row.error && (
             <RowErrorChip error={row.error} detail={row.errorDetail} />
           )}
@@ -1561,7 +2831,7 @@ function RowErrorChip({
   detail,
 }: {
   error: string;
-  detail?: RowErrorDetail;
+  detail?: SdkErrorDetail;
 }) {
   const [open, setOpen] = useState(false);
   const hasLogs = !!(detail?.logs && detail.logs.length > 0);
@@ -1622,11 +2892,17 @@ function SuccessHero({
   failedCount,
   totalCount,
   settledTotalDisplay,
+  directCount,
+  claimLinkCount,
 }: {
   settledCount: number;
   failedCount: number;
   totalCount: number;
   settledTotalDisplay: string;
+  /** Phase C — settled rows that took the direct-registered path. */
+  directCount: number;
+  /** Phase C — settled rows that took the shadow / claim-link path. */
+  claimLinkCount: number;
 }) {
   // "Partial" mode: at least one row settled but at least one failed.
   // Eyebrow shifts to gold (warn, not error) and the body explicitly
@@ -1634,6 +2910,11 @@ function SuccessHero({
   // as "everything went through."
   const partial = failedCount > 0 && settledCount > 0;
   const allFailed = settledCount === 0 && failedCount > 0;
+  // Phase C breakdown line — only meaningful when at least one settled
+  // row took the direct path (= recipient was already an Umbra user
+  // and the sender skipped the shadow-funding hop). Surfaces the
+  // privacy benefit: "X rows direct, Y rows via claim-link".
+  const showPathBreakdown = directCount > 0 && settledCount > 0;
 
   return (
     <div className="flex flex-col items-center justify-center text-center pt-4 md:pt-6 pb-8">
@@ -1657,6 +2938,14 @@ function SuccessHero({
         </span>
         <span className="tnum">{settledTotalDisplay}</span>
       </div>
+      {showPathBreakdown && (
+        <p className="mt-3 text-[13px] text-muted tnum">
+          <span className="text-sage">{directCount}</span>{" "}
+          row{directCount === 1 ? "" : "s"} direct ·{" "}
+          <span className="text-ink/80">{claimLinkCount}</span>{" "}
+          row{claimLinkCount === 1 ? "" : "s"} via claim-link
+        </p>
+      )}
       {failedCount > 0 && (
         <p className="mt-3 text-[13.5px] text-brick">
           {failedCount} payment{failedCount === 1 ? "" : "s"} failed — see the

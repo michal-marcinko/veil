@@ -9,6 +9,26 @@ export interface PayrollPacketRow {
   mode: "shielded" | "public";
   txSignature: string | null;
   error: string | null;
+  /**
+   * Optional sender-side delivery path tag. Surfaced for transparency in
+   * the signed packet so the recipient (or a third-party verifier) can
+   * see how the payment reached them:
+   *
+   *   - `"direct-registered"` — recipient was already an Umbra user
+   *     when the run started; deposit ix targeted their on-chain x25519
+   *     key directly (no shadow indirection, no claim URL). Phase C.
+   *   - `"claim-link"` — recipient was unregistered; sender funded a
+   *     shadow account, registered it, deposited there, and emitted a
+   *     claim URL the recipient consumed via the dashboard. Phase A.
+   *   - `"shielded"` — sender paid from their encrypted balance via the
+   *     SDK's shielded creator path (Path A territory).
+   *
+   * INTENTIONALLY NOT in {@link canonicalPayrollPacketBytes}: keeping the
+   * canonical-bytes shape backwards-compatible means old verifiers
+   * (which build canonical bytes from the same fixed field list) still
+   * verify. Newer verifiers see this field; older ones simply ignore it.
+   */
+  path?: "direct-registered" | "claim-link" | "shielded";
 }
 
 export interface PayrollPacket {

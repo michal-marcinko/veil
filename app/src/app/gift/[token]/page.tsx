@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import {
@@ -46,6 +46,7 @@ export default function GiftClaimPage({
   params: { token: string };
 }) {
   const wallet = useWallet();
+  const { connection } = useConnection();
 
   const [parseError, setParseError] = useState<string | null>(null);
   const [privateKey, setPrivateKey] = useState<Uint8Array | null>(null);
@@ -91,6 +92,8 @@ export default function GiftClaimPage({
       const shadowClient = await buildShadowClient(privateKey);
       const result = await withdrawFromShadow({
         shadowClient,
+        ephemeralPrivateKey: privateKey,
+        connection,
         recipientAddress: wallet.publicKey.toBase58(),
         mint: metadata.mint,
         amount: BigInt(metadata.amountBaseUnits),

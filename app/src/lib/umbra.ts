@@ -42,6 +42,12 @@ function proxiedAssetProvider() {
   return getCdnZkAssetProvider({ baseUrl: "/umbra-cdn" });
 }
 
+// IndexedDB-backed (load, store) pair. Spread into every prover
+// construction so the heavy zkey/wasm assets persist across browser
+// sessions — first download is the only slow one, ever. See
+// lib/zk-asset-cache.ts for the cache contract.
+import { zkAssetCache } from "./zk-asset-cache";
+
 function isVeilDebugEnabled(): boolean {
   return process.env.NEXT_PUBLIC_VEIL_DEBUG === "1";
 }
@@ -562,7 +568,10 @@ export async function ensureRegistered(
   // same registration function but with user consent.
   if (await isFullyRegistered(client)) return;
 
-  const zkProver = getUserRegistrationProver({ assetProvider: proxiedAssetProvider() });
+  const zkProver = getUserRegistrationProver({
+    assetProvider: proxiedAssetProvider(),
+    ...zkAssetCache,
+  });
   const register = getUserRegistrationFunction({ client }, { zkProver } as any);
   await register({
     confidential: true,
@@ -652,6 +661,7 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
   // disabling the feature flag returns to the prior behavior bit-for-bit.
   const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver({
     assetProvider: proxiedAssetProvider(),
+    ...zkAssetCache,
   });
   const create = getPublicBalanceToReceiverClaimableUtxoCreatorFunction(
     { client: args.client },
@@ -707,6 +717,7 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
 export async function payInvoiceFromShielded(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
   const zkProver = getCreateReceiverClaimableUtxoFromEncryptedBalanceProver({
     assetProvider: proxiedAssetProvider(),
+    ...zkAssetCache,
   });
   const create = getEncryptedBalanceToReceiverClaimableUtxoCreatorFunction(
     { client: args.client },
@@ -1153,6 +1164,7 @@ export interface ClaimArgs {
 export async function claimUtxos(args: ClaimArgs) {
   const zkProver = getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver({
     assetProvider: proxiedAssetProvider(),
+    ...zkAssetCache,
   });
   const relayer = getUmbraRelayer({ apiEndpoint: UMBRA_RELAYER_API } as any);
   // The claimer reads fetchBatchMerkleProof FROM deps, not from the client

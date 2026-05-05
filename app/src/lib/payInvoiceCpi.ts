@@ -284,8 +284,32 @@ interface ProofGenerationOutput {
   receiverUserAccountPda: string;
 }
 
+/**
+ * Optional overrides that let the caller skip the on-chain receiver
+ * fetch in `generateProofAndCommitments`. Used by the single-popup
+ * payroll batching flow: the recipient is a freshly-generated shadow
+ * account that hasn't been registered yet at the time we build the
+ * deposit tx (because we want to BUILD + SIGN before register lands,
+ * so we can batch-sign with the fund tx in one Phantom popup).
+ *
+ * The caller computes these locally from the shadow client's master
+ * seed via `deriveShadowRegistrationValues` (in payroll-claim-links.ts),
+ * which uses the SDK's own deriver functions — meaning the values
+ * will EXACTLY match what register would store on chain. ZK proof
+ * verification is fully unaffected.
+ *
+ * Skipping the fetch costs nothing: the only chain call we still
+ * need from this region is the MXE account info (network-level,
+ * receiver-independent), which we make on its own.
+ */
+export interface ProofOverrides {
+  receiverX25519PublicKey?: Uint8Array;
+  receiverUserCommitment?: bigint;
+}
+
 async function generateProofAndCommitments(
   args: PayInvoiceArgs,
+  overrides?: ProofOverrides,
 ): Promise<ProofGenerationOutput> {
   const { client, recipientAddress, mint, amount } = args;
 
@@ -329,38 +353,64 @@ async function generateProofAndCommitments(
     ),
   );
 
-  // 6. Fetch receiver account + mxe
-  const receiverAccountMap: Map<string, any> = await c.accountInfoProvider(
-    [receiverUserAccountPda, c.networkConfig.mxeAccountAddress],
-    { commitment: "confirmed" },
-  );
-  const receiverAccountInfo = receiverAccountMap.get(receiverUserAccountPda);
-  if (receiverAccountInfo?.exists !== true) {
-    throw new Error(`Receiver is not registered: ${recipientAddress}`);
-  }
+  // 6 + 7. Receiver x25519 pub key + userCommitment.
+  //
+  // Two paths:
+  //   - OVERRIDE PATH (single-popup payroll batching): caller passes
+  //     locally-derived values via `overrides`. Used when the
+  //     recipient is a freshly-generated shadow that hasn't been
+  //     registered yet — at deposit-build time we don't have a chain
+  //     account to read. The SDK's own derivers produce the same
+  //     values register would store, so ZK proof verification is
+  //     unaffected. We still need the MXE account info from this
+  //     region (network-level, receiver-independent), so fetch that
+  //     alone.
+  //   - DEFAULT PATH: receiver is already registered on chain. Fetch
+  //     receiver account + MXE in one round-trip; decode the values
+  //     out of the receiver account.
+  let receiverX25519PublicKey: Uint8Array;
+  let receiverUserCommitment: bigint;
+  if (overrides?.receiverX25519PublicKey && overrides?.receiverUserCommitment !== undefined) {
+    receiverX25519PublicKey = overrides.receiverX25519PublicKey;
+    receiverUserCommitment = overrides.receiverUserCommitment;
+    // Still need the MXE account info, but we don't pre-empt the
+    // receiver-account fetch — useful for cache-warming the next
+    // call. Single-account fetch is cheap.
+    await c.accountInfoProvider(
+      [c.networkConfig.mxeAccountAddress],
+      { commitment: "confirmed" },
+    );
+  } else {
+    const receiverAccountMap: Map<string, any> = await c.accountInfoProvider(
+      [receiverUserAccountPda, c.networkConfig.mxeAccountAddress],
+      { commitment: "confirmed" },
+    );
+    const receiverAccountInfo = receiverAccountMap.get(receiverUserAccountPda);
+    if (receiverAccountInfo?.exists !== true) {
+      throw new Error(`Receiver is not registered: ${recipientAddress}`);
+    }
+    const receiverAccount = decodeEncryptedUserAccount(receiverAccountInfo);
+    const receiverAccountData = (receiverAccount as any).data;
+    const receiverX25519PublicKeyBytes =
+      receiverAccountData.x25519PublicKeyForTokenEncryption?.first;
+    if (receiverX25519PublicKeyBytes === undefined) {
+      throw new Error("Receiver does not have X25519 public key registered");
+    }
+    receiverX25519PublicKey = new Uint8Array(receiverX25519PublicKeyBytes);
 
-  // 7. Decode receiver data → x25519 pub key + user commitment
-  const receiverAccount = decodeEncryptedUserAccount(receiverAccountInfo);
-  const receiverAccountData = (receiverAccount as any).data;
-  const receiverX25519PublicKeyBytes =
-    receiverAccountData.x25519PublicKeyForTokenEncryption?.first;
-  if (receiverX25519PublicKeyBytes === undefined) {
-    throw new Error("Receiver does not have X25519 public key registered");
-  }
-  const receiverX25519PublicKey = new Uint8Array(receiverX25519PublicKeyBytes);
-
-  const receiverUserCommitmentBytes = receiverAccountData.userCommitment?.first;
-  if (receiverUserCommitmentBytes === undefined) {
-    throw new Error("Receiver does not have user commitment registered");
-  }
-  const receiverUserCommitmentLeBytes = new Uint8Array(
-    receiverUserCommitmentBytes,
-  );
-  // Decode 32 bytes LE → bigint
-  let receiverUserCommitment = 0n;
-  for (let i = 0; i < 32; i++) {
-    receiverUserCommitment |=
-      BigInt(receiverUserCommitmentLeBytes[i]) << BigInt(i * 8);
+    const receiverUserCommitmentBytes = receiverAccountData.userCommitment?.first;
+    if (receiverUserCommitmentBytes === undefined) {
+      throw new Error("Receiver does not have user commitment registered");
+    }
+    const receiverUserCommitmentLeBytes = new Uint8Array(
+      receiverUserCommitmentBytes,
+    );
+    // Decode 32 bytes LE → bigint
+    receiverUserCommitment = 0n;
+    for (let i = 0; i < 32; i++) {
+      receiverUserCommitment |=
+        BigInt(receiverUserCommitmentLeBytes[i]) << BigInt(i * 8);
+    }
   }
 
   // 8. Mint program detection.
@@ -651,9 +701,14 @@ async function generateProofAndCommitments(
   };
 
   // 24. Prove
+  // Mount the IndexedDB-backed asset cache alongside the CDN provider —
+  // first run on a device downloads the ~30 MB zkey, every subsequent
+  // session reads it from IDB instantly. See lib/zk-asset-cache.ts.
   const assetProvider = await getProxiedAssetProvider();
+  const { zkAssetCache } = await import("./zk-asset-cache");
   const zkProver = getCreateReceiverClaimableUtxoFromPublicBalanceProver({
     assetProvider,
+    ...zkAssetCache,
   });
   const { proofA, proofB, proofC } = await zkProver.prove(
     zkCircuitInputs as any,
@@ -827,6 +882,345 @@ function buildVeilPayInstruction(
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+/**
+ * Output of `buildPayInvoiceCpiTx` — the unsigned VersionedTransaction
+ * along with the metadata `submitSignedPayInvoiceCpiTx` needs to confirm
+ * the result. Used by the batched-signing flow in PayrollFlow's run()
+ * so multiple deposit txs across rows can be signed in ONE Phantom
+ * popup via `wallet.signAllTransactions`.
+ *
+ * `cached` carries the heavy build artifacts (ZK proof + codama
+ * instruction + ALT) so `refreshPayInvoiceCpiTxBlockhash` can rebuild
+ * the tx with a new blockhash WITHOUT redoing the ~10-20s ZK proof.
+ * This is what powers the cold-cache fallback: when a pre-signed
+ * deposit fails post-register-wait with "Blockhash not found", we
+ * refresh just the blockhash and re-sign in a single fallback popup.
+ */
+export interface BuiltPayInvoiceCpiTx {
+  /** Unsigned versioned tx — caller signs via wallet.signAllTransactions. */
+  tx: VersionedTransaction;
+  /** Re-derive the same blockhash for the confirm call. Empty string
+   *  when nonce-anchored — confirm uses signature polling instead. */
+  blockhash: string;
+  lastValidBlockHeight: number;
+  depositorAddress: string;
+  /** Set when this tx is anchored to a durable nonce instead of a
+   *  recent blockhash. Submission uses signature polling (no
+   *  blockhash window concern) and refresh becomes a no-op (nonce
+   *  doesn't expire). */
+  nonceConfig?: NonceConfig;
+  /** Cached blockhash-independent components for fast refresh. */
+  cached: {
+    veilPayIx: TransactionInstruction;
+    altAccounts: AddressLookupTableAccount[];
+    depositorPubkey: PublicKey;
+  };
+}
+
+/**
+ * Build (but don't sign or submit) a single VeilPay deposit tx. The
+ * caller is expected to:
+ *   1. Collect N of these from N rows.
+ *   2. Pass `[t1.tx, t2.tx, ...]` to `wallet.signAllTransactions(...)` —
+ *      Phantom shows ONE popup with all N txs, user approves once.
+ *   3. For each signed tx, call `submitSignedPayInvoiceCpiTx`.
+ *
+ * The same heavy ZK-proof + codama instruction-building work happens
+ * here as in `payInvoiceCpi`; only the final signing + submission
+ * stages are deferred so they can be batched.
+ */
+/**
+ * Optional durable-nonce config that anchors the tx's blockhash to a
+ * nonce account instead of a regular recent blockhash. Used by the
+ * single-popup payroll batching flow: deposit txs are signed at t=0
+ * but submitted only after register completes (which can take 90s+
+ * on cold cache, exceeding the regular blockhash window). A nonce
+ * doesn't expire — the tx stays valid until submitted (which advances
+ * the nonce as a side-effect).
+ *
+ * When `nonceConfig` is provided:
+ *   - `nonce.nonce` is used as the tx's `recentBlockhash`.
+ *   - `SystemProgram.nonceAdvance` is prepended as the FIRST
+ *     instruction (Solana protocol requirement).
+ *   - The fresh blockhash fetch is skipped.
+ *
+ * `nonceConfig.lastValidBlockHeight` is opaque (we don't use it for
+ * confirmation) but kept in the return for symmetry with the
+ * regular-blockhash path.
+ */
+export interface NonceConfig {
+  noncePubkey: PublicKey;
+  authorityPubkey: PublicKey;
+  /** Current nonce value, used as the tx's recentBlockhash. */
+  nonce: string;
+  /** ALT containing the nonce account + sysvar `recent_blockhashes`.
+   *  When provided, fetched + merged with VeilPay's existing ALT so
+   *  both new accounts resolve via lookup-table indices instead of
+   *  inflating the static account list. Required because adding the
+   *  `nonceAdvance` instruction otherwise pushes the deposit tx
+   *  ~47 bytes over the 1232-byte cap. */
+  altAddress?: PublicKey;
+}
+
+export async function buildPayInvoiceCpiTx(
+  args: PayInvoiceArgs,
+  overrides?: ProofOverrides,
+  nonceConfig?: NonceConfig,
+): Promise<BuiltPayInvoiceCpiTx> {
+  if (!VEIL_PAY_PROGRAM_ID) throw new VeilPayNotConfiguredError();
+
+  const c: any = args.client;
+  const depositorAddress: string = String(c.signer.address);
+  const depositorPubkey = new PublicKey(depositorAddress);
+
+  // 1. Crypto + ZK proof (heavy; takes a few seconds in the browser).
+  //    `overrides` allows the caller to supply locally-derived
+  //    receiver values when the receiver isn't yet registered on
+  //    chain — see ProofOverrides docstring.
+  const proofOutput = await generateProofAndCommitments(args, overrides);
+
+  // 2. Build the two Umbra instructions via codama (no submission)
+  const { createBufferIx, depositIx } = await buildCodamaInstructions(
+    args,
+    proofOutput,
+  );
+
+  // 3. Wrap both in our single VeilPay instruction
+  const veilPayIx = buildVeilPayInstruction(
+    createBufferIx,
+    depositIx,
+    depositorPubkey,
+  );
+
+  const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
+    units: 1_250_000,
+  });
+
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  // Two paths for the tx's recentBlockhash:
+  //   - DURABLE NONCE PATH (nonceConfig provided): use the nonce
+  //     account's current nonce value as the blockhash; prepend
+  //     `system_instruction::advance_nonce_account` as the FIRST
+  //     instruction. The tx never expires — Solana keeps it valid
+  //     until the nonce is consumed at execution time. Used by
+  //     the single-popup payroll flow so deposits signed at t=0
+  //     stay valid through the ~15-90s register wait.
+  //   - REGULAR BLOCKHASH PATH (default): fetch a recent blockhash.
+  //     The tx is valid for ~150 slots (~60s). Adequate when sign
+  //     and submit happen within seconds of each other.
+  let blockhash: string;
+  let lastValidBlockHeight: number;
+  if (nonceConfig) {
+    blockhash = nonceConfig.nonce;
+    // We don't use lastValidBlockHeight for confirmation when nonce
+    // is in play (signature-status polling instead). Set to a safe
+    // placeholder so the type stays uniform.
+    lastValidBlockHeight = 0;
+  } else {
+    const latest = await connection.getLatestBlockhash("confirmed");
+    blockhash = latest.blockhash;
+    lastValidBlockHeight = latest.lastValidBlockHeight;
+  }
+
+  let altAccounts: AddressLookupTableAccount[] = [];
+  if (VEILPAY_ALT_ADDRESS) {
+    const altResult = await connection.getAddressLookupTable(
+      VEILPAY_ALT_ADDRESS,
+    );
+    if (altResult.value) {
+      altAccounts = [altResult.value];
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[VeilPay] ALT ${VEILPAY_ALT_ADDRESS.toBase58()} not fetchable — falling back to inline accounts. Tx will likely exceed 1232b.`,
+      );
+    }
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[VeilPay] NEXT_PUBLIC_VEILPAY_ALT_ADDRESS not set — tx will likely exceed 1232b. Run `cd app && node scripts/deploy-veilpay-alt.mjs`.",
+    );
+  }
+
+  // Per-wallet nonce ALT — fetched and appended to altAccounts so the
+  // nonce account + sysvar `recent_blockhashes` resolve via lookup-table
+  // indices. Without this, the `nonceAdvance` instruction's two new
+  // accounts inflate the deposit tx by ~64 bytes and push it over the
+  // 1232-byte cap. The ALT is created lazily by `lib/nonce-pool.ts`'s
+  // `getOrAllocateNonces` and persisted per-wallet.
+  if (nonceConfig?.altAddress) {
+    const nonceAltResult = await connection.getAddressLookupTable(
+      nonceConfig.altAddress,
+    );
+    if (nonceAltResult.value) {
+      altAccounts = [...altAccounts, nonceAltResult.value];
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[VeilPay] nonce ALT ${nonceConfig.altAddress.toBase58()} not fetchable — tx will likely exceed 1232b.`,
+      );
+    }
+  }
+
+  // The instruction list: when using a durable nonce, advance_nonce_account
+  // MUST be the first instruction (Solana runtime requirement).
+  const txInstructions = nonceConfig
+    ? [
+        // Lazy import to keep the SystemProgram dep contained at this
+        // call site only when nonces are in play.
+        (await import("@solana/web3.js")).SystemProgram.nonceAdvance({
+          noncePubkey: nonceConfig.noncePubkey,
+          authorizedPubkey: nonceConfig.authorityPubkey,
+        }),
+        computeBudgetIx,
+        veilPayIx,
+      ]
+    : [computeBudgetIx, veilPayIx];
+
+  const messageV0 = new TransactionMessage({
+    payerKey: depositorPubkey,
+    recentBlockhash: blockhash,
+    instructions: txInstructions,
+  }).compileToV0Message(altAccounts);
+  const tx = new VersionedTransaction(messageV0);
+
+  if (process.env.NEXT_PUBLIC_VEIL_DEBUG === "1") {
+    const messageBytes = messageV0.serialize();
+    // eslint-disable-next-line no-console
+    console.log("[VeilPay tx-size]", {
+      serializedMessageBytes: messageBytes.length,
+      estSignedTxBytes: messageBytes.length + 65,
+      underCap1232: messageBytes.length + 65 <= 1232,
+      accountKeys: messageV0.staticAccountKeys.length,
+      altCount: altAccounts.length,
+      altWritable: messageV0.addressTableLookups.reduce(
+        (n, l) => n + l.writableIndexes.length,
+        0,
+      ),
+      altReadonly: messageV0.addressTableLookups.reduce(
+        (n, l) => n + l.readonlyIndexes.length,
+        0,
+      ),
+      instructions: messageV0.compiledInstructions.length,
+      veilPayIxDataBytes: veilPayIx.data.length,
+      veilPayIxAccountCount: veilPayIx.keys.length,
+      createBufferDataBytes: createBufferIx.data.length,
+      depositDataBytes: depositIx.data.length,
+      createBufferAccountCount: createBufferIx.accounts.length,
+      depositAccountCount: depositIx.accounts.length,
+    });
+  }
+
+  return {
+    tx,
+    blockhash,
+    lastValidBlockHeight,
+    depositorAddress,
+    nonceConfig,
+    cached: { veilPayIx, altAccounts, depositorPubkey },
+  };
+}
+
+/**
+ * Rebuild the deposit tx with a fresh blockhash, reusing the cached
+ * (blockhash-independent) ZK proof + codama instructions + ALT from
+ * the original build. Used as the cold-cache fallback when a
+ * pre-signed deposit fails with "Blockhash not found": the gap
+ * between sign-time and submit-time exceeded the ~60s blockhash
+ * window. ZK proof regeneration is the slow part (~10-20s); a fresh
+ * blockhash takes <1s.
+ *
+ * The returned `BuiltPayInvoiceCpiTx` shares its `cached` artifacts
+ * with the input. The caller signs the new `tx` via
+ * `wallet.signAllTransactions` and submits via
+ * `submitSignedPayInvoiceCpiTx`.
+ */
+export async function refreshPayInvoiceCpiTxBlockhash(
+  built: BuiltPayInvoiceCpiTx,
+): Promise<BuiltPayInvoiceCpiTx> {
+  // Nonce-anchored txs never expire; refresh is a no-op (the same
+  // signed tx remains valid indefinitely until the nonce is consumed).
+  // Defensive return so callers don't have to special-case.
+  if (built.nonceConfig) return built;
+
+  const connection = new Connection(RPC_URL, "confirmed");
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed");
+  const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
+    units: 1_250_000,
+  });
+  const messageV0 = new TransactionMessage({
+    payerKey: built.cached.depositorPubkey,
+    recentBlockhash: blockhash,
+    instructions: [computeBudgetIx, built.cached.veilPayIx],
+  }).compileToV0Message(built.cached.altAccounts);
+  return {
+    tx: new VersionedTransaction(messageV0),
+    blockhash,
+    lastValidBlockHeight,
+    depositorAddress: built.depositorAddress,
+    cached: built.cached,
+  };
+}
+
+/**
+ * Submit a previously-batch-signed VeilPay deposit tx and confirm it.
+ *
+ * Two confirmation modes:
+ *   - Regular blockhash (built.nonceConfig undefined): blockhash +
+ *     lastValidBlockHeight feed `confirmTransaction`'s
+ *     blockheight-based timeout. Tx valid for ~150 slots.
+ *   - Durable nonce (built.nonceConfig present): the tx stays valid
+ *     until its nonce is consumed at execution. We use signature-
+ *     status polling instead of blockhash-based confirm.
+ */
+export async function submitSignedPayInvoiceCpiTx(args: {
+  signedTx: VersionedTransaction;
+  built: BuiltPayInvoiceCpiTx;
+}): Promise<PayInvoiceResult> {
+  const connection = new Connection(RPC_URL, "confirmed");
+  const txSignature = await connection.sendTransaction(args.signedTx, {
+    skipPreflight: false,
+    maxRetries: 3,
+  });
+  if (args.built.nonceConfig) {
+    // Nonce-anchored: poll signature status until "confirmed" or a
+    // generous timeout (60s — Arcium MPC can extend confirmation
+    // tail latency on devnet).
+    const deadlineMs = Date.now() + 60_000;
+    while (Date.now() < deadlineMs) {
+      const statuses = await connection.getSignatureStatuses([txSignature]);
+      const s = statuses.value[0];
+      if (s?.err) {
+        throw new Error(
+          `Tx ${txSignature} failed: ${JSON.stringify(s.err)}`,
+        );
+      }
+      if (
+        s?.confirmationStatus === "confirmed" ||
+        s?.confirmationStatus === "finalized"
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } else {
+    await connection.confirmTransaction(
+      {
+        signature: txSignature,
+        blockhash: args.built.blockhash,
+        lastValidBlockHeight: args.built.lastValidBlockHeight,
+      },
+      "confirmed",
+    );
+  }
+  return {
+    createProofAccountSignature: txSignature,
+    createUtxoSignature: txSignature,
+  };
+}
 
 export async function payInvoiceCpi(
   args: PayInvoiceArgs,

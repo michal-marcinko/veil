@@ -86,6 +86,11 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
 
   const [mode, setMode] = useState<Mode>(__forceState === "success" ? "invoice" : null);
   const [formExiting, setFormExiting] = useState(false);
+  // Mirror PayrollFlow's internal success state up here so the
+  // section-level chevron-up "back to picker" affordance can be
+  // hidden once a payroll packet has been signed. Without this the
+  // chevron sits orphaned above PayrollFlow's centred success hero.
+  const [payrollInSuccess, setPayrollInSuccess] = useState(false);
   const formRef = useRef<HTMLElement>(null);
   const exitTimeoutRef = useRef<number | null>(null);
   useEffect(
@@ -149,6 +154,10 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
       setResult(null);
       setCopied(false);
       setValues(EMPTY_FORM);
+      // Reset the lifted payroll success flag so a stale `true` from
+      // a prior payroll run doesn't suppress the chevron when the
+      // user re-enters payroll mode.
+      setPayrollInSuccess(false);
       exitTimeoutRef.current = null;
     }, FORM_EXIT_MS);
   }
@@ -330,6 +339,16 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
   // the picker + "Choose differently" link.
   const inSuccessState = mode === "invoice" && !!result;
 
+  // Section-level chevron-up "back to picker" button is suppressed
+  // once a per-mode flow has reached its own success state. Invoice
+  // uses `inSuccessState` (above); payroll signals via the lifted
+  // `payrollInSuccess` flag set by PayrollFlow's onSuccessChange. The
+  // chevron sitting orphaned above a centred success hero looks
+  // awkward — and the per-mode success surfaces all have their own
+  // bottom-bar nav so the chevron is redundant there anyway.
+  const hideBackChevron =
+    inSuccessState || (mode === "payroll" && payrollInSuccess);
+
   /* ─────────────────────────────── render ─────────────────────────────── */
 
   return (
@@ -365,9 +384,10 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
           <div className="max-w-[1400px] mx-auto px-6 md:px-8 pt-12 md:pt-16">
             {/* Back to picker — big bare chevron, no label. Hover lifts
                 the chevron a few px to hint at the direction, color
-                deepens from line-2 to ink. Hidden in invoice success
-                state since the page is committed at that point. */}
-            {!inSuccessState && (
+                deepens from line-2 to ink. Hidden once any mode's
+                inner success state activates — see hideBackChevron
+                above for the union of conditions. */}
+            {!hideBackChevron && (
               <div className="flex justify-center">
                 <button
                   type="button"
@@ -435,7 +455,7 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
 
           {mode === "payroll" && (
             <div className="max-w-[1400px] mx-auto px-6 md:px-8 mt-10 md:mt-12 pb-32">
-              <PayrollFlow />
+              <PayrollFlow onSuccessChange={setPayrollInSuccess} />
             </div>
           )}
 

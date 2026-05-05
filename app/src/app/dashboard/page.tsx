@@ -42,6 +42,11 @@ import {
   formatPayrollAmount,
   type SignedPayrollPacket,
 } from "@/lib/private-payroll";
+import {
+  loadCachedSignedPackets,
+  syncPayrollRunsFromArweave,
+} from "@/lib/payroll-runs-storage";
+import { IncomingPrivatePaymentsSection } from "@/components/IncomingPrivatePaymentsSection";
 import bs58 from "bs58";
 
 type DashboardTab = "invoices" | "payroll";
@@ -57,42 +62,16 @@ type StatusFilter = "all" | "pending" | "paid" | "cancelled";
 // when the user closes the panel mid-paste.
 const RECEIPT_DRAFT_STORAGE_PREFIX = "veil:receiptDraft:";
 
-// Storage convention for signed payroll packets. Codex's
-// /payroll/outgoing flow currently emits a verifier URL hash + a JSON/PDF
-// download — it does NOT persist to localStorage today. We adopt this
-// key prospectively so when the outgoing page (or any future flow) starts
-// writing signed packets per wallet, the Activity → Payroll runs tab
-// picks them up automatically with no further coordination.
+// Storage convention + cross-device sync for signed payroll packets
+// lives in `lib/payroll-runs-storage.ts`. The dashboard imports
+// `loadCachedSignedPackets` (instant fast-path read) and
+// `syncPayrollRunsFromArweave` (background reconcile) from there.
+// The cache key prefix kept here as a constant so the storage-event
+// subscription can still filter to it.
 const PAYROLL_RUNS_STORAGE_PREFIX = "veil:payrollRuns:";
 
 function payrollRunsStorageKey(walletBase58: string): string {
   return `${PAYROLL_RUNS_STORAGE_PREFIX}${walletBase58}`;
-}
-
-function loadPayrollRuns(walletBase58: string): SignedPayrollPacket[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(payrollRunsStorageKey(walletBase58));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Defensive shape check — we don't want a stale/corrupt entry to
-    // crash the dashboard render. Each entry must look like
-    // { packet: { batchId, rows[] }, signature }.
-    return parsed.filter((entry: any): entry is SignedPayrollPacket => {
-      return (
-        entry &&
-        typeof entry === "object" &&
-        entry.packet &&
-        typeof entry.packet === "object" &&
-        typeof entry.packet.batchId === "string" &&
-        Array.isArray(entry.packet.rows) &&
-        typeof entry.signature === "string"
-      );
-    });
-  } catch {
-    return [];
-  }
 }
 
 type PayrollRunSummary = {
@@ -760,15 +739,49 @@ export default function DashboardPage() {
     }
     const walletBase58 = wallet.publicKey.toBase58();
     const key = payrollRunsStorageKey(walletBase58);
-    setPayrollRuns(loadPayrollRuns(walletBase58));
+    setPayrollRuns(loadCachedSignedPackets(walletBase58));
     function onStorage(event: StorageEvent) {
       if (event.key === key) {
-        setPayrollRuns(loadPayrollRuns(walletBase58));
+        setPayrollRuns(loadCachedSignedPackets(walletBase58));
       }
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [wallet.publicKey]);
+
+  // Cross-device sync — reconcile the local cache with payroll runs
+  // we may have uploaded from another browser/device. The master sig
+  // is cached after first use (most likely already populated by the
+  // invoice-metadata flow on this same dashboard), so this rarely
+  // requires an extra Phantom popup. Best-effort: errors don't block
+  // the local-only render. Re-runs whenever the wallet changes.
+  useEffect(() => {
+    if (!wallet.publicKey) return;
+    const walletBase58 = wallet.publicKey.toBase58();
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await syncPayrollRunsFromArweave({
+          wallet: wallet as any,
+          walletBase58,
+        });
+        if (!cancelled && result.added > 0) {
+          // The sync helper writes to localStorage and dispatches a
+          // synthetic StorageEvent, so the hydration effect's
+          // onStorage handler will pick up the new entries. Forcing
+          // a state set here as a belt-and-braces measure for the
+          // rare case where the same-tab dispatch is suppressed.
+          setPayrollRuns(loadCachedSignedPackets(walletBase58));
+        }
+      } catch {
+        // syncPayrollRunsFromArweave is internally defensive; this
+        // catch is just for any unexpected throw.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.publicKey, wallet]);
 
   // Hydrate the receipt-apply textarea draft from localStorage on
   // wallet change. Per-wallet so a draft from another wallet doesn't
@@ -1048,6 +1061,13 @@ export default function DashboardPage() {
           <RefreshButton onClick={refresh} loading={loading} />
         </div>
       </div>
+
+      {/* Recipient-side activity (Phase B). Lives above the invoices /
+          payroll tab bar so a user who is purely on the receiving side
+          (no invoices, no payroll runs) sees their own activity at the
+          top instead of empty tabs. The section is internally
+          wallet-aware and renders nothing when disconnected. */}
+      <IncomingPrivatePaymentsSection wallet={wallet} />
 
       {/* Tab bar — austere mono, hairline rule, 2px ink underline on active */}
       <div className="border-b border-line mb-10">
