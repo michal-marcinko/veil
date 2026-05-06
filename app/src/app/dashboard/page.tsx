@@ -36,7 +36,9 @@ import {
   claimUtxos,
   getEncryptedBalance,
   withdrawShielded,
+  depositToShielded,
 } from "@/lib/umbra";
+import { parseAmountToBaseUnits } from "@/lib/csv";
 import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
 import {
   formatPayrollAmount,
@@ -168,6 +170,14 @@ export default function DashboardPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [receiverKeyMismatch, setReceiverKeyMismatch] = useState(false);
   const [withdrawing, setWithdrawing] = useState(false);
+  // Deposit-to-shielded modal state. The modal opens when the user
+  // clicks "Deposit from wallet → private" on the balance card.
+  // `depositOpen` toggles the modal; `depositAmount` is the form input
+  // (display string, parsed at submit); `depositing` blocks resubmits
+  // and surfaces a spinner inside the button.
+  const [depositOpen, setDepositOpen] = useState(false);
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositing, setDepositing] = useState(false);
   // Per-invoice labels decrypted lazily. Keyed by PDA base58. We populate
   // this after the initial fetch so the table can show "Acme · $4,200 USDC"
   // instead of "9TjX77RP…9Yeh". Decrypt failures (legacy invoices with the
@@ -315,128 +325,35 @@ export default function DashboardPage() {
       let claimedThisRefresh = false;
 
       try {
-        const scan = await scanClaimableUtxos(client);
-        // Both buckets represent "incoming payment from someone else."
-        // Bob's payment lands in `received` if he paid via shielded path,
-        // `publicReceived` if he funded from public ATA.
-        const incoming = [...scan.received, ...scan.publicReceived];
-          if (incoming.length > 0) {
-            claimedThisRefresh = true;
-            // Open the progress modal BEFORE the first Phantom popup
-            // fires. With N=6 unclaimed UTXOs the unguarded path
-            // unleashed six wallet prompts in a few seconds with no
-            // context; the modal explains what's happening and ticks
-            // the progress bar as each one lands.
-            setClaimModal({
-              open: true,
-              current: 0,
-              total: incoming.length,
-              error: null,
-            });
-            // Watermark-based incremental scan in `scanClaimableUtxos`
-            // means `incoming` should only contain UTXOs newer than
-            // what we've already processed in past sessions. We still
-            // keep the per-UTXO retry-on-409 below as belt-and-suspenders
-            // — it covers the rare case where the watermark is reset
-            // (e.g. cleared localStorage, switched browsers) and Alice's
-            // already-claimed UTXOs reappear in the scan.
-            let claimResult: Awaited<ReturnType<typeof claimUtxos>> | null = null;
-            try {
-              claimResult = await claimUtxos({
-                client,
-                utxos: incoming,
-                onProgress: (current, total) => {
-                  // Drive the modal's progress bar from inside umbra.ts.
-                  // Because `claimUtxos` processes UTXOs sequentially
-                  // when an `onProgress` callback is provided, this fires
-                  // exactly once per claimed UTXO.
-                  setClaimModal((prev) => ({
-                    ...prev,
-                    current,
-                    total,
-                  }));
-                },
-              });
-            } catch (err: any) {
-              const msg = String(err?.message ?? err);
-              const alreadyReserved = /already reserved/i.test(msg) || /409/.test(msg);
-              if (alreadyReserved) {
-                // eslint-disable-next-line no-console
-                console.warn(
-                  "[Veil dashboard] bulk claim hit an already-reserved nullifier; retrying per-UTXO in parallel.",
-                );
-                // Parallel retry — each UTXO is an independent relayer
-                // request. Should rarely fire now that the watermark
-                // pre-filters seen UTXOs, but kept as belt-and-suspenders.
-                const results = await Promise.allSettled(
-                  incoming.map((utxo: any) => claimUtxos({ client, utxos: [utxo] })),
-                );
-                let claimedAny = 0;
-                let skippedReserved = 0;
-                let otherFailures = 0;
-                for (const r of results) {
-                  if (r.status === "fulfilled") {
-                    if (!claimResult) claimResult = r.value;
-                    claimedAny++;
-                  } else {
-                    const subMsg = String((r.reason as any)?.message ?? r.reason);
-                    if (/already reserved/i.test(subMsg) || /409/.test(subMsg)) {
-                      skippedReserved++;
-                    } else {
-                      otherFailures++;
-                      // eslint-disable-next-line no-console
-                      console.error(
-                        "[Veil dashboard] per-UTXO claim failed (non-409):",
-                        r.reason,
-                      );
-                    }
-                  }
-                }
-                // eslint-disable-next-line no-console
-                console.log(
-                  `[Veil dashboard] per-UTXO claim done: claimed=${claimedAny} skippedReserved=${skippedReserved} otherFailures=${otherFailures} of total=${incoming.length}`,
-                );
-              } else {
-                throw err;
-              }
-            }
-            // CRITICAL CHANGE (2026-05-04 Codex review fix):
-            // Previously this loop iterated every Pending invoice and
-            // called markPaidOnChain() for each one whenever ANY UTXO
-            // was claimed. That violated invoice ↔ payment binding —
-            // a single payment from anyone would flip every outstanding
-            // invoice to Paid. The on-chain `mark_paid` instruction does
-            // not (and cannot) verify which Umbra UTXO funded which
-            // invoice, so the binding has to live off-chain in a
-            // payer-signed receipt.
-            //
-            // New flow: just record the claimed UTXO signatures we can
-            // pull off the SDK result, and bump the unmatched-claim
-            // counter. The creator must explicitly paste a payer-signed
-            // receipt to mark a specific invoice paid (see
-            // `handleApplyReceipt` below).
-            const newSigs = collectStableSignatures(claimResult);
-            if (newSigs.size > 0) {
-              setClaimedUtxoSigs((prev) => {
-                const merged = new Set(prev);
-                for (const s of newSigs) merged.add(s);
-                return merged;
-              });
-            }
-            setClaimedCount((c) => c + incoming.length);
-            // Pin the bar to 100% (the per-UTXO retry path may not
-            // emit a final progress tick) and let the success state
-            // breathe for ~1.5s before auto-closing.
-            setClaimModal((prev) => ({
-              ...prev,
-              current: prev.total,
-              error: null,
-            }));
-            setTimeout(() => {
-              setClaimModal({ open: false, current: 0, total: 0, error: null });
-            }, 1500);
-          }
-        } catch (err: any) {
+        // Auto-claim disabled (2026-05-05). The new
+        // <IncomingPrivatePaymentsSection /> displays pending UTXOs as
+        // an explicit list with a per-row "Claim" button — that flow
+        // is the canonical surface for incoming payments now.
+        //
+        // Why disable the auto-claim: it races with the new section
+        // (both call scanClaimableUtxos and try to claim the same
+        // UTXOs). Worse, the auto-claim fires from `refresh()` which
+        // runs on mount + focus + interval, and Phantom's popup
+        // blocker silently kills `signTransaction` calls that don't
+        // originate from a direct user gesture — leading to the modal
+        // hanging on "Awaiting wallet signature…" with no popup ever
+        // appearing. The new section requires a direct click which
+        // satisfies the popup-blocker rule.
+        //
+        // We still scan here so `refresh()` sees the watermark advance
+        // (the indexer's tree position) and the dashboard's other
+        // counts stay correct. We just don't claim from this code
+        // path; that's the section's job now.
+        await scanClaimableUtxos(client);
+        // The auto-claim block that used to live here has been
+        // removed. If you need to restore it, see git history before
+        // 2026-05-05; the body opened a progress modal, called
+        // `claimUtxos`, retried per-UTXO on 409s, and recorded
+        // signatures for receipt-binding. Receipt-binding is now
+        // unaffected — the new section's `persistReceivedPayment`
+        // captures the same signature data into the recipient's
+        // received-payments storage.
+      } catch (err: any) {
           // eslint-disable-next-line no-console
           console.error("[Veil dashboard] scan/claim failed:", err);
           // Surface the failure inside the modal if we'd already opened
@@ -574,6 +491,41 @@ export default function DashboardPage() {
       setNotice(null);
     } finally {
       setWithdrawing(false);
+    }
+  }
+
+  async function handleDepositToShielded() {
+    if (!wallet.publicKey) return;
+    const baseUnits = parseAmountToBaseUnits(depositAmount, PAYMENT_DECIMALS);
+    if (baseUnits == null || baseUnits <= 0n) {
+      setError("Enter a valid amount, e.g. 1.0");
+      return;
+    }
+    setDepositing(true);
+    setError(null);
+    setNotice("Depositing into your private balance — waiting for Arcium MPC callback…");
+    try {
+      const client = await getOrCreateClient(wallet as any);
+      const result = await depositToShielded(
+        client,
+        USDC_MINT.toBase58(),
+        baseUnits,
+      );
+      const sig = result.callbackSignature ?? result.queueSignature;
+      setNotice(
+        `Shielded deposit complete. Tx: ${sig.slice(0, 12)}…${sig.slice(-8)}`,
+      );
+      setDepositOpen(false);
+      setDepositAmount("");
+      // Refresh balance display + invoice list to reflect the new state.
+      await refresh();
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error("[Veil dashboard] deposit-to-shielded failed:", err);
+      setError(`Deposit: ${err.message ?? String(err)}`);
+      setNotice(null);
+    } finally {
+      setDepositing(false);
     }
   }
 
@@ -1035,22 +987,12 @@ export default function DashboardPage() {
             Read directly from Solana. Encrypted for you.
           </p>
         </div>
-        {/* Right-side action cluster. 2026-05-04 v3 (user feedback): the
-            previous footer-only placement of "Run private payroll" /
-            "Manage auditor grants" was below the fold for any user with
-            a real invoice list — they read as "hidden" actions. Pulled
-            up here next to refresh so the three primary actions a
-            creator takes (refresh / payroll / grants) are always visible.
-            Editorial mono small-caps; gold accent on the arrows so they
-            register as actions, not labels. */}
+        {/* Right-side action cluster. "Run payroll" was removed
+            2026-05-05 — it was redundant with the global nav's
+            Create entry, which can route to Payroll mode directly.
+            Auditor grants kept since it's a less-discoverable
+            advanced flow that benefits from a header anchor. */}
         <div className="pt-2 shrink-0 flex items-center gap-5">
-          <a
-            href="/payroll/outgoing"
-            className="hidden md:inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.16em] uppercase text-ink/60 hover:text-ink transition-colors"
-          >
-            <span>Run payroll</span>
-            <span className="text-gold" aria-hidden>&rarr;</span>
-          </a>
           <a
             href="/dashboard/compliance"
             className="hidden md:inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.16em] uppercase text-ink/60 hover:text-ink transition-colors"
@@ -1102,41 +1044,111 @@ export default function DashboardPage() {
       {tab === "invoices" && (
         <>
           {balance !== null && (
-            <div className="mb-10 border border-line bg-paper-3 rounded-[4px] p-6 md:p-7 reveal">
-              <div className="flex items-baseline justify-between gap-6">
-                <div>
-                  <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-                    Private {PAYMENT_SYMBOL} balance
-                  </span>
-                  <div className="mt-3 font-sans tabular-nums tracking-tight text-ink text-[32px] md:text-[40px] font-medium leading-none">
-                    {formatBigintAmount(balance, PAYMENT_DECIMALS)}
-                    <span className="ml-3 font-sans text-[12px] tracking-[0.14em] text-ink/45 uppercase">
+            <div className="mb-10 border border-line bg-paper-3 rounded-[4px] p-6 md:p-8 reveal">
+              <div className="flex items-start justify-between gap-6 flex-wrap">
+                {/* Left: status + eyebrow + amount. Mercury-style hierarchy. */}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2.5 mb-1">
+                    <span
+                      aria-hidden
+                      className="h-1.5 w-1.5 rounded-full bg-sage"
+                    />
+                    <span className="font-mono text-[10.5px] tracking-[0.18em] uppercase text-ink/55">
+                      Private balance
+                    </span>
+                  </div>
+                  <div className="mt-3 flex items-baseline gap-3">
+                    <span className="font-sans tabular-nums tracking-tight text-ink text-[40px] md:text-[52px] font-medium leading-none">
+                      {formatBigintAmount(balance, PAYMENT_DECIMALS)}
+                    </span>
+                    <span className="font-mono text-[12px] tracking-[0.14em] text-ink/45 uppercase">
                       {PAYMENT_SYMBOL}
                     </span>
                   </div>
+                  <p className="mt-2.5 text-[12px] text-ink/45 leading-relaxed">
+                    Encrypted at rest. Decryptable only by your wallet.
+                  </p>
                 </div>
-                <div className="flex flex-col items-end gap-3">
-                  <span className="inline-flex items-center gap-2 text-[12px] text-sage">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                      <path d="M2 6l3 3 5-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    <span>Encrypted · readable only by you</span>
-                  </span>
+
+                {/* Right: paired primary actions, Coinbase-style. */}
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setDepositOpen((v) => !v)}
+                    disabled={depositing}
+                    aria-expanded={depositOpen}
+                    className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-50 transition-colors"
+                  >
+                    <span aria-hidden className="text-ink/55">↓</span>
+                    <span>{depositing ? "Depositing…" : "Deposit"}</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleWithdrawAll}
                     disabled={withdrawing || balance <= 0n}
-                    className="btn-ghost text-[12px] px-4 py-2 disabled:opacity-50"
+                    className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-40 transition-colors"
                   >
-                    {withdrawing
-                      ? "Withdrawing…"
-                      : `Withdraw to wallet → ${formatBigintAmount(
-                          balance,
-                          PAYMENT_DECIMALS,
-                        )} ${PAYMENT_SYMBOL}`}
+                    <span aria-hidden className="text-ink/55">↑</span>
+                    <span>{withdrawing ? "Withdrawing…" : "Withdraw"}</span>
                   </button>
                 </div>
               </div>
+
+              {/* Deposit form — inline expansion. Hairline border separator
+                  matches the visual language of the receipt-paste panel. */}
+              {depositOpen && (
+                <div className="mt-6 pt-6 border-t border-line">
+                  <div className="flex flex-wrap items-end gap-4">
+                    <label className="flex flex-col gap-2">
+                      <span className="font-mono text-[10.5px] tracking-[0.16em] uppercase text-ink/55">
+                        Amount to shield
+                      </span>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="1.0"
+                          value={depositAmount}
+                          onChange={(e) => setDepositAmount(e.target.value)}
+                          disabled={depositing}
+                          autoFocus
+                          className="font-sans tabular-nums text-[20px] bg-paper-2 border border-line rounded-[3px] pl-3 pr-12 py-2.5 w-44 focus:outline-none focus:border-ink/40 transition-colors"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/45 pointer-events-none">
+                          {PAYMENT_SYMBOL}
+                        </span>
+                      </div>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleDepositToShielded}
+                      disabled={depositing || !depositAmount}
+                      className="btn-primary text-[12.5px] px-5 py-2.5 disabled:opacity-40"
+                    >
+                      {depositing ? "Depositing…" : "Shield privately"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDepositOpen(false);
+                        setDepositAmount("");
+                      }}
+                      disabled={depositing}
+                      className="text-[12.5px] text-ink/55 hover:text-ink underline-offset-4 hover:underline transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="mt-4 text-[12px] text-ink/50 leading-[1.55] max-w-xl">
+                    Moves SOL from your public wallet into your encrypted
+                    balance through Umbra&apos;s mixer. This deposit tx is
+                    publicly visible — every payment system has to anchor to
+                    real money somewhere. But every subsequent payroll run
+                    sourced from this balance hides the amount on chain.
+                    Settles in ~10–30 s through Arcium MPC.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -1246,9 +1258,6 @@ export default function DashboardPage() {
                   Invoice batches
                 </span>
                 <div className="flex items-center gap-4">
-                  <a href="/payroll/outgoing" className="btn-quiet text-[12px]">
-                    Run private payroll
-                  </a>
                   <a href="/payroll/new" className="btn-quiet text-[12px]">
                     + New batch
                   </a>
@@ -1278,15 +1287,10 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Footer action duplicates removed — these now live in the
-              right-side cluster of the page header (next to Refresh).
-              Mobile (<md) keeps them here as a fallback so users on
-              narrow screens still have access; desktop hides them via
-              `hidden md:flex` since the header already shows them. */}
+          {/* Footer fallback (mobile only). Desktop has the auditor-grants
+              link in the page header next to Refresh. "Run private payroll"
+              dropped 2026-05-05 — Create in the global nav goes there. */}
           <div className="mt-10 pt-8 border-t border-line flex md:hidden">
-            <a href="/payroll/outgoing" className="btn-quiet mr-5">
-              Run private payroll →
-            </a>
             <a href="/dashboard/compliance" className="btn-quiet">
               Manage auditor grants →
             </a>
@@ -1859,10 +1863,12 @@ function Shell({
               )}
             </a>
             <a
-              href="/payroll/outgoing"
+              href="https://github.com/michal-marcinko/veil"
+              target="_blank"
+              rel="noreferrer noopener"
               className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
             >
-              Payroll
+              Docs
             </a>
             <div className="ml-2">
               <ClientWalletMultiButton />

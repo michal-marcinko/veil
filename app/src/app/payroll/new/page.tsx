@@ -314,7 +314,12 @@ function Frame({ heading, children }: { heading: string; children: React.ReactNo
             <a href="/dashboard" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
               Activity
             </a>
-            <a href="/docs" className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors">
+            <a
+              href="https://github.com/michal-marcinko/veil"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
+            >
               Docs
             </a>
             <div className="ml-2">

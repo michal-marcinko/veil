@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
-import { PublicKey } from "@solana/web3.js";
+import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
   InvoiceForm,
   type InvoiceFormValues,
@@ -34,7 +34,55 @@ import {
   sha256,
 } from "@/lib/encryption";
 import { uploadCiphertext } from "@/lib/arweave";
-import { USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
+import { NETWORK, RPC_URL, USDC_MINT, PAYMENT_SYMBOL, PAYMENT_DECIMALS } from "@/lib/constants";
+
+/**
+ * On-demand devnet airdrop. Many first-time users haven't acquired
+ * devnet SOL yet; without it the invoice tx fails at simulation. We
+ * detect a low balance at the start of `handleSubmit`, request 0.5
+ * SOL from the public devnet faucet, and proceed once it confirms.
+ *
+ * - Mainnet: no-op. The user genuinely needs to fund their wallet.
+ *   The error path returned downstream surfaces the issue clearly.
+ * - Devnet, balance ≥ threshold: no-op. Save the airdrop for users
+ *   who actually need it.
+ * - Devnet, balance below threshold + airdrop succeeds: continue.
+ * - Devnet, airdrop rate-limited: throw with a hint pointing the
+ *   user at faucet.solana.com (the public faucet has its own UI).
+ *
+ * Threshold = 0.01 SOL covers the cost of register + a single
+ * invoice creation tx with comfortable margin. Airdrop = 0.5 SOL
+ * leaves the user with enough headroom for several subsequent
+ * invoices/payments without re-airdropping.
+ */
+const MIN_INVOICE_BALANCE_LAMPORTS = 0.01 * LAMPORTS_PER_SOL;
+const DEVNET_AIRDROP_LAMPORTS = 0.5 * LAMPORTS_PER_SOL;
+async function ensureDevnetBalance(walletPubkey: PublicKey): Promise<void> {
+  if (NETWORK !== "devnet") return;
+  const connection = new Connection(RPC_URL, "confirmed");
+  const balance = await connection.getBalance(walletPubkey, "confirmed");
+  if (balance >= MIN_INVOICE_BALANCE_LAMPORTS) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[Veil] devnet balance ${balance / LAMPORTS_PER_SOL} SOL is below ${MIN_INVOICE_BALANCE_LAMPORTS / LAMPORTS_PER_SOL} SOL threshold — requesting airdrop`,
+  );
+  try {
+    const sig = await connection.requestAirdrop(
+      walletPubkey,
+      DEVNET_AIRDROP_LAMPORTS,
+    );
+    await connection.confirmTransaction(sig, "confirmed");
+    // eslint-disable-next-line no-console
+    console.log(`[Veil] devnet airdrop confirmed (sig: ${sig})`);
+  } catch (err: any) {
+    throw new Error(
+      `Your wallet needs at least 0.01 SOL on devnet to create an invoice. ` +
+        `Auto-airdrop hit a rate limit — try the public faucet at ` +
+        `https://faucet.solana.com (paste your wallet address), then click ` +
+        `Publish again. Underlying error: ${err?.message ?? String(err)}`,
+    );
+  }
+}
 
 /**
  * /create — Document Canvas redesign (2026-05-04).
@@ -173,6 +221,11 @@ export function CreatePageInner({ __forceState }: CreatePageInnerProps = {}) {
     setError(null);
 
     try {
+      // Devnet UX: auto-top-up if the user has insufficient SOL for
+      // tx fees + register rent. No-op on mainnet (real money).
+      // See `ensureDevnetBalance` above for behaviour + thresholds.
+      await ensureDevnetBalance(wallet.publicKey);
+
       const parsedItems = values.lineItems.map((li, i) => {
         const unitPriceMicros = parseAmountToBaseUnits(li.unitPrice, PAYMENT_DECIMALS);
         if (unitPriceMicros == null) {
@@ -555,12 +608,14 @@ function Frame({ children }: { children: React.ReactNode }) {
             >
               Activity
             </Link>
-            <Link
-              href="/docs"
+            <a
+              href="https://github.com/michal-marcinko/veil"
+              target="_blank"
+              rel="noreferrer noopener"
               className="hidden sm:inline-block px-3 py-2 text-[13px] text-muted hover:text-ink transition-colors"
             >
               Docs
-            </Link>
+            </a>
             <div className="ml-2">
               <ClientWalletMultiButton />
             </div>

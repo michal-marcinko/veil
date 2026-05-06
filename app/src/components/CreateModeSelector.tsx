@@ -42,7 +42,12 @@ export function CreateModeSelector({ onSelect }: CreateModeSelectorProps) {
   }, []);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto">
+    // Storefront tile hidden for hackathon demo focus — judges spend
+    // ~5min on the pitch and a third primitive dilutes the B2B
+    // payroll+invoicing thesis. Code stays for post-hackathon
+    // optionality; just not in the picker. Re-enable by adding the
+    // third <ModeCard /> back and switching grid to md:grid-cols-3.
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl mx-auto">
       <ModeCard
         index={0}
         mounted={mounted}
@@ -58,14 +63,6 @@ export function CreateModeSelector({ onSelect }: CreateModeSelectorProps) {
         body="Pay many recipients at once, from a CSV."
         icon={<VeilMark variant="batch" />}
         onClick={() => onSelect("payroll")}
-      />
-      <ModeCard
-        index={2}
-        mounted={mounted}
-        title="Storefront"
-        body="Publish a product. Customers buy from one URL, any time."
-        icon={<VeilMark variant="product" />}
-        onClick={() => onSelect("product")}
       />
     </div>
   );
