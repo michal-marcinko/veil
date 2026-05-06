@@ -152,23 +152,27 @@ export function PayrollPacketPdfDocument({ signed, claimUrls }: PayrollPacketPdf
 
         <View style={styles.table}>
           <View style={styles.row}>
-            <Text style={[styles.headerCell, { width: "6%" }]}>#</Text>
-            <Text style={[styles.headerCell, { width: "29%" }]}>Recipient</Text>
-            <Text style={[styles.headerCell, { width: "14%" }]}>Amount</Text>
-            <Text style={[styles.headerCell, { width: "25%" }]}>Memo</Text>
-            <Text style={[styles.headerCell, { width: "10%" }]}>Mode</Text>
-            <Text style={[styles.headerCell, styles.lastCell, { width: "16%" }]}>Tx</Text>
+            <Text style={[styles.headerCell, { width: "5%" }]}>#</Text>
+            <Text style={[styles.headerCell, { width: "16%" }]}>Name</Text>
+            <Text style={[styles.headerCell, { width: "23%" }]}>Recipient</Text>
+            <Text style={[styles.headerCell, { width: "13%" }]}>Amount</Text>
+            <Text style={[styles.headerCell, { width: "20%" }]}>Memo</Text>
+            <Text style={[styles.headerCell, { width: "9%" }]}>Mode</Text>
+            <Text style={[styles.headerCell, styles.lastCell, { width: "14%" }]}>Tx</Text>
           </View>
           {packet.rows.map((row, index) => (
             <View key={`${row.recipient}-${index}`} style={styles.row}>
-              <Text style={[styles.cell, { width: "6%" }]}>{index + 1}</Text>
-              <Text style={[styles.cell, { width: "29%" }]}>{truncate(row.recipient)}</Text>
-              <Text style={[styles.cell, { width: "14%" }]}>
+              <Text style={[styles.cell, { width: "5%" }]}>{index + 1}</Text>
+              <Text style={[styles.cell, { width: "16%" }]}>
+                {row.recipientName ?? ""}
+              </Text>
+              <Text style={[styles.cell, { width: "23%" }]}>{truncate(row.recipient)}</Text>
+              <Text style={[styles.cell, { width: "13%" }]}>
                 {formatPayrollAmount(row.amount, packet.decimals)} {packet.symbol}
               </Text>
-              <Text style={[styles.cell, { width: "25%" }]}>{row.memo || "No memo"}</Text>
-              <Text style={[styles.cell, { width: "10%" }]}>{row.mode}</Text>
-              <Text style={[styles.cell, styles.lastCell, { width: "16%" }]}>
+              <Text style={[styles.cell, { width: "20%" }]}>{row.memo || "No memo"}</Text>
+              <Text style={[styles.cell, { width: "9%" }]}>{row.mode}</Text>
+              <Text style={[styles.cell, styles.lastCell, { width: "14%" }]}>
                 {row.txSignature ? truncate(row.txSignature) : row.status}
               </Text>
             </View>
@@ -193,9 +197,10 @@ export function PayrollPacketPdfDocument({ signed, claimUrls }: PayrollPacketPdf
           </Text>
           <View style={styles.table}>
             <View style={styles.row}>
-              <Text style={[styles.headerCell, { width: "6%" }]}>#</Text>
-              <Text style={[styles.headerCell, { width: "29%" }]}>Recipient</Text>
-              <Text style={[styles.headerCell, styles.lastCell, { width: "65%" }]}>
+              <Text style={[styles.headerCell, { width: "5%" }]}>#</Text>
+              <Text style={[styles.headerCell, { width: "15%" }]}>Name</Text>
+              <Text style={[styles.headerCell, { width: "22%" }]}>Recipient</Text>
+              <Text style={[styles.headerCell, styles.lastCell, { width: "58%" }]}>
                 Claim URL
               </Text>
             </View>
@@ -203,11 +208,14 @@ export function PayrollPacketPdfDocument({ signed, claimUrls }: PayrollPacketPdf
               const row = packet.rows[index];
               return (
                 <View key={`claim-${index}`} style={styles.row}>
-                  <Text style={[styles.cell, { width: "6%" }]}>{index + 1}</Text>
-                  <Text style={[styles.cell, { width: "29%" }]}>
+                  <Text style={[styles.cell, { width: "5%" }]}>{index + 1}</Text>
+                  <Text style={[styles.cell, { width: "15%" }]}>
+                    {row?.recipientName ?? ""}
+                  </Text>
+                  <Text style={[styles.cell, { width: "22%" }]}>
                     {row ? truncate(row.recipient) : "(unknown row)"}
                   </Text>
-                  <Text style={[styles.cell, styles.lastCell, { width: "65%" }]}>
+                  <Text style={[styles.cell, styles.lastCell, { width: "58%" }]}>
                     {url}
                   </Text>
                 </View>

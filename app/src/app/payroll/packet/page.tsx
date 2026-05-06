@@ -77,42 +77,63 @@ export default function PayrollPacketPage() {
             </div>
 
             <ul className="mt-10 border border-line bg-paper-3 rounded-[4px] divide-y divide-line">
-              {state.signed.packet.rows.map((row, idx) => (
-                <li key={`${row.recipient}-${idx}`} className="px-5 md:px-6 py-4">
-                  <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
-                    <span className="font-mono text-[11px] text-dim tnum">
-                      {String(idx + 1).padStart(2, "0")}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap gap-x-3 gap-y-1 items-baseline">
-                        <span className="font-mono text-[13px] text-ink truncate">
-                          {row.recipient}
-                        </span>
-                        <span className="text-[13px] text-ink/80 tnum">
-                          {formatPayrollAmount(row.amount, state.signed.packet.decimals)}{" "}
-                          {state.signed.packet.symbol}
-                        </span>
-                        <span className="mono-chip text-dim">{row.mode}</span>
+              {state.signed.packet.rows.map((row, idx) => {
+                const trimmedName = row.recipientName?.trim();
+                const hasName = !!trimmedName;
+                const truncatedRecipient = `${row.recipient.slice(0, 8)}…${row.recipient.slice(-6)}`;
+                return (
+                  <li key={`${row.recipient}-${idx}`} className="px-5 md:px-6 py-4">
+                    <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
+                      <span className="font-mono text-[11px] text-dim tnum">
+                        {String(idx + 1).padStart(2, "0")}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 items-baseline">
+                          {/* Lead with the recipient name when the
+                              sender labelled the row. The full wallet
+                              still appears as a mono subtitle below so
+                              an auditor can paste it into Explorer
+                              independently of the human label. */}
+                          {hasName ? (
+                            <span className="font-sans text-[15px] text-ink truncate">
+                              {trimmedName}
+                            </span>
+                          ) : (
+                            <span className="font-mono text-[13px] text-ink truncate">
+                              {row.recipient}
+                            </span>
+                          )}
+                          <span className="text-[13px] text-ink/80 tnum">
+                            {formatPayrollAmount(row.amount, state.signed.packet.decimals)}{" "}
+                            {state.signed.packet.symbol}
+                          </span>
+                          <span className="mono-chip text-dim">{row.mode}</span>
+                        </div>
+                        {hasName && (
+                          <p className="mt-0.5 font-mono text-[11.5px] text-muted truncate">
+                            {truncatedRecipient}
+                          </p>
+                        )}
+                        <p className="mt-1 text-[12.5px] text-muted">{row.memo || "No memo"}</p>
+                        {row.error && <p className="mt-2 text-[12px] text-brick">{row.error}</p>}
                       </div>
-                      <p className="mt-1 text-[12.5px] text-muted">{row.memo || "No memo"}</p>
-                      {row.error && <p className="mt-2 text-[12px] text-brick">{row.error}</p>}
+                      <span className={row.status === "paid" ? "mono-chip text-sage" : "mono-chip text-brick"}>
+                        {row.status}
+                      </span>
                     </div>
-                    <span className={row.status === "paid" ? "mono-chip text-sage" : "mono-chip text-brick"}>
-                      {row.status}
-                    </span>
-                  </div>
-                  {row.txSignature && (
-                    <a
-                      href={payrollExplorerTxUrl(row.txSignature, NETWORK)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-3 ml-10 inline-block btn-quiet text-[12px]"
-                    >
-                      Open Umbra tx
-                    </a>
-                  )}
-                </li>
-              ))}
+                    {row.txSignature && (
+                      <a
+                        href={payrollExplorerTxUrl(row.txSignature, NETWORK)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 ml-10 inline-block btn-quiet text-[12px]"
+                      >
+                        Open Umbra tx
+                      </a>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

@@ -128,6 +128,11 @@ export interface PayslipPdfProps {
    *  IS the holder of the cache; passing it explicitly avoids assuming
    *  a wallet adapter is in scope at render time. */
   recipientWallet?: string;
+  /** Optional human-friendly name the SENDER labelled the recipient
+   *  with (e.g. "Alice"). Surfaced in the "To" row of the fact-table
+   *  block when present; the row is omitted entirely when this is
+   *  empty/undefined so legacy payslips render unchanged. */
+  recipientName?: string;
   /** Network the tx signatures belong to. Only used for the explorer
    *  links — defaults to devnet matching the rest of the app. */
   network?: "devnet" | "mainnet";
@@ -181,8 +186,10 @@ function Fact({
 export function PayslipPdfDocument({
   payment,
   recipientWallet,
+  recipientName,
   network = "devnet",
 }: PayslipPdfProps) {
+  const trimmedRecipientName = recipientName?.trim();
   const senderDisplay = payment.senderDisplayName?.trim()
     ? `${payment.senderDisplayName} (${truncate(payment.senderWallet)})`
     : payment.senderWallet
@@ -238,6 +245,9 @@ export function PayslipPdfDocument({
         <View style={styles.table}>
           <Fact label="Amount" value={amountText} />
           <Fact label="Sender" value={senderDisplay} />
+          {trimmedRecipientName ? (
+            <Fact label="To" value={trimmedRecipientName} />
+          ) : null}
           <Fact
             label="Recipient"
             value={recipientWallet ? truncate(recipientWallet) : "—"}
@@ -291,6 +301,12 @@ export async function downloadPayslipPdf(
   payment: ReceivedPayment,
   options: {
     recipientWallet?: string;
+    /** Optional name the sender labelled the recipient with. When
+     *  present, surfaces a "To" row in the payslip's fact-table; the
+     *  row is omitted entirely when empty. Threaded through here so
+     *  callers that have learned the name from packet metadata can
+     *  pass it without reaching into the renderer's prop shape. */
+    recipientName?: string;
     network?: "devnet" | "mainnet";
   } = {},
 ): Promise<void> {
@@ -299,6 +315,7 @@ export async function downloadPayslipPdf(
     PayslipPdfDocument({
       payment,
       recipientWallet: options.recipientWallet,
+      recipientName: options.recipientName,
       network: options.network ?? "devnet",
     }),
   ).toBlob();

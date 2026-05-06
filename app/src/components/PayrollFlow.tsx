@@ -144,23 +144,34 @@ interface RegistrationDetectionResult {
 }
 
 interface RecipientRow {
+  /** Optional human-friendly name (e.g. "Alice", "Acme LLC"). Off-chain;
+   *  surfaced in the run ledger, sender PDFs, and the auditor view. */
+  name: string;
   wallet: string;
   amount: string;
   memo: string;
 }
 
-const EMPTY_RECIPIENT: RecipientRow = { wallet: "", amount: "", memo: "" };
+const EMPTY_RECIPIENT: RecipientRow = { name: "", wallet: "", amount: "", memo: "" };
 
 const SAMPLE_RECIPIENTS: RecipientRow[] = [
   {
+    name: "Alice",
     wallet: "4w85uvq3GeKRWKeeB2CyH4FeSYtWsvumHt3XB2TaZdFg",
     amount: "100.00",
     memo: "April contractor retainer",
   },
   {
+    name: "Bob",
     wallet: "8hQ5k9sDZQx7WkZpPRM6MeQpM9tYfWnGf6bYj1Gx9zQm",
     amount: "250.00",
     memo: "Design sprint bonus",
+  },
+  {
+    name: "Carol",
+    wallet: "9nW8aLmFZb6X7dRpHvKqQ5tYsWxNcGgT4uJ2hP3eM1KR",
+    amount: "175.00",
+    memo: "Q1 freelance copywriting",
   },
 ];
 
@@ -176,10 +187,18 @@ const SAMPLE_RECIPIENTS: RecipientRow[] = [
 
 /**
  * Parse multi-line text pasted into a wallet field. Accepts CSV
- * (`wallet,amount,memo`), TSV (tab-separated — what Google Sheets and
- * Excel deliver on cell-range copies), and forgives an optional header
- * row. Used by the row table's paste-explode handler so a paste from
- * the user's spreadsheet expands into N recipient rows automatically.
+ * (`wallet,amount,memo` or `name,wallet,amount,memo`), TSV (tab-
+ * separated — what Google Sheets and Excel deliver on cell-range
+ * copies), and forgives an optional header row. Used by the row
+ * table's paste-explode handler so a paste from the user's
+ * spreadsheet expands into N recipient rows automatically.
+ *
+ * When the pasted text starts with a header row, columns are
+ * matched by header name (case-insensitive). When there's no
+ * header, we infer the column order by checking whether the
+ * second cell looks like a base58 wallet — if it does, the first
+ * cell is treated as a name; otherwise the legacy
+ * wallet/amount/memo order applies.
  */
 function parsePastedRecipients(text: string): RecipientRow[] {
   const lines = text
@@ -189,15 +208,47 @@ function parsePastedRecipients(text: string): RecipientRow[] {
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
   if (lines.length === 0) return [];
-  // Skip a header row if the first line starts with "wallet" — handles
-  // both `wallet,amount,memo` (CSV) and `wallet\tamount\tmemo` (TSV).
-  const startIdx = /^wallet[,\t\s]/i.test(lines[0]) ? 1 : 0;
-  return lines.slice(startIdx).map((line) => {
-    const parts = line.split(/[,\t]/).map((p) => p.trim());
+
+  const splitLine = (line: string) => line.split(/[,\t]/).map((p) => p.trim());
+  const firstCells = splitLine(lines[0]).map((c) => c.toLowerCase());
+  const hasHeader =
+    firstCells.includes("wallet") ||
+    (firstCells.includes("amount") && firstCells.includes("memo"));
+
+  // Build the column order. With a header row we map by header name; without
+  // one we fall back to a simple positional inference (name first if there
+  // are 4 columns, otherwise the legacy 3-column shape).
+  let cols: { name: number; wallet: number; amount: number; memo: number };
+  let dataLines: string[];
+  if (hasHeader) {
+    cols = { name: -1, wallet: -1, amount: -1, memo: -1 };
+    firstCells.forEach((cell, idx) => {
+      if (cell === "name" && cols.name === -1) cols.name = idx;
+      else if (cell === "wallet" && cols.wallet === -1) cols.wallet = idx;
+      else if (cell === "amount" && cols.amount === -1) cols.amount = idx;
+      else if (cell === "memo" && cols.memo === -1) cols.memo = idx;
+    });
+    dataLines = lines.slice(1);
+  } else {
+    const sample = splitLine(lines[0]);
+    // Heuristic: real wallets are 32+ chars of base58. If the first cell is
+    // shorter than that AND there are 4+ columns, treat the first cell as
+    // a name. Otherwise default to the legacy wallet/amount/memo order.
+    const looksLikeNameFirst = sample.length >= 4 && sample[0].length > 0 && sample[0].length < 32;
+    cols = looksLikeNameFirst
+      ? { name: 0, wallet: 1, amount: 2, memo: 3 }
+      : { name: -1, wallet: 0, amount: 1, memo: 2 };
+    dataLines = lines;
+  }
+
+  return dataLines.map((line) => {
+    const parts = splitLine(line);
+    const name = cols.name === -1 ? "" : (parts[cols.name] ?? "").slice(0, 64);
     return {
-      wallet: parts[0] ?? "",
-      amount: parts[1] ?? "",
-      memo: parts[2] ?? "",
+      name,
+      wallet: cols.wallet === -1 ? "" : (parts[cols.wallet] ?? ""),
+      amount: cols.amount === -1 ? "" : (parts[cols.amount] ?? ""),
+      memo: cols.memo === -1 ? "" : (parts[cols.memo] ?? ""),
     };
   });
 }
@@ -264,22 +315,32 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
   // detector unchanged (both consume parsed.rows / parsed.errors). Empty
   // rows (the trailing blank one users always have while typing) are
   // filtered out so we don't surface "Row 2: wallet is blank" mid-typing.
+  // The optional `name` column flows through too — it's stripped of
+  // commas at synthesis time so the parser's no-quoted-fields rule
+  // doesn't trip on a paste from a spreadsheet.
   const parsed = useMemo(() => {
     const nonEmpty = recipients.filter(
-      (r) => r.wallet.trim() || r.amount.trim() || r.memo.trim(),
+      (r) => r.wallet.trim() || r.amount.trim() || r.memo.trim() || r.name.trim(),
     );
     if (nonEmpty.length === 0) return { rows: [], errors: [] };
+    const anyHasName = nonEmpty.some((r) => r.name.trim().length > 0);
+    const header = anyHasName ? "name,wallet,amount,memo" : "wallet,amount,memo";
     const csv =
-      "wallet,amount,memo\n" +
+      header +
+      "\n" +
       nonEmpty
         .map((r) => {
           const wallet = r.wallet.trim();
           const amount = r.amount.trim();
-          // Memos can't contain commas (parsePayrollCsv splits on comma);
-          // sanitize by replacing with spaces so a paste from Sheets that
-          // includes a comma in the description doesn't blow up parsing.
+          // Memos / names can't contain commas (parsePayrollCsv splits on
+          // comma); sanitize by replacing with spaces so a paste from
+          // Sheets that includes a comma in the description doesn't blow
+          // up parsing.
           const memo = (r.memo || "").trim().replace(/,/g, " ");
-          return `${wallet},${amount},${memo}`;
+          const name = (r.name || "").trim().replace(/,/g, " ");
+          return anyHasName
+            ? `${name},${wallet},${amount},${memo}`
+            : `${wallet},${amount},${memo}`;
         })
         .join("\n");
     return parsePayrollCsv(csv);
@@ -444,6 +505,7 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
       // so the paste lands clean (no orphan empty row at the bottom).
       const tail =
         after.length > 0 &&
+        !after[0].name.trim() &&
         !after[0].wallet.trim() &&
         !after[0].amount.trim() &&
         !after[0].memo.trim()
@@ -2108,6 +2170,7 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
     if (amount == null || amount <= 0n) {
       throw new Error(`Row ${index + 1}: invalid amount`);
     }
+    const trimmedName = row.name?.trim();
     return {
       recipient: recipient.toBase58(),
       amount: amount.toString(),
@@ -2117,6 +2180,10 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
       mode: "public",
       txSignature: null,
       error: null,
+      // Only attach recipientName when non-empty so packets generated
+      // from name-less CSVs stay byte-identical to the pre-feature
+      // shape (no `recipientName: ""` noise in the JSON).
+      ...(trimmedName ? { recipientName: trimmedName } : {}),
     };
   }
 
@@ -2247,7 +2314,13 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
                   key={idx}
                   row={row}
                   idx={idx}
-                  canRemove={recipients.length > 1 || !!row.wallet || !!row.amount || !!row.memo}
+                  canRemove={
+                    recipients.length > 1 ||
+                    !!row.name ||
+                    !!row.wallet ||
+                    !!row.amount ||
+                    !!row.memo
+                  }
                   disabled={running}
                   onChange={(field, value) => updateRecipient(idx, field, value)}
                   onRemove={() => removeRecipient(idx)}
@@ -2469,10 +2542,10 @@ function DropOverlay({ active }: { active: boolean }) {
       <div className="border-2 border-dashed border-ink/35 rounded-[6px] px-12 py-10 bg-paper-3/85 max-w-md text-center">
         <span className="eyebrow text-ink">Drop CSV to import</span>
         <p className="mt-3 text-[13.5px] text-muted leading-relaxed">
-          wallet, amount, memo
+          [name], wallet, amount, memo
           <br />
           <span className="font-mono text-[11px] text-dim">
-            (one row per line · CSV or TSV)
+            (one row per line · CSV or TSV · name optional)
           </span>
         </p>
       </div>
@@ -2535,10 +2608,28 @@ function RecipientEditorRow({
   }
 
   return (
-    <div className="grid md:grid-cols-[1.5rem_1.4fr_7rem_1fr_1.5rem] gap-4 py-2.5 border-b border-line/40 items-baseline">
+    // Desktop grid: row-number · name · wallet · amount · memo · remove.
+    // Wallet keeps the dominant width; name takes ~17% via the 0.6fr
+    // share, sized to comfortably fit "Alice"/"Acme LLC" without
+    // crowding the wallet column.
+    // Mobile (<md) stacks vertically — the implicit single-column flow
+    // from `display:block` on each child is fine; no special mobile
+    // grid is needed because every input is `width:100%`.
+    <div className="grid md:grid-cols-[1.5rem_0.6fr_1.4fr_7rem_1fr_1.5rem] gap-4 py-2.5 border-b border-line/40 items-baseline">
       <span className="font-mono text-[11px] text-dim tnum md:pt-2">
         {String(idx + 1).padStart(2, "0")}
       </span>
+      <input
+        value={row.name}
+        onChange={(e) => onChange("name", e.target.value.slice(0, 64))}
+        placeholder="Name"
+        className="recipient-input text-[13px] text-ink/90"
+        disabled={disabled}
+        aria-label={`Recipient name for row ${idx + 1}`}
+        spellCheck={false}
+        autoComplete="off"
+        maxLength={64}
+      />
       <div className="flex items-baseline gap-2 min-w-0">
         <input
           value={row.wallet}
@@ -2717,6 +2808,15 @@ function ResultRow({
   const isDirectRegistered = row.path === "direct-registered";
   const isClaimLink = row.path === "claim-link" || (!row.path && !!row.claimUrl);
 
+  // When the sender labelled the recipient with a name, lead the row
+  // with it and demote the wallet to a mono subtitle. When no name is
+  // present, the truncated wallet keeps acting as the primary
+  // identifier (same UX as before this feature). This is the path the
+  // auditor view + sender's run ledger BOTH read from — names render
+  // consistently across surfaces.
+  const truncatedWallet = `${row.recipient.slice(0, 8)}…${row.recipient.slice(-5)}`;
+  const hasName = !!row.recipientName?.trim();
+
   return (
     <li className="py-4 payroll-row-reveal">
       <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
@@ -2725,9 +2825,15 @@ function ResultRow({
         </span>
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="font-mono text-[13px] text-ink truncate">
-              {row.recipient.slice(0, 8)}…{row.recipient.slice(-5)}
-            </span>
+            {hasName ? (
+              <span className="font-sans text-[14px] text-ink truncate">
+                {row.recipientName}
+              </span>
+            ) : (
+              <span className="font-mono text-[13px] text-ink truncate">
+                {truncatedWallet}
+              </span>
+            )}
             <span className="text-[13px] text-ink/80 tnum">{row.amountDisplay}</span>
             <span className="mono-chip text-dim">{row.mode}</span>
             {isDirectRegistered && (
@@ -2737,6 +2843,11 @@ function ResultRow({
               <span className="mono-chip text-sage">claim-link</span>
             )}
           </div>
+          {hasName && (
+            <div className="mt-0.5 font-mono text-[11.5px] text-muted truncate">
+              {truncatedWallet}
+            </div>
+          )}
           <div className="mt-1 text-[12.5px] text-muted truncate">
             {row.memo || "No memo"}
           </div>
@@ -2788,6 +2899,8 @@ function ResultRow({
 }
 
 function PlaceholderRow({ row, idx }: { row: PayrollRow; idx: number }) {
+  const truncatedWallet = `${row.wallet.slice(0, 8)}…${row.wallet.slice(-5)}`;
+  const hasName = !!row.name?.trim();
   return (
     <li className="py-4">
       <div className="grid grid-cols-[1.5rem_1fr_auto] gap-4 items-baseline">
@@ -2796,11 +2909,22 @@ function PlaceholderRow({ row, idx }: { row: PayrollRow; idx: number }) {
         </span>
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="font-mono text-[13px] text-ink/75 truncate">
-              {row.wallet.slice(0, 8)}…{row.wallet.slice(-5)}
-            </span>
+            {hasName ? (
+              <span className="font-sans text-[14px] text-ink/85 truncate">
+                {row.name}
+              </span>
+            ) : (
+              <span className="font-mono text-[13px] text-ink/75 truncate">
+                {truncatedWallet}
+              </span>
+            )}
             <span className="text-[13px] text-muted tnum">{row.amount}</span>
           </div>
+          {hasName && (
+            <div className="mt-0.5 font-mono text-[11.5px] text-dim truncate">
+              {truncatedWallet}
+            </div>
+          )}
           <div className="mt-1 text-[12.5px] text-muted truncate">
             {row.memo || "No memo"}
           </div>
@@ -3031,14 +3155,23 @@ function RegistrationSummary({
       <ul className="divide-y divide-line/60 text-[12.5px]">
         {rows.map((row, idx) => {
           const status = detection.rowStatuses[idx];
+          const truncated = `${row.wallet.slice(0, 6)}…${row.wallet.slice(-4)}`;
+          const hasName = !!row.name?.trim();
           return (
             <li
               key={`${row.wallet}-${idx}`}
               className="py-2 flex items-baseline justify-between gap-3"
             >
-              <span className="font-mono text-ink truncate">
-                {row.wallet.slice(0, 6)}…{row.wallet.slice(-4)}
-              </span>
+              {hasName ? (
+                <span className="text-ink truncate flex items-baseline gap-2 min-w-0">
+                  <span className="font-sans">{row.name}</span>
+                  <span className="font-mono text-[11px] text-dim shrink-0">
+                    {truncated}
+                  </span>
+                </span>
+              ) : (
+                <span className="font-mono text-ink truncate">{truncated}</span>
+              )}
               <span className="text-dim">{row.amount}</span>
               <RegistrationChip status={status} />
             </li>

@@ -1758,6 +1758,28 @@ function PayrollRunRow({ run }: { run: PayrollRunSummary }) {
   const dateLabel = formatPayrollRunDate(run.createdAtMs);
   const batchShort = `${packet.batchId.slice(0, 14)}…${packet.batchId.slice(-4)}`;
 
+  // When any row carries a recipientName, surface the first few names
+  // inline ("3 recipients · Alice, Bob, Carol") so the run row reads
+  // like a real payroll instead of "3 recipients · 7onP… · 9nW8…".
+  // Falls back gracefully when no row has a name, matching legacy
+  // packets and name-less CSVs.
+  const namedRecipients = packet.rows
+    .map((r) => r.recipientName?.trim())
+    .filter((s): s is string => !!s);
+  const previewNames = namedRecipients.slice(0, 3).join(", ");
+  const remainingNamed = namedRecipients.length - 3;
+  const recipientCopy = (() => {
+    const base = `${recipients} recipient${recipients === 1 ? "" : "s"}`;
+    if (namedRecipients.length === 0) {
+      return `${base} · ${run.paid} paid${run.failed > 0 ? ` · ${run.failed} failed` : ""}`;
+    }
+    const including =
+      remainingNamed > 0
+        ? `including ${previewNames} +${remainingNamed} more`
+        : `including ${previewNames}`;
+    return `${base} ${including} · ${run.paid} paid${run.failed > 0 ? ` · ${run.failed} failed` : ""}`;
+  })();
+
   return (
     <li>
       <a
@@ -1778,8 +1800,7 @@ function PayrollRunRow({ run }: { run: PayrollRunSummary }) {
               {totalDisplay}
             </span>
             <span className="font-sans text-[10.5px] text-ink/40 tracking-tight truncate hidden md:inline">
-              {recipients} recipient{recipients === 1 ? "" : "s"} · {run.paid} paid
-              {run.failed > 0 ? ` · ${run.failed} failed` : ""}
+              {recipientCopy}
             </span>
           </div>
         </div>

@@ -29,6 +29,20 @@ export interface PayrollPacketRow {
    * verify. Newer verifiers see this field; older ones simply ignore it.
    */
   path?: "direct-registered" | "claim-link" | "shielded";
+  /**
+   * Optional human-friendly name the sender knew the recipient by
+   * (e.g. "Alice", "Acme LLC"). Off-chain only — recorded for the
+   * employer's run ledger, the auditor view, and PDFs. Trimmed and
+   * capped at 64 chars at input time.
+   *
+   * INTENTIONALLY NOT in {@link canonicalPayrollPacketBytes}: every
+   * existing signed packet was canonicalised before this field
+   * existed, so adding it to the canonical shape would break
+   * verification of every packet already on disk / on Arweave.
+   * Newer code reads it; older verifiers simply ignore it. Same
+   * forward-compat contract as `path` above.
+   */
+  recipientName?: string;
 }
 
 export interface PayrollPacket {

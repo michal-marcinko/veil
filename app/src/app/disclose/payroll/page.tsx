@@ -75,6 +75,9 @@ export default function PayrollDisclosurePage() {
 
             <dl className="mt-10 border border-line bg-paper-3 rounded-[4px] divide-y divide-line">
               <DisclosureRow label="Employer" value={state.disclosure.packet.payer} />
+              {row.recipientName?.trim() && (
+                <DisclosureRow label="Name" value={row.recipientName.trim()} />
+              )}
               <DisclosureRow label="Recipient" value={row.recipient} />
               <DisclosureRow
                 label="Amount"

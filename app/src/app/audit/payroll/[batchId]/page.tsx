@@ -28,6 +28,13 @@ interface AuditRow {
   date: string;
   payer: string;
   payerWallet: string;
+  /** Contractor / recipient display name from invoice metadata —
+   *  the equivalent of `recipientName` in the payroll-packet model.
+   *  Empty string when the invoice was created without a name. */
+  recipientName: string;
+  /** Contractor / recipient wallet address from invoice metadata.
+   *  Always present for an invoice with valid creator info. */
+  recipientWallet: string;
   amount: string;
   amountRaw: string;
   symbol: string;
@@ -111,7 +118,17 @@ export default function PayrollAuditPage() {
     return rows.filter((r) => {
       if (!r.ok) return true;
       if (payerQuery.trim().length > 0) {
-        if (!r.payer.toLowerCase().includes(payerQuery.trim().toLowerCase())) {
+        const needle = payerQuery.trim().toLowerCase();
+        // Match on either the payer (employer) display name or the
+        // recipient (contractor) name — auditors typically search by
+        // whichever party they remember by name. Falls back to wallet
+        // when no name is present.
+        const haystacks = [
+          r.payer,
+          r.recipientName,
+          r.recipientWallet,
+        ].map((s) => (s || "").toLowerCase());
+        if (!haystacks.some((h) => h.includes(needle))) {
           return false;
         }
       }
@@ -153,6 +170,8 @@ export default function PayrollAuditPage() {
       "created_at",
       "payer",
       "payer_wallet",
+      "recipient_name",
+      "recipient_wallet",
       "amount_raw",
       "amount_display",
       "symbol",
@@ -167,6 +186,8 @@ export default function PayrollAuditPage() {
           csvCell(r.date),
           csvCell(r.payer),
           csvCell(r.payerWallet),
+          csvCell(r.recipientName),
+          csvCell(r.recipientWallet),
           csvCell(r.amountRaw),
           csvCell(r.amount),
           csvCell(r.symbol),
@@ -250,6 +271,8 @@ function entryToRow(e: DecryptedScopedGrantEntry): AuditRow {
       date: "—",
       payer: "—",
       payerWallet: "",
+      recipientName: "",
+      recipientWallet: "",
       amount: "—",
       amountRaw: "",
       symbol: "",
@@ -265,6 +288,8 @@ function entryToRow(e: DecryptedScopedGrantEntry): AuditRow {
     date: md.created_at,
     payer: md.payer.display_name || "—",
     payerWallet: md.payer.wallet ?? "",
+    recipientName: md.creator?.display_name?.trim() ?? "",
+    recipientWallet: md.creator?.wallet ?? "",
     amount: formatAmount(BigInt(md.total), md.currency.decimals, md.currency.symbol),
     amountRaw: md.total,
     symbol: md.currency.symbol,
@@ -408,13 +433,13 @@ function FilterBar({
     <div className="mb-10 border border-line rounded-[3px] p-4 flex flex-wrap items-end gap-x-6 gap-y-4">
       <div className="flex flex-col gap-1.5 flex-1 min-w-[220px]">
         <label className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted">
-          Payer
+          Search
         </label>
         <input
           type="text"
           value={payerQuery}
           onChange={(e) => onPayerChange(e.target.value)}
-          placeholder="Filter by payer name…"
+          placeholder="Filter by recipient or payer…"
           className="bg-paper-3 border border-line rounded-[3px] px-3 py-2 font-mono text-[12.5px] text-ink placeholder:text-dim/80 focus:outline-none focus:border-ink"
         />
       </div>
@@ -437,10 +462,16 @@ function PayrollTable({ rows }: { rows: AuditRow[] }) {
       </div>
     );
   }
+  // Recipient column leads — for a payroll run the auditor cares about
+  // "Alice — 3 SOL" not "7onP…JbDs — 3 SOL". The wallet sits as a mono
+  // subtitle directly under the name (or is the primary identifier when
+  // the invoice was created without a display name). This is the Umbra-
+  // track judging-criteria money shot: decrypted runs read like a real
+  // payroll.
   return (
     <div className="border border-line rounded-[4px] overflow-hidden">
-      <div className="grid grid-cols-[160px_1fr_140px_180px_140px] gap-4 px-5 md:px-6 py-3 border-b border-line bg-paper-3">
-        {["Date", "Payer", "Amount", "Memo", "Status"].map((h) => (
+      <div className="grid grid-cols-[140px_1fr_140px_160px_120px] gap-4 px-5 md:px-6 py-3 border-b border-line bg-paper-3">
+        {["Date", "Recipient", "Amount", "Memo", "Status"].map((h) => (
           <span
             key={h}
             className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted"
@@ -450,28 +481,51 @@ function PayrollTable({ rows }: { rows: AuditRow[] }) {
         ))}
       </div>
       <ul className="divide-y divide-line">
-        {rows.map((r) => (
-          <li
-            key={r.uri}
-            className="grid grid-cols-[160px_1fr_140px_180px_140px] gap-4 px-5 md:px-6 py-4 items-center"
-          >
-            <div className="font-mono text-[11px] text-dim tnum">
-              {r.ok ? r.date.slice(0, 19).replace("T", " ") : "—"}
-            </div>
-            <div className="font-mono text-[12px] text-ink truncate">
-              {r.ok ? r.payer : "(failed)"}
-            </div>
-            <div className="font-sans tnum font-medium text-ink text-[15px]">
-              {r.ok ? r.amount : "—"}
-            </div>
-            <div className="font-mono text-[11px] text-muted truncate">
-              {r.ok ? r.memo || "—" : r.error ?? "—"}
-            </div>
-            <div className="font-mono text-[10.5px] tracking-[0.14em] uppercase">
-              {r.ok ? <span className="text-sage">decrypted</span> : <span className="text-brick">failed</span>}
-            </div>
-          </li>
-        ))}
+        {rows.map((r) => {
+          const truncatedWallet = r.recipientWallet
+            ? `${r.recipientWallet.slice(0, 8)}…${r.recipientWallet.slice(-6)}`
+            : "";
+          const hasName = !!r.recipientName;
+          return (
+            <li
+              key={r.uri}
+              className="grid grid-cols-[140px_1fr_140px_160px_120px] gap-4 px-5 md:px-6 py-4 items-center"
+            >
+              <div className="font-mono text-[11px] text-dim tnum">
+                {r.ok ? r.date.slice(0, 19).replace("T", " ") : "—"}
+              </div>
+              <div className="min-w-0">
+                {!r.ok ? (
+                  <span className="font-mono text-[12px] text-brick">(failed)</span>
+                ) : hasName ? (
+                  <>
+                    <div className="font-sans text-[14.5px] text-ink truncate">
+                      {r.recipientName}
+                    </div>
+                    {truncatedWallet && (
+                      <div className="mt-0.5 font-mono text-[10.5px] text-muted truncate">
+                        {truncatedWallet}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <span className="font-mono text-[12px] text-ink truncate">
+                    {truncatedWallet || r.payer}
+                  </span>
+                )}
+              </div>
+              <div className="font-sans tnum font-medium text-ink text-[15px]">
+                {r.ok ? r.amount : "—"}
+              </div>
+              <div className="font-mono text-[11px] text-muted truncate">
+                {r.ok ? r.memo || "—" : r.error ?? "—"}
+              </div>
+              <div className="font-mono text-[10.5px] tracking-[0.14em] uppercase">
+                {r.ok ? <span className="text-sage">decrypted</span> : <span className="text-brick">failed</span>}
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
