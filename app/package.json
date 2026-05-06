@@ -24,7 +24,7 @@
     "@umbra-privacy/web-zk-prover": "2.0.1",
     "bs58": "^4.0.1",
     "got": "^14.6.6",
-    "next": "14.2.0",
+    "next": "^14.2.35",
     "qrcode.react": "^4.2.0",
     "react": "18.3.0",
     "react-dom": "18.3.0",
@@ -34,6 +34,7 @@
     "@solana/wallet-adapter-react": "0.15.35"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "14.5.2",

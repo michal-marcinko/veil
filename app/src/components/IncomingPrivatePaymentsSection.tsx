@@ -28,6 +28,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { WalletContextState } from "@solana/wallet-adapter-react";
 import {
   claimUtxos,
+  commitScanWatermark,
   getOrCreateClient,
   scanClaimableUtxos,
   withdrawShielded,
@@ -139,6 +140,13 @@ export function IncomingPrivatePaymentsSection({
   const [pending, setPending] = useState<PendingUtxo[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  // Most-recent scan's nextScanStartIndex. Held here so the per-row
+  // claim handler can advance the watermark only AFTER a successful
+  // claim/withdraw/persist round-trip (see commitScanWatermark in
+  // lib/umbra.ts for the rationale — passive scans must not advance
+  // the watermark, only consumed scans).
+  const [latestScanNextStart, setLatestScanNextStart] =
+    useState<bigint | null>(null);
 
   // Per-row claim state. Keyed by the same stable key the row uses.
   const [claimingKey, setClaimingKey] = useState<string | null>(null);
@@ -228,6 +236,11 @@ export function IncomingPrivatePaymentsSection({
         };
       });
       setPending(mapped);
+      // Remember the watermark advance the SDK suggests, but DO NOT
+      // commit it yet — see the comment on `latestScanNextStart`. The
+      // commit happens inside `handleClaimPending` after the row's
+      // claim+withdraw+persist round-trip succeeds.
+      setLatestScanNextStart(scan.nextScanStartIndex);
     } catch (err: any) {
       // eslint-disable-next-line no-console
       console.error("[Veil dashboard] pending scan failed:", err);
@@ -307,6 +320,14 @@ export function IncomingPrivatePaymentsSection({
         walletBase58,
         payment,
       });
+      // Only NOW — after claimUtxos + withdrawShielded +
+      // persistReceivedPayment have all landed — is it safe to advance
+      // the scan watermark. If any of those steps had thrown, we'd
+      // leave the watermark unchanged so the next refresh re-surfaces
+      // this UTXO. See `commitScanWatermark` in lib/umbra.ts.
+      if (latestScanNextStart != null) {
+        commitScanWatermark(client, latestScanNextStart);
+      }
       // Drop the row from `pending` so the UI reflects the change
       // without waiting for a full re-scan.
       setPending((prev) => prev.filter((p) => p.key !== utxo.key));
@@ -336,9 +357,16 @@ export function IncomingPrivatePaymentsSection({
   return (
     <section className="reveal mb-12">
       <div className="flex items-baseline justify-between mb-6 border-b border-line pb-3">
-        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-          Received private payments
-        </span>
+        <div className="flex items-baseline gap-3">
+          <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/55">
+            Inbox
+          </span>
+          {pending.length > 0 && (
+            <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-gold">
+              {pending.length} pending
+            </span>
+          )}
+        </div>
         <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
           {String(totalCount).padStart(2, "0")}
         </span>
@@ -418,13 +446,13 @@ export function IncomingPrivatePaymentsSection({
             ) : (
               <ul className="border border-line rounded-[4px] bg-paper-3 divide-y divide-line">
                 {pending.map((u) => {
-                  const senderLabel =
-                    u.senderDisplayName ||
-                    (u.senderWallet
-                      ? `${u.senderWallet.slice(0, 8)}…${u.senderWallet.slice(
-                          -6,
-                        )}`
-                      : "Sender hidden (mixer)");
+                  const hasSender =
+                    u.senderDisplayName || u.senderWallet;
+                  const senderLabel = u.senderDisplayName
+                    ? u.senderDisplayName
+                    : u.senderWallet
+                    ? `${u.senderWallet.slice(0, 6)}…${u.senderWallet.slice(-4)}`
+                    : null;
                   const amount = `${formatPayrollAmount(
                     u.amount,
                     PAYMENT_DECIMALS,
@@ -433,28 +461,43 @@ export function IncomingPrivatePaymentsSection({
                   return (
                     <li
                       key={u.key}
-                      className="flex items-center justify-between gap-6 px-5 md:px-6 py-4"
+                      className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/50 transition-colors"
                     >
-                      <div className="flex items-baseline gap-5 min-w-0 flex-1">
-                        <span className="font-sans tabular-nums tracking-tight text-[15px] text-ink shrink-0">
-                          {amount}
-                        </span>
-                        <span className="text-[12px] text-ink/40 shrink-0">
-                          ·
-                        </span>
-                        <span className="font-mono text-[12px] text-ink/55 truncate">
-                          {senderLabel}
+                      <div className="flex flex-col gap-1 min-w-0 flex-1">
+                        <div className="flex items-baseline gap-3">
+                          <span className="font-sans tabular-nums tracking-tight text-[17px] text-ink font-medium">
+                            {amount}
+                          </span>
+                          <span className="font-mono text-[10px] tracking-[0.14em] uppercase text-gold">
+                            via mixer
+                          </span>
+                        </div>
+                        <span className="font-mono text-[11px] text-ink/45">
+                          {hasSender
+                            ? `From ${senderLabel}`
+                            : "Sender hidden by privacy mixer"}
                         </span>
                       </div>
                       <button
                         type="button"
                         onClick={() => handleClaimPending(u)}
                         disabled={isClaiming || claimingKey !== null}
-                        className="btn-quiet text-[12px] shrink-0 disabled:opacity-50"
+                        className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-40 transition-colors shrink-0"
                       >
-                        {isClaiming
-                          ? claimSubStep || "Claiming…"
-                          : "Claim →"}
+                        {isClaiming ? (
+                          <>
+                            <span
+                              aria-hidden
+                              className="h-1.5 w-1.5 rounded-full bg-ink/45 animate-slow-pulse"
+                            />
+                            <span>{claimSubStep || "Claiming…"}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>Claim</span>
+                            <span aria-hidden className="text-ink/55">→</span>
+                          </>
+                        )}
                       </button>
                     </li>
                   );
@@ -543,44 +586,66 @@ function HistoryRow({
   const date = useMemo(() => formatHistoryDate(payment.receivedAt), [
     payment.receivedAt,
   ]);
-  const senderLabel =
-    payment.senderDisplayName ||
-    (payment.senderWallet
-      ? `${payment.senderWallet.slice(0, 8)}…${payment.senderWallet.slice(-6)}`
-      : "Sender hidden (mixer)");
+  const hasSender = payment.senderDisplayName || payment.senderWallet;
+  const senderLabel = payment.senderDisplayName
+    ? payment.senderDisplayName
+    : payment.senderWallet
+    ? `${payment.senderWallet.slice(0, 6)}…${payment.senderWallet.slice(-4)}`
+    : null;
   const amount = `${payment.amountDisplay} ${payment.symbol}`;
   const memoText = payment.memo?.trim() ? payment.memo : "";
 
   return (
-    <li className="px-5 md:px-6 py-4">
+    <li className="px-5 md:px-6 py-4 hover:bg-paper-2/50 transition-colors">
       <div className="flex items-center justify-between gap-6">
-        <div className="flex items-baseline gap-5 min-w-0 flex-1">
-          <span className="font-sans tabular-nums text-[12px] text-ink/45 shrink-0 tracking-tight">
-            {date}
-          </span>
-          <span className="font-mono text-[12px] text-ink/55 truncate min-w-0">
-            {senderLabel}
-          </span>
-          <span className="text-[12px] text-ink/40 shrink-0">·</span>
-          <span className="font-sans tabular-nums tracking-tight text-[15px] text-ink shrink-0">
-            {amount}
-          </span>
-          {memoText && (
-            <span className="font-sans text-[11.5px] text-ink/45 tracking-tight truncate hidden md:inline">
-              {memoText}
+        <div className="flex flex-col gap-1 min-w-0 flex-1">
+          <div className="flex items-baseline gap-3 flex-wrap">
+            <span className="font-sans tabular-nums tracking-tight text-[17px] text-ink font-medium">
+              {amount}
             </span>
-          )}
-          {payment.mode === "sweep" && (
-            <span className="mono-chip text-gold shrink-0">sweep</span>
-          )}
+            <span
+              className={`font-mono text-[10px] tracking-[0.14em] uppercase ${
+                payment.mode === "sweep" ? "text-brick" : "text-sage"
+              }`}
+            >
+              {payment.mode === "sweep" ? "Public sweep" : "Via mixer"}
+            </span>
+            {memoText && (
+              <span className="font-sans italic text-[12px] text-ink/55 truncate hidden md:inline">
+                “{memoText}”
+              </span>
+            )}
+          </div>
+          <div className="flex items-baseline gap-3 text-[11px] font-mono text-ink/45">
+            <span>{date}</span>
+            <span className="text-ink/25">·</span>
+            <span>
+              {hasSender
+                ? `From ${senderLabel}`
+                : "Sender hidden by privacy mixer"}
+            </span>
+          </div>
         </div>
         <button
           type="button"
           onClick={handleDownload}
           disabled={downloading}
-          className="btn-quiet text-[12px] shrink-0 disabled:opacity-50"
+          className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2 text-[12px] tracking-[0.04em] text-ink/75 hover:text-ink hover:bg-paper-2 disabled:opacity-40 transition-colors shrink-0"
         >
-          {downloading ? "Generating…" : "Download payslip"}
+          {downloading ? (
+            <>
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 rounded-full bg-ink/45 animate-slow-pulse"
+              />
+              <span>Generating…</span>
+            </>
+          ) : (
+            <>
+              <span aria-hidden className="text-ink/55">↓</span>
+              <span>Payslip</span>
+            </>
+          )}
         </button>
       </div>
       {downloadError && (

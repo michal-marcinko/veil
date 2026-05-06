@@ -64,6 +64,7 @@ import { getEncryptedUserAccountDecoder } from "@umbra-privacy/umbra-codama";
 import { getCreateReceiverClaimableUtxoFromEncryptedBalanceProver } from "@umbra-privacy/web-zk-prover";
 import {
   claimUtxos,
+  commitScanWatermark,
   getEncryptedBalance,
   scanClaimableUtxos,
   withdrawShielded,
@@ -1459,6 +1460,7 @@ export async function claimToRecipient(
     let utxos: Awaited<
       ReturnType<typeof scanClaimableUtxos>
     >["received"] = [];
+    let shadowScanNextStart: bigint | null = null;
     while (Date.now() - scanStart < SCAN_TIMEOUT_MS) {
       const scan = await scanClaimableUtxos(args.shadowClient);
       utxos = [
@@ -1466,6 +1468,7 @@ export async function claimToRecipient(
         ...(scan.publicReceived ?? []),
       ];
       if (utxos.length > 0) {
+        shadowScanNextStart = scan.nextScanStartIndex;
         // eslint-disable-next-line no-console
         console.log(
           `[claim] shadow found ${utxos.length} UTXO(s) after ${Date.now() - scanStart}ms`,
@@ -1481,6 +1484,13 @@ export async function claimToRecipient(
     if (utxos.length > 0) {
       args.onPhase?.("claiming");
       await claimUtxos({ client: args.shadowClient, utxos });
+      // Watermark commit only AFTER the claim landed — same rule as
+      // the Inbox section. If `claimUtxos` had thrown, the next run's
+      // scan would re-surface these UTXOs. (See commitScanWatermark
+      // in lib/umbra.ts for the rationale.)
+      if (shadowScanNextStart != null) {
+        commitScanWatermark(args.shadowClient, shadowScanNextStart);
+      }
     }
   }
 
@@ -1547,6 +1557,7 @@ export async function claimToRecipient(
   const RECIPIENT_SCAN_INTERVAL_MS = 5_000;
   const recipientScanStart = Date.now();
   let recipientUtxos: any[] = [];
+  let recipientScanNextStart: bigint | null = null;
   while (Date.now() - recipientScanStart < RECIPIENT_SCAN_TIMEOUT_MS) {
     const scan = await scanClaimableUtxos(args.recipientClient);
     recipientUtxos = [
@@ -1554,6 +1565,7 @@ export async function claimToRecipient(
       ...(scan.publicReceived ?? []),
     ];
     if (recipientUtxos.length > 0) {
+      recipientScanNextStart = scan.nextScanStartIndex;
       // eslint-disable-next-line no-console
       console.log(
         `[claim] recipient found ${recipientUtxos.length} UTXO(s) after ${Date.now() - recipientScanStart}ms`,
@@ -1578,6 +1590,11 @@ export async function claimToRecipient(
     client: args.recipientClient,
     utxos: recipientUtxos,
   });
+  // Advance the recipient's scan watermark only after a successful
+  // claim — same correctness rule as the dashboard Inbox.
+  if (recipientScanNextStart != null) {
+    commitScanWatermark(args.recipientClient, recipientScanNextStart);
+  }
   const recipientClaimSignature =
     String(
       (recipientClaimResult as any)?.[0] ??

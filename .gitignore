@@ -10,7 +10,11 @@ target/
 .env.*.local
 veil-bundlr.json
 *-keypair.json
-app/scripts/
+# app/scripts/ is intentionally tracked so reviewers can reproduce
+# deploys (deploy-veilpay-alt.mjs), recover orphan accounts
+# (recover-nonce-pool.mjs), and prep wSOL on devnet. The one script
+# below carries a hardcoded Helius devnet RPC key and stays ignored.
+app/scripts/wrap-sol.mjs
 worktrees/
 .superpowers/
 .DS_Store

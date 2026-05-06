@@ -764,6 +764,7 @@ import {
   getUmbraRelayer,
   getEncryptedBalanceQuerierFunction,
   getEncryptedBalanceToPublicBalanceDirectWithdrawerFunction,
+  getPublicBalanceToEncryptedBalanceDirectDepositorFunction,
 } from "@umbra-privacy/sdk";
 import {
   getClaimReceiverClaimableUtxoIntoEncryptedBalanceProver,
@@ -1029,17 +1030,26 @@ export async function scanClaimableUtxos(client: UmbraClient) {
     startIndex as any,
     BigInt(1_000_000) as any,
   );
-  // Persist the new watermark even when the scan returned nothing —
-  // we still walked the indexer up to nextScanStartIndex, so we know
-  // there's nothing new to look at below it. If `nextScanStartIndex`
-  // is missing (older SDK shape), advance to the highest insertion
-  // index we observed across all four buckets.
+  // Compute the candidate watermark advance, but do NOT save it here.
+  //
+  // Rationale (2026-05-06): the previous behavior committed the
+  // watermark on every scan, including passive scans that did not
+  // claim the UTXOs they returned (e.g. the dashboard's `refresh()`
+  // which just reads, or the IncomingPrivatePaymentsSection's
+  // `refreshPending()` which only renders pending rows). That is a
+  // correctness bug: a UTXO surfaced and rendered in the Inbox could
+  // be missed by a later "Refresh" because the watermark had walked
+  // past it during the first read, leaving the recipient with a
+  // visible-but-unrefreshable pending row that vanished on next reload.
+  //
+  // The fix: scan never saves. Callers that actually consume the
+  // returned UTXOs (claim + withdraw + persist) call
+  // `commitScanWatermark(client, scan.nextScanStartIndex)` to advance
+  // the watermark only after the work landed. If the claim flow
+  // crashes mid-way, the next scan re-surfaces the unclaimed UTXOs.
   const nextStart =
-    (result as any)?.nextScanStartIndex ??
+    ((result as any)?.nextScanStartIndex as bigint | undefined) ??
     highestInsertionIndex(result) + 1n;
-  if (watermarkKey && typeof nextStart === "bigint" && nextStart > startIndex) {
-    saveScanWatermark(watermarkKey, nextStart);
-  }
   // Single compact scan log: walked range + non-empty buckets only.
   if (isVeilDebugEnabled()) {
     const buckets: string[] = [];
@@ -1051,7 +1061,7 @@ export async function scanClaimableUtxos(client: UmbraClient) {
     console.log(
       `[Veil scan] ${startIndex.toString()} → ${nextStart.toString()} ${
         buckets.length ? buckets.join(" ") : "no new claimable UTXOs"
-      }`,
+      } (watermark not committed)`,
     );
   }
   return {
@@ -1059,7 +1069,41 @@ export async function scanClaimableUtxos(client: UmbraClient) {
     publicReceived: result.publicReceived,
     selfBurnable: result.selfBurnable,
     publicSelfBurnable: result.publicSelfBurnable,
+    /**
+     * The next-start index returned by the SDK (`lastSeenInsertionIndex
+     * + 1`) — pass to `commitScanWatermark` after successfully
+     * consuming the returned UTXOs. Always a bigint; falls back to
+     * `highestInsertionIndex(result) + 1` on older SDK shapes.
+     */
+    nextScanStartIndex: nextStart,
   };
+}
+
+/**
+ * Persist the watermark returned by a successful `scanClaimableUtxos`
+ * consumption. Call this AFTER `claimUtxos` + `withdrawShielded` +
+ * `persistReceivedPayment` complete, so a mid-flow crash leaves the
+ * watermark unchanged and the next scan re-surfaces the unclaimed UTXOs.
+ *
+ * No-op when the client has no signer address (e.g. during SSR) or when
+ * the new value would not advance the existing watermark.
+ */
+export function commitScanWatermark(
+  client: UmbraClient,
+  nextStart: bigint,
+): void {
+  const signerAddr = (client as any)?.signer?.address as string | undefined;
+  if (!signerAddr) return;
+  const watermarkKey = `veil:scanWatermark:${signerAddr}`;
+  const current = loadScanWatermark(watermarkKey);
+  if (typeof nextStart !== "bigint" || nextStart <= current) return;
+  saveScanWatermark(watermarkKey, nextStart);
+  if (isVeilDebugEnabled()) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[Veil scan] watermark committed ${current.toString()} → ${nextStart.toString()}`,
+    );
+  }
 }
 
 function loadScanWatermark(key: string | null): bigint {
@@ -1271,6 +1315,55 @@ export async function withdrawShielded(
       ? String((result as any).callbackSignature)
       : undefined,
     callbackElapsedMs: (result as any).callbackElapsedMs,
+  };
+}
+
+/**
+ * Move tokens from the user's PUBLIC wallet into their OWN encrypted
+ * (shielded) balance. The inverse of `withdrawShielded`. Used by the
+ * dashboard's "Deposit from wallet → private" affordance to bootstrap
+ * a shielded balance without first being paid.
+ *
+ * Privacy property: this single tx is publicly visible — the chain
+ * shows wallet X depositing N SOL into the protocol pool. That's the
+ * "onboarding" tax. Once funds are inside the encrypted balance,
+ * subsequent SHIELDED sends (e.g. `payInvoiceFromShielded`,
+ * `useShieldedForRun`) hide the amount, since the balance is
+ * homogenized once it's in.
+ *
+ * Returns `{queueSignature, callbackSignature?}` from the SDK. The
+ * callback is the Arcium MPC tx that actually credits the balance —
+ * by default the SDK awaits it before returning, so when this resolves
+ * the encrypted balance reflects the new total.
+ *
+ * Throws — bubble to UI for `formatTxError`.
+ */
+export async function depositToShielded(
+  client: UmbraClient,
+  mint: string,
+  amount: bigint,
+): Promise<{
+  queueSignature: string;
+  callbackSignature?: string;
+}> {
+  const deposit = getPublicBalanceToEncryptedBalanceDirectDepositorFunction({
+    client,
+  });
+  // The SDK takes (destinationAddress, mint, amount). For self-deposit
+  // we pass the client's own signer address; the SDK ignores this for
+  // routing (the V11 ix uses signer.address regardless — same quirk
+  // we documented in withdrawShielded), it's a positional arg.
+  const destinationAddress = (client as any).signer.address as string;
+  const result = await deposit(
+    destinationAddress as any,
+    mint as any,
+    amount as any,
+  );
+  return {
+    queueSignature: String((result as any).queueSignature),
+    callbackSignature: (result as any).callbackSignature
+      ? String((result as any).callbackSignature)
+      : undefined,
   };
 }
 
