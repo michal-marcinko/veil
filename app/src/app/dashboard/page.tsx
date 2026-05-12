@@ -1558,7 +1558,7 @@ export default function DashboardPage() {
                     className="py-4 grid grid-cols-[1fr_auto_auto] gap-4 items-baseline"
                   >
                     <a
-                      href={`/payroll/${b.batchId}`}
+                      href={`/dashboard/payroll/${b.batchId}`}
                       className="font-mono text-[13px] text-ink hover:text-gold transition-colors truncate"
                     >
                       {b.batchId}
@@ -1566,7 +1566,7 @@ export default function DashboardPage() {
                     <span className="font-sans text-[12px] text-ink/45 tabular-nums">
                       {b.count} invoice{b.count === 1 ? "" : "s"}
                     </span>
-                    <a href={`/payroll/${b.batchId}`} className="btn-quiet text-[12px]">
+                    <a href={`/dashboard/payroll/${b.batchId}`} className="btn-quiet text-[12px]">
                       Open →
                     </a>
                   </li>
@@ -2497,7 +2497,7 @@ function PayrollRunRow({ run }: { run: PayrollRunSummary }) {
   return (
     <li>
       <a
-        href={`/payroll/${packet.batchId}`}
+        href={`/dashboard/payroll/${packet.batchId}`}
         className="flex items-center justify-between gap-6 px-5 md:px-6 py-4 hover:bg-paper-2/40 transition-colors cursor-pointer"
         aria-label={`Open payroll run ${packet.batchId}`}
       >
