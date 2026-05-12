@@ -26,7 +26,7 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 
 - App: **https://veil-app-production.up.railway.app**
 - Repo: **https://github.com/michal-marcinko/veil**
-- Demo video: *TBD before submission deadline (May 11, 2026)*
+- Demo video: see the link submitted via Superteam Earn
 
 **Devnet program IDs (stable):**
 - Invoice registry: `54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo`
@@ -182,7 +182,7 @@ Outgoing payroll intentionally does not reuse the invoice PDA model. Payroll is 
 - Live app: https://veil-app-production.up.railway.app
 - Repository: https://github.com/michal-marcinko/veil
 - Superteam Umbra track: https://earn.superteam.fun/listings/hackathon/build-with-umbra-side-track
-- Demo video: *TBD before submission deadline (May 11, 2026)*
+- Demo video: see the link submitted via Superteam Earn
 
 ## License
 
