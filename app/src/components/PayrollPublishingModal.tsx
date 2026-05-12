@@ -131,13 +131,15 @@ export function PayrollPublishingModal({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center p-4"
+      className="fixed inset-0 z-40 flex items-start justify-center p-4 pt-[12vh] sm:pt-[15vh] overflow-y-auto"
       role="status"
       aria-live="polite"
       aria-label="Running private payroll"
     >
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" />
+      {/* Backdrop — opaque enough to fully obscure the page beneath so
+          the modal reads as a focused full-screen take-over rather than
+          a floating card with asymmetric page content peeking through. */}
+      <div className="absolute inset-0 bg-ink/85 backdrop-blur-md" />
 
       {/* Dialog. max-h pinned to the dynamic viewport height (dvh)
           minus our outer padding so on shorter viewports the dialog
