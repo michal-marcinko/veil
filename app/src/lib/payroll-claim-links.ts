@@ -1732,6 +1732,10 @@ function trimTrailingSlash(s: string): string {
    ───────────────────────────────────────────────────────────────────── */
 
 export interface ClaimLinkRow {
+  /** Human-readable recipient name (from the CSV / form). Empty when the
+   *  row was imported without a name. Included in the CSV export so the
+   *  employer can map wallets back to people when handing out links. */
+  recipientName?: string;
   recipient: string;
   amount: string;
   status: "claim-link" | "direct" | "failed";
@@ -1757,10 +1761,14 @@ export interface ClaimLinkRow {
  * registered and got paid directly via the normal payroll flow.
  */
 export function rowsToClaimLinkCsv(rows: readonly ClaimLinkRow[]): string {
-  const header = "row,recipient,amount,status,claim_url";
+  // recipient_name added so the employer's payroll system can map the
+  // wallet column back to a human when distributing the claim links.
+  // Quoted via csvCell to tolerate names with commas / quotes / newlines.
+  const header = "row,recipient_name,recipient,amount,status,claim_url";
   const lines = rows.map((row, idx) => {
     const cells = [
       String(idx + 1),
+      csvCell(row.recipientName ?? ""),
       row.recipient,
       row.amount,
       row.status,
@@ -1769,4 +1777,17 @@ export function rowsToClaimLinkCsv(rows: readonly ClaimLinkRow[]): string {
     return cells.join(",");
   });
   return `${header}\n${lines.join("\n")}\n`;
+}
+
+/**
+ * Minimal CSV cell escaper. Wraps the value in double quotes when it
+ * contains a comma, double quote, or newline. Internal double quotes
+ * are doubled per RFC 4180. Empty strings pass through verbatim.
+ */
+function csvCell(value: string): string {
+  if (value === "") return "";
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }

@@ -2210,6 +2210,7 @@ export function PayrollFlow({ onSuccessChange }: PayrollFlowProps = {}) {
 
   function downloadClaimLinksCsv() {
     const claimRows: ClaimLinkRow[] = rows.map((row) => ({
+      recipientName: row.recipientName?.trim() || undefined,
       recipient: row.recipient,
       amount: row.amountDisplay,
       status: row.error ? "failed" : row.claimUrl ? "claim-link" : "direct",
