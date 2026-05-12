@@ -183,8 +183,14 @@ export async function generateScopedGrant(args: {
       );
       const md = (await decryptJson(ciphertext, perInvoiceKey)) as InvoiceMetadata;
 
-      // 4. Re-encrypt under the ephemeral key and upload.
-      const reencrypted = await encryptJson(md, ephemeralKey);
+      // 4. Re-encrypt under the ephemeral key and upload. We embed
+      //    `_invoicePda` alongside the metadata so the auditor can derive
+      //    the on-chain lock PDA and surface the actual settling wallet
+      //    without needing a separate side-channel. The base field set
+      //    of `InvoiceMetadata` is unchanged — auditors using older code
+      //    that doesn't know about `_invoicePda` simply ignore it.
+      const blob: ReencryptedBlob = { ...md, _invoicePda: inv.invoicePda };
+      const reencrypted = await encryptJson(blob, ephemeralKey);
       const { uri } = await uploadCiphertext(reencrypted);
       invoiceUris.push(uri);
     } catch {
@@ -234,7 +240,26 @@ export function buildScopedPayrollAuditUrl(args: {
 export interface DecryptedScopedGrantEntry {
   uri: string;
   metadata: InvoiceMetadata | null;
+  /**
+   * Base58 invoice PDA carried inside the re-encrypted blob so the auditor
+   * can derive the on-chain `PaymentIntentLock` PDA and cross-check the
+   * payer wallet against what's claimed in the metadata. Null for grants
+   * issued before this field was added (graceful degradation).
+   */
+  invoicePda: string | null;
   error: string | null;
+}
+
+/**
+ * Internal wire format for the re-encrypted blob. We piggy-back the
+ * invoice PDA next to the original metadata so the auditor can recover
+ * it without an extra side-channel. The shape is intentionally a
+ * superset of `InvoiceMetadata` (so old code paths that decode straight
+ * into `InvoiceMetadata` still work — extra fields are ignored by
+ * `JSON.parse` consumers that don't know about them).
+ */
+interface ReencryptedBlob extends InvoiceMetadata {
+  _invoicePda?: string;
 }
 
 /**
@@ -258,15 +283,25 @@ export async function decryptScopedGrant(
     payload.invoiceUris.map(async (uri): Promise<DecryptedScopedGrantEntry> => {
       try {
         const ciphertext = await fetchCiphertext(uri);
-        const md = (await decryptJson(
+        const blob = (await decryptJson(
           ciphertext,
           payload.ephemeralKey,
-        )) as InvoiceMetadata;
-        return { uri, metadata: md, error: null };
+        )) as ReencryptedBlob;
+        // Strip the wire-only `_invoicePda` field out of the metadata
+        // we hand back, so consumers of `metadata` see only the canonical
+        // `InvoiceMetadata` shape.
+        const { _invoicePda, ...md } = blob;
+        return {
+          uri,
+          metadata: md as InvoiceMetadata,
+          invoicePda: typeof _invoicePda === "string" && _invoicePda.length > 0 ? _invoicePda : null,
+          error: null,
+        };
       } catch (err) {
         return {
           uri,
           metadata: null,
+          invoicePda: null,
           error: err instanceof Error ? err.message : String(err),
         };
       }

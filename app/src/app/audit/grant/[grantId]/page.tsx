@@ -13,6 +13,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { PublicKey } from "@solana/web3.js";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import {
@@ -20,6 +21,8 @@ import {
   decryptScopedGrant,
   type DecryptedScopedGrantEntry,
 } from "@/lib/auditor-links";
+import { fetchManyLocks } from "@/lib/anchor";
+import { deriveLockPda } from "@/lib/lock-derivation";
 import type { InvoiceMetadata } from "@/lib/types";
 
 type LoadStatus = "loading" | "ready" | "denied";
@@ -34,6 +37,15 @@ interface AuditRow {
   amountRaw: string;
   symbol: string;
   memo: string;
+  // Base58 of the wallet that actually settled the on-chain
+  // PaymentIntentLock for this invoice. Empty when (a) the grant pre-dates
+  // PDA embedding, (b) the lock account doesn't exist yet, or (c) the
+  // on-chain fetch failed. Different from `payerWallet`, which is the
+  // creator's claim taken from the encrypted invoice metadata.
+  actualPayerWallet?: string;
+  // Invoice PDA recovered from the re-encrypted blob (granter embedded it
+  // in `generateScopedGrant`). Used internally to derive the lock PDA.
+  invoicePda?: string;
   // null if this entry failed to decrypt
   ok: boolean;
   error: string | null;
@@ -108,6 +120,60 @@ export default function ScopedAuditGrantPage() {
       setDecryptedAt(
         new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC",
       );
+
+      // Best-effort on-chain enrichment: pull the actual settling wallet
+      // out of each invoice's PaymentIntentLock PDA. This is the
+      // trustless half of the auditor story — metadata says "Alice billed
+      // Veil Pay for 1 SOL", chain says "wallet 7onP… settled it". We
+      // batch one `getMultipleAccountsInfo` call (chunked at 100). On
+      // any failure we leave the column empty silently.
+      const rowsWithPda = built.filter((r) => r.invoicePda);
+      if (rowsWithPda.length === 0) return;
+      try {
+        const lockPdaList = rowsWithPda
+          .map((r) => {
+            try {
+              return { row: r, lockPda: deriveLockPda(new PublicKey(r.invoicePda!)) };
+            } catch {
+              return null;
+            }
+          })
+          .filter((x): x is { row: AuditRow; lockPda: PublicKey } => x !== null);
+        if (lockPdaList.length === 0) return;
+        // Read-only Anchor wallet shim — no signing, just enough surface
+        // for AnchorProvider to instantiate. Mirrors `fetchInvoicePublic`
+        // in `lib/anchor.ts`.
+        const readOnlyWallet = {
+          publicKey: PublicKey.default,
+          signTransaction: async () => {
+            throw new Error("audit-grant: read-only wallet cannot sign");
+          },
+          signAllTransactions: async () => {
+            throw new Error("audit-grant: read-only wallet cannot sign");
+          },
+        };
+        const lockMap = await fetchManyLocks(
+          readOnlyWallet as any,
+          lockPdaList.map((x) => x.lockPda),
+        );
+        if (cancelled) return;
+        // Re-key by uri so we can patch rows in place. AuditRow.uri is
+        // unique per entry.
+        const byUri = new Map<string, string>();
+        for (const { row, lockPda } of lockPdaList) {
+          const lock = lockMap.get(lockPda.toBase58());
+          if (lock) byUri.set(row.uri, lock.payer.toBase58());
+        }
+        if (byUri.size === 0) return;
+        setRows((prev) =>
+          prev.map((r) =>
+            byUri.has(r.uri) ? { ...r, actualPayerWallet: byUri.get(r.uri) ?? "" } : r,
+          ),
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[Veil audit-grant] lock enrichment failed:", err);
+      }
     }
     void run();
     return () => {
@@ -131,7 +197,7 @@ export default function ScopedAuditGrantPage() {
   }, [rows, fromDate, toDate, payerQuery]);
 
   function exportCsv() {
-    const header = ["invoice_id", "created_at", "payer", "payer_wallet", "amount_raw", "amount_display", "symbol", "memo"];
+    const header = ["invoice_id", "created_at", "payer", "payer_wallet", "actual_payer_wallet", "amount_raw", "amount_display", "symbol", "memo"];
     const lines = [header.join(",")];
     for (const r of filteredRows) {
       if (!r.ok) continue;
@@ -141,6 +207,7 @@ export default function ScopedAuditGrantPage() {
           csvCell(r.date),
           csvCell(r.payer),
           csvCell(r.payerWallet),
+          csvCell(r.actualPayerWallet ?? ""),
           csvCell(r.amountRaw),
           csvCell(r.amount),
           csvCell(r.symbol),
@@ -248,6 +315,8 @@ function entryToRow(e: DecryptedScopedGrantEntry): AuditRow {
       amountRaw: "",
       symbol: "",
       memo: "",
+      actualPayerWallet: "",
+      invoicePda: e.invoicePda ?? undefined,
       ok: false,
       error: e.error,
     };
@@ -263,9 +332,24 @@ function entryToRow(e: DecryptedScopedGrantEntry): AuditRow {
     amountRaw: md.total,
     symbol: md.currency.symbol,
     memo: md.notes ?? "",
+    actualPayerWallet: "",
+    invoicePda: e.invoicePda ?? undefined,
     ok: true,
     error: null,
   };
+}
+
+/**
+ * Render a base58 pubkey as a compact `7onP…JbDs` (4 + ellipsis + 4) so the
+ * column stays narrow while still being skimmable. Returns "—" for empty
+ * input. We avoid styling cues here — the renderer wraps the result in a
+ * font-mono span so it visually parallels the metadata `payer_wallet`
+ * column without introducing a new visual register.
+ */
+function truncatePubkey(pk: string): string {
+  if (!pk) return "—";
+  if (pk.length <= 10) return pk;
+  return `${pk.slice(0, 4)}…${pk.slice(-4)}`;
 }
 
 function formatAmount(amount: bigint, decimals: number, symbol: string): string {
@@ -513,8 +597,8 @@ function InvoiceTable({ rows }: { rows: AuditRow[] }) {
 
   return (
     <div className="border border-line rounded-[4px] overflow-hidden">
-      <div className="grid grid-cols-[160px_1fr_140px_180px_140px] gap-4 px-5 md:px-6 py-3 border-b border-line bg-paper-3">
-        {["Date", "Payer", "Amount", "Memo", "Status"].map((h) => (
+      <div className="grid grid-cols-[160px_1fr_140px_140px_180px_140px] gap-4 px-5 md:px-6 py-3 border-b border-line bg-paper-3">
+        {["Date", "Payer", "Actual payer (on-chain)", "Amount", "Memo", "Status"].map((h) => (
           <span
             key={h}
             className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted"
@@ -527,13 +611,19 @@ function InvoiceTable({ rows }: { rows: AuditRow[] }) {
         {rows.map((r) => (
           <li
             key={r.uri}
-            className="grid grid-cols-[160px_1fr_140px_180px_140px] gap-4 px-5 md:px-6 py-4 items-center"
+            className="grid grid-cols-[160px_1fr_140px_140px_180px_140px] gap-4 px-5 md:px-6 py-4 items-center"
           >
             <div className="font-mono text-[11px] text-dim tnum">
               {r.ok ? r.date.slice(0, 19).replace("T", " ") : "—"}
             </div>
             <div className="font-mono text-[12px] text-ink truncate">
               {r.ok ? r.payer : "(failed)"}
+            </div>
+            <div
+              className="font-mono text-[11px] text-ink truncate"
+              title={r.actualPayerWallet || undefined}
+            >
+              {truncatePubkey(r.actualPayerWallet ?? "")}
             </div>
             <div className="font-sans tnum font-medium text-ink text-[15px]">
               {r.ok ? r.amount : "—"}
