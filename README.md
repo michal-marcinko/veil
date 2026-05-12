@@ -1,6 +1,10 @@
-# Veil
+<p align="center">
+  <img src="veil-icon.svg" alt="Veil" width="120" />
+</p>
 
-**Private B2B payroll and invoicing on Solana, built on the [Umbra SDK](https://sdk.umbraprivacy.com/introduction).**
+<h1 align="center">Veil</h1>
+
+<p align="center"><strong>Private B2B payroll and invoicing on Solana, built on the <a href="https://sdk.umbraprivacy.com/introduction">Umbra SDK</a>.</strong></p>
 
 [Live demo](https://veil-app-production.up.railway.app) · [Roadmap](docs/roadmap.md) · [Umbra Side Track on Superteam Earn](https://earn.superteam.fun/listings/hackathon/build-with-umbra-side-track)
 
