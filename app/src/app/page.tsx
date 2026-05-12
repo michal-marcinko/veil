@@ -293,22 +293,28 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Quote band — preserved PIVY pull-quote. Boska italic carries the
-          brand voice; the source citation grounds the claim in real research. */}
+      {/* Quote band — CertiK pull-quote on transparent on-chain financial
+          data driving human-link attacks. Replaces the prior PIVY citation
+          whose URL went dead 2026-05-12. CertiK's report is a stronger
+          source anyway — top-tier crypto security firm with the explicit
+          identifiable-data → targeted-attacks mapping. Boska italic carries
+          the brand voice. */}
       <section className="relative z-10 border-t border-line">
         <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-32 md:py-40">
           <figure className="max-w-[820px]">
             <span className="eyebrow">Why it matters</span>
             <blockquote className="mt-6 font-display italic font-medium text-ink text-[32px] sm:text-[40px] md:text-[48px] leading-[1.1] tracking-[-0.02em]">
               <span aria-hidden className="text-muted mr-1">&ldquo;</span>
-              Public crypto payroll is a roadmap for targeted social engineering.
+              As long as crypto-asset holdings remain associated with
+              identifiable financial data, physical coercion will remain
+              the economically most rational attack path.
               <span aria-hidden className="text-muted ml-1">&rdquo;</span>
             </blockquote>
             <figcaption className="mt-7 flex flex-wrap items-baseline gap-x-4 gap-y-2 font-mono text-[11px] tracking-[0.14em] uppercase text-muted">
-              <span>— PIVY · 2026</span>
+              <span>— CertiK · 2026 Wrench Attacks Overview</span>
               <span className="text-dim">·</span>
               <a
-                href="https://pivy.me/blog/3dc66fc2-bf12-4924-95c2-7550d7dd4501"
+                href="https://www.certik.com/blog/2026-wrench-attacks-overview"
                 target="_blank"
                 rel="noreferrer"
                 className="text-dim hover:text-ink transition-colors"
