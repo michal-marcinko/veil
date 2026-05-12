@@ -49,7 +49,7 @@ type ClaimStep =
 function claimStepLabel(step: ClaimStep): string {
   switch (step) {
     case "registering":
-      return "Setting up your private payments… (1 wallet popup)";
+      return "Setting up your private payments… (3 wallet popups — one-time setup)";
     case "scanning":
       return "Looking for your funds…";
     case "claiming":
@@ -500,7 +500,7 @@ export default function ClaimPage({
                     )}
                   </button>
                   <p className="mt-3 text-[12px] font-mono tracking-[0.12em] uppercase text-dim">
-                    Routed through the privacy pool. Two wallet popups (claim + withdraw).
+                    Routed through the privacy pool. New wallets sign 3 one-time setup popups first; then ~2 popups for claim + withdraw.
                   </p>
                 </div>
               )}
