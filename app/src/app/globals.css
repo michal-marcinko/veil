@@ -1,0 +1,674 @@
+@import url("https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=fragment-mono@400&f[]=boska@500,600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --font-sans: "Switzer", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "Fragment Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+    /*
+     * Display typeface for the wordmark. Boska is a contemporary display
+     * serif (Indian Type Foundry, free via Fontshare) — distinctive ball
+     * terminals, designed for short brand-scale words at large sizes.
+     * Fallbacks resolve to ui-serif, Georgia.
+     *
+     * To swap quickly without code changes, edit ONLY the first family
+     * here. Compatible Fontshare alternatives (already free):
+     *   "Stardom"    — high-contrast bolder serif
+     *   "Zodiak"     — modern condensed serif with a quirky character
+     *   "Author"     — geometric editorial sans (if you want to drop serif)
+     *   "Cabinet Grotesk" — refined geometric sans
+     */
+    --font-display: "Boska", ui-serif, Georgia, "Times New Roman", serif;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    font-feature-settings: "kern", "ss01", "ss02", "cv01", "cv09";
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #f1ece0;
+    color: #1c1712;
+    font-family: var(--font-sans);
+  }
+
+  /* Typewriter cursor for the brand wordmark hover effect */
+  @keyframes typewriter-blink {
+    0%, 50% { opacity: 1; }
+    50.01%, 100% { opacity: 0; }
+  }
+  .typewriter-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 0.85em;
+    margin-left: 3px;
+    background-color: currentColor;
+    vertical-align: -0.08em;
+    animation: typewriter-blink 1s step-end infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .typewriter-cursor {
+      animation: none;
+      opacity: 1;
+    }
+  }
+
+  /* Subtle paper grain — barely perceptible, warms the cream */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.4;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch' seed='4'/><feColorMatrix values='0 0 0 0 0.38 0 0 0 0 0.34 0 0 0 0 0.26 0 0 0 0.28 0'/></filter><rect width='220' height='220' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply;
+  }
+
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.5;
+  }
+
+  ::selection {
+    background: #6a2420;
+    color: #f8f4e9;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #d6ceba;
+    border: 2px solid #f1ece0;
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #bdb39b;
+  }
+
+  .wallet-adapter-button:not([disabled]):focus-visible {
+    outline-color: #6a2420 !important;
+  }
+
+  .wallet-adapter-button-start-icon {
+    margin-right: 0.5rem !important;
+  }
+}
+
+@layer components {
+  /* Editorial underline-only input */
+  /*
+    Editorial input — real visual presence so the form doesn't disappear
+    into the cream paper. Soft paper-3 fill with a hairline ink border;
+    on focus the border deepens to ink + a subtle gold halo, no flashing
+    blue browser default. Matches the wallet pill / btn-ghost rhythm.
+  */
+  .input-editorial {
+    @apply w-full bg-paper-3 border border-line rounded-[3px]
+           py-2.5 px-3.5 text-ink placeholder:text-dim/80
+           transition-[border-color,background-color,box-shadow] duration-150
+           focus:outline-none focus:bg-paper focus:border-ink
+           hover:border-line-2
+           text-[14.5px];
+    caret-color: #6a2420;
+  }
+
+  .input-editorial:focus {
+    box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.12);
+  }
+
+  textarea.input-editorial {
+    line-height: 1.55;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .mono-chip {
+    @apply font-mono text-[11px] tracking-[0.12em] uppercase text-muted;
+  }
+
+  /* Primary — oxblood fill, inverts on hover */
+  .btn-primary {
+    @apply relative inline-flex items-center justify-center gap-2.5
+           bg-gold text-paper px-6 py-3 font-sans font-medium
+           tracking-[-0.005em] text-[14px] rounded-[3px]
+           border border-gold transition-colors duration-150
+           hover:bg-ink hover:border-ink
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-gold/40 focus-visible:ring-offset-2 focus-visible:ring-offset-paper
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* Secondary — outlined in ink */
+  .btn-ghost {
+    @apply relative inline-flex items-center justify-center gap-2.5
+           bg-transparent text-ink px-6 py-3 font-sans font-medium
+           tracking-[-0.005em] text-[14px] rounded-[3px]
+           border border-line-2 transition-colors duration-150
+           hover:border-ink
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-2 focus-visible:ring-offset-paper;
+  }
+
+  .btn-quiet {
+    @apply font-sans text-[13px] font-medium text-gold hover:text-ink transition-colors;
+  }
+
+  /* Small uppercase eyebrow label — mono, tight */
+  .eyebrow {
+    @apply font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted;
+  }
+
+  /* Horizontal divider rule — thin line flanked by nothing */
+  .rule {
+    @apply h-px w-full bg-line;
+  }
+
+  /* ─── Document Canvas redesign (2026-05-04) ────────────────────── */
+
+  /* Display-size inline-editable input. Real <input>, no border, looks
+     like body text until focus, then a 1.5px ink underline animates in.
+     Used for the "From" and "Bill to" headlines on /create.
+     Placeholder color is `dim` (#a59c84) — readable as a hint at display
+     size without being mistaken for typed content (which is full ink). */
+  .canvas-display-input {
+    @apply w-full bg-transparent border-0 outline-none
+           text-ink placeholder:text-dim
+           font-sans font-medium
+           text-[40px] md:text-[48px]
+           leading-[1.04] tracking-[-0.025em]
+           pb-1 transition-[box-shadow] duration-200;
+    box-shadow: inset 0 -1px 0 transparent;
+  }
+  .canvas-display-input:focus {
+    box-shadow: inset 0 -1.5px 0 #1c1712;
+  }
+
+  /* Optional-detail chips below the items table. Filled = real value,
+     empty = dashed click-to-add. Both behave as buttons (chip row owns
+     the click → expand inline editor in InvoiceForm). */
+  .canvas-chip {
+    @apply inline-flex items-center gap-2
+           px-3.5 py-2 rounded-full
+           font-sans text-[13px] text-ink
+           bg-ink/5 hover:bg-ink/10
+           transition-colors duration-150
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/15;
+  }
+  .canvas-chip-empty {
+    @apply bg-transparent text-muted hover:text-ink
+           border border-dashed border-line;
+  }
+  .canvas-chip-empty:hover {
+    @apply border-line-2;
+  }
+
+  /* Sticky canvas bar — fixed to viewport bottom across all 3 states.
+     backdrop-blur preserves the feeling of paper continuing underneath. */
+  .canvas-action-bar {
+    background: rgba(241, 236, 224, 0.86);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-top: 1px solid rgba(28, 23, 18, 0.08);
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    padding-top: 14px;
+  }
+
+  /* Mono meta tagline on the left of the compose-state bar. */
+  .canvas-bar-meta {
+    @apply font-mono text-[10.5px] tracking-[0.18em] uppercase text-muted;
+  }
+
+  /* Pulsing indicator in publishing state. */
+  .canvas-bar-pulse {
+    @apply inline-block w-2 h-2 rounded-full bg-gold;
+    animation: slow-pulse 1.4s ease-in-out infinite;
+  }
+
+  /* Pay-link strip (success state) — quiet code-style fill, truncates
+     long URLs with ellipsis. */
+  .canvas-pay-link-strip {
+    @apply bg-ink/5 rounded px-3.5 py-2.5
+           font-mono text-[12px] text-ink/75
+           truncate min-w-0;
+  }
+
+  /* Inline kbd hint inside primary buttons (⌘↵, ⌘C). */
+  .canvas-kbd {
+    @apply font-mono text-[10.5px] px-1.5 py-0.5 rounded
+           bg-paper/20 text-paper/90 ml-1;
+  }
+
+  /* Page-content fade for publishing/success states (applied via class
+     toggle on the form wrapper, not the bar). */
+  .canvas-page-fade {
+    @apply transition-opacity duration-500;
+    opacity: 0.55;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .canvas-display-input,
+    .canvas-bar-pulse,
+    .canvas-page-fade {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+
+  /* Back-to-picker chevron. Apple-style two-stage motion: press uses a
+     fast ease-out curve (90ms compression), release uses a bouncy spring
+     curve (240ms with mild overshoot). Color reacts fastest (140ms) so
+     hover registers instantly; the lift + scale + stroke thickening
+     compose on top for the polished, responsive feel.
+     Quiet at rest (line-2), deepens to full ink on hover/focus.
+     Stroke goes from 1.5 to 2.25 on hover — the icon "fills in" as you
+     approach it, mirroring the color deepen. */
+  .canvas-back-arrow {
+    color: #bdb39b; /* line-2 — present but unobtrusive */
+    transition:
+      color 140ms cubic-bezier(0.4, 0, 0.2, 1),
+      transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    will-change: transform;
+  }
+  .canvas-back-arrow svg path {
+    transition: stroke-width 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .canvas-back-arrow:hover,
+  .canvas-back-arrow:focus-visible {
+    color: #1c1712;
+    transform: translateY(-5px) scale(1.06);
+  }
+  .canvas-back-arrow:hover svg path,
+  .canvas-back-arrow:focus-visible svg path {
+    stroke-width: 2.25;
+  }
+  /* Press: snappy compression with its OWN faster transition. The
+     spring-back (release) uses the hover-state's slower bouncy curve,
+     creating the asymmetric press/release feel that reads as Apple-y. */
+  .canvas-back-arrow:active {
+    transform: translateY(-1px) scale(0.96);
+    transition:
+      color 80ms cubic-bezier(0.4, 0, 0.2, 1),
+      transform 90ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .canvas-back-arrow:focus-visible {
+    outline: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .canvas-back-arrow,
+    .canvas-back-arrow svg path,
+    .canvas-back-arrow:active {
+      transition: color 120ms ease;
+    }
+    .canvas-back-arrow:hover,
+    .canvas-back-arrow:focus-visible,
+    .canvas-back-arrow:active {
+      transform: none;
+    }
+    .canvas-back-arrow:hover svg path,
+    .canvas-back-arrow:focus-visible svg path {
+      stroke-width: 1.5;
+    }
+  }
+
+  /* ─── /Document Canvas redesign ────────────────────────────────── */
+
+}
+
+@layer utilities {
+  /* Tabular numerics — critical for financial UI */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Subtle page-load reveal — one stagger, not a parade */
+  .reveal {
+    animation: reveal 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes reveal {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Row state-transition flash — pending → paid.
+     The InvoiceRow toggles `.row-flash` for ~600ms when its status
+     prop changes from pending to paid; the row briefly washes from
+     bg-paper-2 (cream-2, slightly darker) back to the resting
+     bg-paper. Reduced-motion: skip the wash entirely. */
+  @keyframes row-flash {
+    0% { background-color: #e7e0cf; }   /* paper-2 */
+    100% { background-color: transparent; }
+  }
+  .row-flash {
+    animation: row-flash 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Status-dot crossfade — gold → ink over 400ms.
+     Pairs with .row-flash; the StatusDot consumes this class to play
+     the colour swap. Implemented as a keyframe (not just transition)
+     so it always fires even when the colour-class swap has already
+     committed via state. */
+  @keyframes status-dot-flash {
+    0% { background-color: #6a2420; }   /* gold (oxblood) */
+    100% { background-color: #1c1712; } /* ink */
+  }
+  .status-dot-flash {
+    animation: status-dot-flash 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .row-flash,
+    .status-dot-flash,
+    .reveal,
+    .animate-fade-up {
+      animation: none !important;
+    }
+  }
+
+  /* Skeleton loading row — bg-paper-2 with a slow pulse. Used during
+     the initial fetch to hold the layout open without the cartoonish
+     spinner-on-blank-page anti-pattern (NN/G recommends skeleton over
+     spinner for content lists). */
+  .skeleton-bar {
+    @apply bg-paper-2 rounded-[2px] animate-pulse;
+  }
+
+  /* Refresh-button rotations.
+     `animate-spin-once`  — 360° over 600ms with the same easing curve
+                             as the editorial reveal. Keyed remount on
+                             the consumer side replays the animation
+                             on each click.
+     `animate-spin-slow`  — continuous 1.4s linear rotation while the
+                             button is in `loading` state. Subtle
+                             enough not to draw attention but signals
+                             work in progress. */
+  @keyframes spin-once {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  .animate-spin-once {
+    animation: spin-once 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .animate-spin-slow {
+    animation: spin-once 1400ms linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-spin-once,
+    .animate-spin-slow {
+      animation: none !important;
+    }
+  }
+
+  /* ─── Gift recipient surface ───────────────────────────────────────
+     Slightly warmer treatment than the rest of the app: gold-leaf gradient
+     halo around the amount, soft confetti drift on success. Editorial-
+     celebratory, not crypto-bro confetti — long durations, low opacity,
+     small particle count. The recipient page IS the moment of delight,
+     so we let ourselves be a touch more expressive here than anywhere
+     else. */
+
+  .gift-halo {
+    background: radial-gradient(
+      ellipse at 30% 20%,
+      rgba(106, 36, 32, 0.08) 0%,
+      rgba(106, 36, 32, 0.02) 40%,
+      transparent 70%
+    );
+  }
+
+  /* Slow ascending drift used for the four gold dots on the success
+     state. Each dot gets a different animation-delay (inline) so they
+     don't pulse in lockstep. */
+  @keyframes gift-drift {
+    0%   { transform: translateY(0) translateX(0); opacity: 0; }
+    20%  { opacity: 0.7; }
+    50%  { transform: translateY(-22px) translateX(8px); opacity: 0.6; }
+    100% { transform: translateY(-44px) translateX(-2px); opacity: 0; }
+  }
+  .gift-drift {
+    animation: gift-drift 4.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .gift-drift {
+      animation: none !important;
+      opacity: 0.4;
+    }
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Wallet adapter (@solana/wallet-adapter-react-ui) overrides.
+
+   These rules MUST live OUTSIDE @layer components. Tailwind's content
+   purger scans source files for class references; selectors that don't
+   appear in the JSX (because they're injected at runtime by the package)
+   get stripped from layered CSS. Plain unlayered CSS is never purged.
+
+   Default theme: DM Sans, dark navy. Reskinned: Switzer, cream paper.
+   ───────────────────────────────────────────────────────────────────── */
+
+.wallet-adapter-button,
+.wallet-adapter-modal,
+.wallet-adapter-modal-wrapper,
+.wallet-adapter-modal-title,
+.wallet-adapter-modal-list,
+.wallet-adapter-modal-list .wallet-adapter-button,
+.wallet-adapter-modal-list-more {
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+  letter-spacing: -0.005em !important;
+}
+
+.wallet-adapter-button {
+  color: #1c1712 !important;
+}
+
+/* Trigger chip — pill-shaped wallet control. Distinct from the editorial
+   page CTAs (those are slightly-rounded rectangles in oxblood); this one
+   reads as a system / account control via the full-radius pill shape +
+   subtle paper-2 fill on hover. */
+.wallet-adapter-button-trigger {
+  background-color: rgba(231, 224, 207, 0.35) !important; /* paper-2 @ 35% */
+  border: 1px solid #d6ceba !important; /* line — hairline, not line-2 */
+  border-radius: 999px !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+  font-weight: 500 !important;
+  font-size: 12.5px !important;
+  letter-spacing: -0.005em !important;
+  text-transform: none !important;
+  height: auto !important;
+  padding: 7px 14px 7px 12px !important;
+  color: #1c1712 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, box-shadow 180ms ease !important;
+  box-shadow: 0 1px 0 rgba(28, 23, 18, 0.02) !important;
+}
+
+.wallet-adapter-button-trigger:hover {
+  background-color: rgba(231, 224, 207, 0.7) !important; /* paper-2 @ 70% */
+  border-color: #1c1712 !important;
+  color: #1c1712 !important;
+  box-shadow: 0 4px 14px -8px rgba(28, 23, 18, 0.18) !important;
+}
+
+.wallet-adapter-button-trigger:focus-visible {
+  outline: none !important;
+  border-color: #1c1712 !important;
+  box-shadow: 0 0 0 3px rgba(106, 36, 32, 0.18) !important; /* gold @ 18% */
+}
+
+/* The wallet logo icon that appears when connected — keep it tight. */
+.wallet-adapter-button-trigger .wallet-adapter-button-start-icon,
+.wallet-adapter-button-trigger .wallet-adapter-button-start-icon img {
+  width: 14px !important;
+  height: 14px !important;
+  margin-right: 0 !important;
+}
+
+/* Dropdown when connected (Copy address / Change wallet / Disconnect) */
+.wallet-adapter-dropdown-list {
+  background-color: #f8f4e9 !important;
+  border: 1px solid #d6ceba !important;
+  border-radius: 3px !important;
+  box-shadow: 0 10px 40px -18px rgba(28, 23, 18, 0.22) !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+}
+
+.wallet-adapter-dropdown-list-item {
+  color: #1c1712 !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  background-color: transparent !important;
+}
+
+.wallet-adapter-dropdown-list-item:hover {
+  background-color: #e7e0cf !important;
+  color: #6a2420 !important;
+}
+
+/* "Select Wallet" modal */
+.wallet-adapter-modal-overlay {
+  background: rgba(28, 23, 18, 0.55) !important;
+  backdrop-filter: blur(2px);
+}
+
+.wallet-adapter-modal-wrapper {
+  background-color: #f8f4e9 !important;
+  border: 1px solid #d6ceba !important;
+  border-radius: 4px !important;
+  box-shadow: 0 24px 60px -24px rgba(28, 23, 18, 0.35) !important;
+  color: #1c1712 !important;
+  max-width: 420px !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+}
+
+.wallet-adapter-modal-title {
+  color: #1c1712 !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+  font-size: 22px !important;
+  font-weight: 500 !important;
+  line-height: 1.15 !important;
+  letter-spacing: -0.02em !important;
+  padding: 36px 32px 24px 32px !important;
+  text-align: left !important;
+}
+
+@media (max-width: 480px) {
+  .wallet-adapter-modal-title {
+    font-size: 20px !important;
+  }
+}
+
+.wallet-adapter-modal-button-close {
+  background: transparent !important;
+  border: 1px solid #d6ceba !important;
+  border-radius: 999px !important;
+  width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  top: 16px !important;
+  right: 16px !important;
+  transition: border-color 160ms ease, background-color 160ms ease !important;
+}
+
+.wallet-adapter-modal-button-close svg {
+  fill: #736b57 !important;
+  width: 12px !important;
+  height: 12px !important;
+  transition: fill 160ms ease !important;
+}
+
+.wallet-adapter-modal-button-close:hover {
+  background-color: #e7e0cf !important;
+  border-color: #1c1712 !important;
+}
+
+.wallet-adapter-modal-button-close:hover svg {
+  fill: #1c1712 !important;
+}
+
+/* Wallet list inside the modal */
+.wallet-adapter-modal-list {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button {
+  background-color: transparent !important;
+  border: none !important;
+  border-top: 1px solid #d6ceba !important;
+  border-radius: 0 !important;
+  color: #1c1712 !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+  font-size: 14.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  padding: 16px 32px !important;
+  height: auto !important;
+  transition: background-color 160ms ease, color 160ms ease !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button:hover {
+  background-color: #e7e0cf !important;
+  color: #6a2420 !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button:last-of-type {
+  border-bottom: 1px solid #d6ceba !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button-end-icon,
+.wallet-adapter-modal-list .wallet-adapter-button-start-icon,
+.wallet-adapter-modal-list .wallet-adapter-button-end-icon img,
+.wallet-adapter-modal-list .wallet-adapter-button-start-icon img {
+  width: 22px !important;
+  height: 22px !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button span {
+  font-family: var(--font-mono), ui-monospace, monospace !important;
+  font-size: 11px !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  color: #a59c84 !important;
+  opacity: 1 !important;
+}
+
+/* "More options" expander */
+.wallet-adapter-modal-list-more {
+  color: #736b57 !important;
+  font-family: var(--font-sans), system-ui, sans-serif !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  padding: 14px 32px 24px 32px !important;
+  align-self: flex-start !important;
+  transition: color 160ms ease !important;
+}
+
+.wallet-adapter-modal-list-more:hover {
+  color: #1c1712 !important;
+}
+
+.wallet-adapter-modal-list-more svg {
+  fill: currentColor !important;
+  width: 10px !important;
+  height: 10px !important;
+}

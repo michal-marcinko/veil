@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Veil — single private invoice</title>
+  <desc id="desc">A page with a single person silhouette being veiled by a descending fabric.</desc>
+
+  <defs>
+    <linearGradient id="pageFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#f5f0e6"/>
+    </linearGradient>
+
+    <linearGradient id="veilFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbf6ec"/>
+      <stop offset="0.55" stop-color="#f3ede2"/>
+      <stop offset="1" stop-color="#f9f4ea"/>
+    </linearGradient>
+
+    <linearGradient id="foldFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a2823"/>
+      <stop offset="1" stop-color="#11100e"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-12%" y="-12%" width="124%" height="124%">
+      <feDropShadow dx="0" dy="3" stdDeviation="2.2" flood-color="#1A1814" flood-opacity="0.16"/>
+    </filter>
+
+    <clipPath id="pageClip">
+      <path d="M138 83 H380 V358 L334 410 H138 Z"/>
+    </clipPath>
+
+    <style>
+      :root {
+        --ink: #1A1814;
+      }
+
+      .stroke-main {
+        stroke: var(--ink);
+        stroke-width: 6.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        fill: none;
+      }
+
+      .stroke-detail {
+        stroke: var(--ink);
+        stroke-width: 5.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        fill: none;
+      }
+
+      .stroke-detail-small {
+        stroke: var(--ink);
+        stroke-width: 4.4;
+        stroke-linecap: round;
+        fill: none;
+      }
+
+      .fill-ink {
+        fill: var(--ink);
+      }
+
+      @keyframes veil-descend {
+        0% {
+          transform: scaleY(0);
+          opacity: 0;
+        }
+        18% {
+          opacity: 1;
+        }
+        100% {
+          transform: scaleY(1);
+          opacity: 1;
+        }
+      }
+
+      .veil-animate {
+        transform-box: fill-box;
+        transform-origin: 50% 0%;
+        animation: veil-descend 1100ms cubic-bezier(0.19, 1, 0.22, 1) 280ms both;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .veil-animate {
+          animation: none !important;
+        }
+      }
+    </style>
+  </defs>
+
+  <g id="logo-root">
+    <!-- PAGE BASE -->
+    <g id="page" filter="url(#softShadow)">
+      <path id="page-fill" d="M138 83 H380 V358 L334 410 H138 Z" fill="url(#pageFill)"/>
+      <path d="M138 83 H380" class="stroke-main"/>
+      <path d="M138 83 V280" class="stroke-main"/>
+      <path d="M380 83 V257" class="stroke-main"/>
+      <path d="M138 280 V410" class="stroke-main"/>
+      <path d="M138 410 H334" class="stroke-main"/>
+      <path d="M380 257 V358" class="stroke-main"/>
+    </g>
+
+    <!-- CONTENT CLIPPED TO PAGE -->
+    <g id="page-content" clip-path="url(#pageClip)">
+      <!-- Hidden by veil — single person bust portrait. Head is centered
+           above the page's horizontal center; shoulders curve from the
+           page's left interior corner up over the head and back down to
+           the right corner, creating a portrait silhouette that fills
+           the upper page area before the veil descends. -->
+      <g id="hidden-content">
+        <circle cx="259" cy="155" r="28" class="stroke-detail"/>
+        <path d="M190 275 C190 220 213 195 259 195 C305 195 328 220 328 275" class="stroke-detail"/>
+      </g>
+
+      <!-- Always visible lower content — invoice line items / records -->
+      <g id="visible-content">
+        <path d="M161 297 H213" class="stroke-detail"/>
+        <path d="M161 317 H219" class="stroke-detail"/>
+        <path d="M161 338 H206" class="stroke-detail"/>
+
+        <circle cx="286" cy="295" r="6.2" class="fill-ink"/>
+        <path d="M304 295 H349" class="stroke-detail-small"/>
+        <circle cx="286" cy="317" r="6.2" class="fill-ink"/>
+        <path d="M304 317 H352" class="stroke-detail-small"/>
+        <circle cx="286" cy="339" r="6.2" class="fill-ink"/>
+        <path d="M304 339 H351" class="stroke-detail-small"/>
+      </g>
+    </g>
+
+    <!-- FOLD -->
+    <g id="fold">
+      <path id="fold-fill" d="M334 410 L380 358 V410 Z" fill="url(#foldFill)"/>
+      <path id="fold-edge" d="M334 410 L380 358" class="stroke-main"/>
+    </g>
+
+    <!-- VEIL -->
+    <g id="veil" class="veil-animate">
+      <path id="veil-shadow"
+            d="M138 279 C178 294 224 280 270 263 C318 245 359 236 392 240"
+            stroke="#1A1814" stroke-width="11" stroke-linecap="round" fill="none" opacity="0.13"/>
+
+      <path id="veil-body"
+            d="M138 83 H378
+               C376 133 372 177 391 220
+               C396 232 404 240 410 245
+               C400 245 393 250 388 257
+               C348 239 305 246 262 264
+               C216 283 173 291 138 280 Z"
+            fill="url(#veilFill)"
+            stroke="#1A1814"
+            stroke-width="6.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+
+      <path id="veil-inner-fold"
+            d="M372 92 C358 160 324 219 265 253 C222 277 176 286 140 280"
+            stroke="#1A1814" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.10"/>
+
+      <path id="veil-front-edge"
+            d="M138 280 C178 294 224 280 270 263 C318 245 359 236 392 240"
+            stroke="#1A1814" stroke-width="6.8" stroke-linecap="round" fill="none"/>
+
+      <path id="veil-curl"
+            d="M392 240 C403 238 409 242 410 245 C401 248 394 251 388 257"
+            stroke="#1A1814" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </g>
+  </g>
+</svg>

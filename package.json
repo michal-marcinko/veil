@@ -1,0 +1,25 @@
+{
+  "name": "veil-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "app"
+  ],
+  "scripts": {
+    "dev": "npm --workspace app run dev",
+    "build": "npm --workspace app run build",
+    "start": "npm --workspace app run start",
+    "test": "npm --workspace app run test",
+    "anchor:build": "cd programs/invoice-registry && anchor build",
+    "anchor:test": "cd programs/invoice-registry && anchor test",
+    "anchor:deploy:devnet": "cd programs/invoice-registry && anchor deploy --provider.cluster devnet",
+    "veilpay:build": "cd programs/veil-pay && anchor build",
+    "veilpay:test": "cd programs/veil-pay && npm test"
+  },
+  "overrides": {
+    "react": "18.3.0",
+    "react-dom": "18.3.0",
+    "@solana/wallet-adapter-react": "0.15.35",
+    "@solana/wallet-adapter-base": "0.9.23"
+  }
+}
