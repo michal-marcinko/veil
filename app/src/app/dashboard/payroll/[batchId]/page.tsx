@@ -201,14 +201,14 @@ function RecipientRow({ row, rowIndex, packet, walletBase58 }: RowProps) {
             {downloading ? "Generating…" : "Download payslip PDF"}
           </button>
           {/*
-            Per-row compliance grant from a payroll row is a v2 feature —
-            payroll rows don't have an Invoice PDA today, and the
-            compliance page is invoice-scoped. Surface an explanatory
-            link to the compliance page (pre-fill skipped) so the user
-            can manually pick invoices if they have any.
+            Payroll-scoped audit grants now live on the compliance
+            page's payroll tab — selecting a batch there emits a self-
+            contained signed-packet URL (the same one the publishing
+            modal hands the operator after a run). Deep-link in so the
+            operator lands on the right surface in payroll mode.
           */}
           <Link
-            href="/dashboard/compliance"
+            href="/dashboard/compliance?mode=payroll"
             className="text-[11.5px] text-ink underline-offset-2 hover:underline"
           >
             Send compliance grant

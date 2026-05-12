@@ -66,6 +66,14 @@ import {
   type MintOption,
 } from "./_components/PresetPills";
 import { GrantResultCard } from "./_components/GrantResultCard";
+import {
+  loadCachedPayrollRuns,
+  type CachedPayrollRun,
+} from "@/lib/payroll-runs-storage";
+import {
+  encodePayrollPacket,
+  formatPayrollAmount,
+} from "@/lib/private-payroll";
 
 // ---------------------------------------------------------------------------
 // Types — internal helpers carried through render.
@@ -99,6 +107,25 @@ interface GrantResult {
   mintLabel: string;
 }
 
+// Payroll grant result. Each selected payroll batch becomes its own
+// self-contained packet URL — they're not aggregable the way invoices
+// are because each packet is a single signed artifact scoped to one
+// batch.
+interface PayrollGrantLink {
+  batchId: string;
+  url: string;
+  recipientCount: number;
+  totalAmount: string;
+  symbol: string;
+}
+
+interface PayrollGrantResult {
+  links: PayrollGrantLink[];
+  mintLabel: string;
+}
+
+type ViewMode = "invoices" | "payroll";
+
 // ---------------------------------------------------------------------------
 // Page.
 // ---------------------------------------------------------------------------
@@ -118,6 +145,10 @@ export default function CompliancePage() {
   // compliance flow is invoice-scoped, and payroll runs don't have
   // associated Invoice PDAs. v2 wires per-run grants natively.
   const seedPda = searchParams?.get("seed") ?? null;
+
+  // ?mode=payroll — landing in payroll mode from a payroll drill-in.
+  // We honour this once on first render; user toggles afterwards.
+  const seedMode = searchParams?.get("mode") ?? null;
 
   // Outgoing-transition state. The "← Activity" back link sets this
   // before pushing the next route so the current surface fades out
@@ -139,11 +170,24 @@ export default function CompliancePage() {
   const [customToDate, setCustomToDate] = useState<string>("");
   const [activeMint, setActiveMint] = useState<string>(USDC_MINT.toBase58());
 
+  // View mode — invoices vs. payroll batches. Invoices keep their full
+  // re-encryption + Arweave grant flow; payroll batches reuse the
+  // self-contained signed-packet URL the publishing modal already
+  // emits (no re-encryption needed; each packet is signed end-to-end).
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    seedMode === "payroll" ? "payroll" : "invoices",
+  );
+
   // Invoice fetch state.
   const [invoices, setInvoices] = useState<PickerRow[]>([]);
   const [labels, setLabels] = useState<Map<string, InvoiceLabel>>(new Map());
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Payroll-run state — hydrated from the local cache on connect.
+  const [payrollRuns, setPayrollRuns] = useState<CachedPayrollRun[]>([]);
+  const [selectedPayroll, setSelectedPayroll] = useState<Set<string>>(new Set());
+  const [payrollResult, setPayrollResult] = useState<PayrollGrantResult | null>(null);
 
   // Selection state. We default to "all currently in-scope" — flipping
   // a preset pill resets selection to the new in-scope set so the
@@ -201,6 +245,22 @@ export default function CompliancePage() {
     if (wallet.connected) void refreshInvoices();
   }, [wallet.connected, refreshInvoices]);
 
+  // Hydrate cached payroll runs whenever the wallet changes. Cheap
+  // localStorage read — no network. We also subscribe to the storage
+  // event so a payroll run signed in another tab shows up live.
+  useEffect(() => {
+    if (!wallet.publicKey) return;
+    const walletBase58 = wallet.publicKey.toBase58();
+    setPayrollRuns(loadCachedPayrollRuns(walletBase58));
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key.includes(walletBase58)) {
+        setPayrollRuns(loadCachedPayrollRuns(walletBase58));
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [wallet.publicKey]);
+
   // ---------------- Compute current scope window ----------------
 
   const scopeWindow = useMemo(() => {
@@ -230,6 +290,23 @@ export default function CompliancePage() {
       return true;
     });
   }, [invoices, activeMint, scopeWindow]);
+
+  // In-scope payroll runs — same mint + date semantics as invoices.
+  // The packet's createdAt is an ISO string, so we parse to a unix
+  // second for the bounds comparison.
+  const inScopePayroll = useMemo(() => {
+    return payrollRuns.filter((entry) => {
+      const packet = entry.signed.packet;
+      if (activeMint && packet.mint !== activeMint) return false;
+      const createdSec = Math.floor(Date.parse(packet.createdAt) / 1000);
+      if (Number.isNaN(createdSec)) return false;
+      if (scopeWindow.fromTs != null && createdSec < scopeWindow.fromTs)
+        return false;
+      if (scopeWindow.toTs != null && createdSec > scopeWindow.toTs)
+        return false;
+      return true;
+    });
+  }, [payrollRuns, activeMint, scopeWindow]);
 
   // ---------------- Selection effect ----------------
   //
@@ -261,6 +338,19 @@ export default function CompliancePage() {
     }
     setSelected(new Set(inScopeRows.map((r) => r.pda)));
   }, [inScopeKey, seedPda, seedApplied]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mirror the invoice "select all in scope" effect for payroll runs.
+  // When the active mint / preset changes, reset the selection set to
+  // "everything in the new scope" — same mental model as invoices.
+  const inScopePayrollKey = useMemo(
+    () => inScopePayroll.map((e) => e.signed.packet.batchId).join(","),
+    [inScopePayroll],
+  );
+  useEffect(() => {
+    setSelectedPayroll(
+      new Set(inScopePayroll.map((e) => e.signed.packet.batchId)),
+    );
+  }, [inScopePayrollKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------- Selection helpers ----------------
 
@@ -367,6 +457,76 @@ export default function CompliancePage() {
   function resetGrant() {
     setGrantResult(null);
     setGenerateError(null);
+    setPayrollResult(null);
+  }
+
+  // ---------------- Payroll selection helpers ----------------
+
+  function togglePayrollSelect(batchId: string, next: boolean) {
+    setSelectedPayroll((prev) => {
+      const copy = new Set(prev);
+      if (next) copy.add(batchId);
+      else copy.delete(batchId);
+      return copy;
+    });
+  }
+
+  function togglePayrollSelectAll() {
+    setSelectedPayroll((prev) => {
+      const allSelected = inScopePayroll.every((e) =>
+        prev.has(e.signed.packet.batchId),
+      );
+      if (allSelected) return new Set();
+      return new Set(inScopePayroll.map((e) => e.signed.packet.batchId));
+    });
+  }
+
+  const selectedPayrollCount = useMemo(
+    () =>
+      inScopePayroll.filter((e) => selectedPayroll.has(e.signed.packet.batchId))
+        .length,
+    [inScopePayroll, selectedPayroll],
+  );
+
+  const allPayrollInScopeSelected =
+    inScopePayroll.length > 0 &&
+    inScopePayroll.every((e) => selectedPayroll.has(e.signed.packet.batchId));
+
+  // ---------------- Generate payroll links ----------------
+  //
+  // Each selected payroll batch becomes its own self-contained signed-
+  // packet URL. The /payroll/packet page already decodes a base64-url
+  // SignedPayrollPacket from the fragment — we reuse that path so the
+  // disclosure surface is the same one the publishing modal already
+  // hands the user after a run.
+  function handleGeneratePayroll() {
+    if (selectedPayrollCount === 0) return;
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    const links: PayrollGrantLink[] = [];
+    for (const entry of inScopePayroll) {
+      const batchId = entry.signed.packet.batchId;
+      if (!selectedPayroll.has(batchId)) continue;
+      const packet = entry.signed.packet;
+      const blob = encodePayrollPacket(entry.signed);
+      const url = `${origin}/payroll/packet#${blob}`;
+      let totalUnits = 0n;
+      for (const row of packet.rows) {
+        try {
+          totalUnits += BigInt(row.amount);
+        } catch {
+          // skip malformed amount strings
+        }
+      }
+      links.push({
+        batchId,
+        url,
+        recipientCount: packet.rows.length,
+        totalAmount: formatPayrollAmount(totalUnits, packet.decimals),
+        symbol: packet.symbol,
+      });
+    }
+    setPayrollResult({ links, mintLabel: mintLabel(activeMint) });
   }
 
   // ---------------- Mint options ----------------
@@ -426,7 +586,7 @@ export default function CompliancePage() {
             from the prior build is gone here. The GrantResultCard
             carries its own "Auditor link ready" eyebrow, so removing
             this block doesn't leave the success state header-less. */}
-        {!grantResult && (
+        {!grantResult && !payrollResult && (
           <div className="max-w-3xl reveal">
             <span className="eyebrow">Auditor links</span>
             <h1 className="mt-3 font-display text-ink text-[40px] md:text-[52px] leading-[1.04] tracking-[-0.02em]">
@@ -463,69 +623,122 @@ export default function CompliancePage() {
               onReset={resetGrant}
             />
           </div>
+        ) : payrollResult ? (
+          <div className="flex justify-center pt-2">
+            <PayrollGrantResultCard
+              result={payrollResult}
+              onReset={resetGrant}
+            />
+          </div>
         ) : (
           <div className="max-w-3xl">
             <div className="mt-9">
-              <PresetPills
-                activePresetId={activePresetId}
-                onSelectPreset={setActivePresetId}
-                customFromDate={customFromDate}
-                customToDate={customToDate}
-                onChangeCustomFromDate={setCustomFromDate}
-                onChangeCustomToDate={setCustomToDate}
-                mintOptions={mintOptions}
-                activeMint={activeMint}
-                onSelectMint={setActiveMint}
+              <ViewModeToggle
+                viewMode={viewMode}
+                onChange={setViewMode}
+                invoiceCount={invoices.length}
+                payrollCount={payrollRuns.length}
               />
+              <div className="mt-5">
+                <PresetPills
+                  activePresetId={activePresetId}
+                  onSelectPreset={setActivePresetId}
+                  customFromDate={customFromDate}
+                  customToDate={customToDate}
+                  onChangeCustomFromDate={setCustomFromDate}
+                  onChangeCustomToDate={setCustomToDate}
+                  mintOptions={mintOptions}
+                  activeMint={activeMint}
+                  onSelectMint={setActiveMint}
+                />
+              </div>
             </div>
 
-            <PickerHeader
-              selectedCount={selectedCount}
-              totalSelected={selectedTotal.formatted}
-              symbol={selectedTotal.symbol}
-              allInScopeSelected={allInScopeSelected}
-              onToggleAll={toggleSelectAll}
-              inScopeCount={inScopeRows.length}
-            />
+            {viewMode === "invoices" ? (
+              <>
+                <PickerHeader
+                  selectedCount={selectedCount}
+                  totalSelected={selectedTotal.formatted}
+                  symbol={selectedTotal.symbol}
+                  allInScopeSelected={allInScopeSelected}
+                  onToggleAll={toggleSelectAll}
+                  inScopeCount={inScopeRows.length}
+                />
 
-            <PickerList
-              fetching={fetching}
-              rows={inScopeRows}
-              labels={labels}
-              selected={selected}
-              onToggle={toggleSelect}
-            />
+                <PickerList
+                  fetching={fetching}
+                  rows={inScopeRows}
+                  labels={labels}
+                  selected={selected}
+                  onToggle={toggleSelect}
+                />
 
-            {generateError && (
-              <ErrorBanner message={generateError} />
-            )}
-
-            <div className="mt-8 flex flex-col sm:flex-row sm:items-center gap-4">
-              <button
-                type="button"
-                disabled={submitting || selectedCount === 0}
-                onClick={handleGenerate}
-                className="btn-primary md:min-w-[340px] justify-center"
-              >
-                {submitting ? (
-                  <span className="inline-flex items-center gap-3">
-                    <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
-                    {progressMsg ?? "Generating link…"}
-                  </span>
-                ) : selectedCount === 0 ? (
-                  <span>Select invoices to grant access</span>
-                ) : (
-                  <span>
-                    Generate auditor link <span aria-hidden>→</span>
-                    <span className="ml-2 opacity-80 tabular-nums">
-                      {selectedCount} invoice{selectedCount === 1 ? "" : "s"}
-                      {" · "}
-                      {selectedTotal.formatted} {selectedTotal.symbol}
-                    </span>
-                  </span>
+                {generateError && (
+                  <ErrorBanner message={generateError} />
                 )}
-              </button>
-            </div>
+
+                <div className="mt-8 flex flex-col sm:flex-row sm:items-center gap-4">
+                  <button
+                    type="button"
+                    disabled={submitting || selectedCount === 0}
+                    onClick={handleGenerate}
+                    className="btn-primary md:min-w-[340px] justify-center"
+                  >
+                    {submitting ? (
+                      <span className="inline-flex items-center gap-3">
+                        <span className="h-1.5 w-1.5 rounded-full bg-paper animate-slow-pulse" />
+                        {progressMsg ?? "Generating link…"}
+                      </span>
+                    ) : selectedCount === 0 ? (
+                      <span>Select invoices to grant access</span>
+                    ) : (
+                      <span>
+                        Generate auditor link <span aria-hidden>→</span>
+                        <span className="ml-2 opacity-80 tabular-nums">
+                          {selectedCount} invoice{selectedCount === 1 ? "" : "s"}
+                          {" · "}
+                          {selectedTotal.formatted} {selectedTotal.symbol}
+                        </span>
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <PayrollPickerHeader
+                  selectedCount={selectedPayrollCount}
+                  allInScopeSelected={allPayrollInScopeSelected}
+                  onToggleAll={togglePayrollSelectAll}
+                  inScopeCount={inScopePayroll.length}
+                />
+                <PayrollPickerList
+                  rows={inScopePayroll}
+                  selected={selectedPayroll}
+                  onToggle={togglePayrollSelect}
+                />
+                <div className="mt-8 flex flex-col sm:flex-row sm:items-center gap-4">
+                  <button
+                    type="button"
+                    disabled={selectedPayrollCount === 0}
+                    onClick={handleGeneratePayroll}
+                    className="btn-primary md:min-w-[340px] justify-center"
+                  >
+                    {selectedPayrollCount === 0 ? (
+                      <span>Select payroll batches to grant access</span>
+                    ) : (
+                      <span>
+                        Generate auditor link <span aria-hidden>→</span>
+                        <span className="ml-2 opacity-80 tabular-nums">
+                          {selectedPayrollCount} batch
+                          {selectedPayrollCount === 1 ? "" : "es"}
+                        </span>
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
 
             <HowThisWorksNote />
           </div>
@@ -1031,6 +1244,381 @@ async function loadLabels(
     }),
   );
   return next;
+}
+
+// ---------------------------------------------------------------------------
+// ViewModeToggle — segmented control deciding which surface the picker
+// renders: invoices (re-encrypted scoped grant) vs. payroll batches
+// (self-contained signed-packet link). The visual register matches the
+// preset pills so the toolbar reads as one row of controls.
+// ---------------------------------------------------------------------------
+
+function ViewModeToggle({
+  viewMode,
+  onChange,
+  invoiceCount,
+  payrollCount,
+}: {
+  viewMode: ViewMode;
+  onChange: (next: ViewMode) => void;
+  invoiceCount: number;
+  payrollCount: number;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Switch between invoices and payroll batches"
+      className="inline-flex items-center gap-1 border border-line rounded-full p-1 bg-paper-3"
+    >
+      <ViewModeButton
+        active={viewMode === "invoices"}
+        onClick={() => onChange("invoices")}
+        label="Invoices"
+        count={invoiceCount}
+      />
+      <ViewModeButton
+        active={viewMode === "payroll"}
+        onClick={() => onChange("payroll")}
+        label="Payroll batches"
+        count={payrollCount}
+      />
+    </div>
+  );
+}
+
+function ViewModeButton({
+  active,
+  onClick,
+  label,
+  count,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count: number;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={[
+        "px-3.5 py-1.5 rounded-full",
+        "font-mono text-[10.5px] tracking-[0.14em] uppercase",
+        "transition-colors duration-150 inline-flex items-center gap-2",
+        active
+          ? "bg-ink text-paper"
+          : "text-ink/55 hover:text-ink hover:bg-paper-2/40",
+      ].join(" ")}
+    >
+      <span>{label}</span>
+      <span
+        className={[
+          "text-[10px] tabular-nums",
+          active ? "text-paper/70" : "text-ink/35",
+        ].join(" ")}
+      >
+        {count}
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PayrollPickerHeader — matches PickerHeader visually; no per-row total
+// because each payroll batch is a self-contained packet, so the
+// aggregate "amount" line would conflate distinct currencies / runs.
+// ---------------------------------------------------------------------------
+
+function PayrollPickerHeader({
+  selectedCount,
+  allInScopeSelected,
+  onToggleAll,
+  inScopeCount,
+}: {
+  selectedCount: number;
+  allInScopeSelected: boolean;
+  onToggleAll: () => void;
+  inScopeCount: number;
+}) {
+  return (
+    <div className="mt-8 mb-2 flex items-center justify-between gap-4 px-4 py-3 border-b border-line/60">
+      <button
+        type="button"
+        onClick={onToggleAll}
+        disabled={inScopeCount === 0}
+        aria-pressed={allInScopeSelected}
+        className="inline-flex items-center gap-2.5 font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/55 hover:text-ink transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        <span
+          aria-hidden
+          className={[
+            "inline-flex h-[16px] w-[16px] items-center justify-center rounded-[3px] border transition-colors",
+            allInScopeSelected
+              ? "bg-ink border-ink text-paper"
+              : selectedCount > 0
+                ? "bg-paper-3 border-ink/50"
+                : "bg-paper-3 border-line",
+          ].join(" ")}
+        >
+          {allInScopeSelected ? (
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path
+                d="M2 5l2 2 4-4"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          ) : selectedCount > 0 ? (
+            <span className="block h-[2px] w-[8px] bg-ink/70" />
+          ) : null}
+        </span>
+        <span>{allInScopeSelected ? "Deselect all" : "Select all"}</span>
+      </button>
+
+      <div className="font-mono text-[11px] tracking-[0.14em] uppercase text-ink/55 tabular-nums">
+        <span className="text-ink">{selectedCount}</span>
+        <span className="text-ink/40"> / </span>
+        <span>{inScopeCount}</span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PayrollPickerList — renders one row per cached payroll batch in
+// scope. Each row mirrors the InvoiceRow visual language: a checkbox
+// affordance, a date, a primary label (batch id truncated), and an
+// amount on the right.
+// ---------------------------------------------------------------------------
+
+function PayrollPickerList({
+  rows,
+  selected,
+  onToggle,
+}: {
+  rows: CachedPayrollRun[];
+  selected: Set<string>;
+  onToggle: (batchId: string, next: boolean) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="border border-dashed border-line rounded-[4px] py-12 px-6 text-center mt-2">
+        <p className="font-display italic text-ink/80 text-[20px] leading-[1.3]">
+          No payroll batches in this scope.
+        </p>
+        <p className="mt-2 text-[13px] text-ink/55 max-w-md mx-auto">
+          Run a private payroll batch and it&apos;ll appear here, ready to
+          share with your auditor.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <ul className="divide-y divide-ink/5">
+      {rows.map((entry) => {
+        const packet = entry.signed.packet;
+        const batchId = packet.batchId;
+        const isSelected = selected.has(batchId);
+        const paidCount = packet.rows.filter((r) => r.status === "paid").length;
+        let totalUnits = 0n;
+        for (const r of packet.rows) {
+          try {
+            totalUnits += BigInt(r.amount);
+          } catch {
+            // skip
+          }
+        }
+        const totalLabel = formatPayrollAmount(totalUnits, packet.decimals);
+        const created = new Date(packet.createdAt);
+        const dateLabel = isNaN(created.getTime())
+          ? "—"
+          : created.toLocaleDateString(undefined, {
+              year: "numeric",
+              month: "short",
+              day: "numeric",
+            });
+        const truncatedBatch =
+          batchId.length > 22
+            ? `${batchId.slice(0, 14)}…${batchId.slice(-6)}`
+            : batchId;
+        return (
+          <li key={batchId}>
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={isSelected}
+              aria-label={`${isSelected ? "Deselect" : "Select"} payroll batch ${batchId}`}
+              onClick={() => onToggle(batchId, !isSelected)}
+              className="w-full text-left px-4 py-4 hover:bg-paper-2/40 transition-colors duration-150 flex items-center gap-4"
+            >
+              <span
+                aria-hidden
+                className={[
+                  "inline-flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-[3px] border transition-colors",
+                  isSelected
+                    ? "bg-ink border-ink text-paper"
+                    : "bg-paper-3 border-line",
+                ].join(" ")}
+              >
+                {isSelected && (
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path
+                      d="M2 5l2 2 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
+              </span>
+              <div className="flex-1 min-w-0 grid grid-cols-[6rem_1fr_auto] gap-4 items-baseline">
+                <span className="font-mono text-[11px] tracking-[0.06em] uppercase text-ink/55 tabular-nums">
+                  {dateLabel}
+                </span>
+                <div className="min-w-0">
+                  <div className="font-mono text-[13px] text-ink truncate">
+                    {truncatedBatch}
+                  </div>
+                  <div className="mt-0.5 text-[12px] text-muted">
+                    {packet.rows.length} recipient
+                    {packet.rows.length === 1 ? "" : "s"}
+                    {" · "}
+                    {paidCount} paid
+                  </div>
+                </div>
+                <span className="font-mono text-[13px] text-ink tabular-nums">
+                  {totalLabel} {packet.symbol}
+                </span>
+              </div>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PayrollGrantResultCard — success state for the payroll path. We can
+// emit multiple links (one per selected batch), so the layout adapts:
+// single-link surfaces a Copy button next to the URL the way the
+// invoice flow does; multi-link surfaces a stacked list.
+// ---------------------------------------------------------------------------
+
+function PayrollGrantResultCard({
+  result,
+  onReset,
+}: {
+  result: PayrollGrantResult;
+  onReset: () => void;
+}) {
+  const single = result.links.length === 1 ? result.links[0] : null;
+
+  async function copyText(text: string) {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <section
+      className="reveal mt-10 max-w-2xl border border-sage/30 bg-paper-3 rounded-[4px] p-6 md:p-8"
+      aria-labelledby="payroll-grant-ready-heading"
+    >
+      <div className="flex items-baseline justify-between gap-4 mb-1">
+        <span id="payroll-grant-ready-heading" className="eyebrow text-sage">
+          {result.links.length === 1
+            ? "Payroll auditor link ready"
+            : `Payroll auditor links ready · ${result.links.length}`}
+        </span>
+        <button
+          type="button"
+          onClick={onReset}
+          className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/55 hover:text-ink transition-colors inline-flex items-center gap-1"
+        >
+          <span>Generate another grant</span>
+          <span aria-hidden>&rarr;</span>
+        </button>
+      </div>
+
+      <p className="mt-4 text-[15px] text-ink/85 leading-[1.55]">
+        {result.links.length === 1 && single ? (
+          <>
+            Auditor sees{" "}
+            <span className="tabular-nums font-medium text-ink">
+              {single.recipientCount}
+            </span>{" "}
+            recipient{single.recipientCount === 1 ? "" : "s"} ·{" "}
+            <span className="tabular-nums font-medium text-ink">
+              {single.totalAmount}
+            </span>{" "}
+            {single.symbol} · scoped to{" "}
+            <span className="font-mono text-[12px]">{result.mintLabel}</span>.
+          </>
+        ) : (
+          <>
+            One link per batch — each is a self-contained signed packet
+            scoped to a single payroll run on{" "}
+            <span className="font-mono text-[12px]">{result.mintLabel}</span>.
+          </>
+        )}
+      </p>
+
+      <div className="mt-6 space-y-5">
+        {result.links.map((link) => (
+          <div
+            key={link.batchId}
+            className="border-t border-line/60 pt-4 first:border-t-0 first:pt-0"
+          >
+            <div className="flex items-baseline justify-between gap-3 mb-2">
+              <span className="font-mono text-[11px] tracking-[0.08em] uppercase text-ink/70 truncate">
+                {link.batchId}
+              </span>
+              <span className="font-mono text-[10.5px] text-muted tabular-nums shrink-0">
+                {link.recipientCount} recipient
+                {link.recipientCount === 1 ? "" : "s"} · {link.totalAmount}{" "}
+                {link.symbol}
+              </span>
+            </div>
+            <div className="flex items-stretch gap-2">
+              <input
+                readOnly
+                value={link.url}
+                onFocus={(e) => e.currentTarget.select()}
+                onClick={(e) => e.currentTarget.select()}
+                className="flex-1 input-editorial font-mono text-[12px] select-all"
+                aria-label={`Payroll auditor URL for ${link.batchId}`}
+              />
+              <button
+                type="button"
+                onClick={() => copyText(link.url)}
+                className="shrink-0 px-4 border border-line rounded-[3px] font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink hover:bg-ink hover:text-paper transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-6 font-mono text-[10.5px] leading-relaxed text-muted max-w-md">
+        Each URL carries the full signed packet in its fragment — the
+        decryption isn&apos;t needed because the packet was signed by your
+        wallet at run time. Share over a trusted channel; anyone with the
+        link can read the batch.
+      </p>
+    </section>
+  );
 }
 
 function mintLabel(base58: string): string {
