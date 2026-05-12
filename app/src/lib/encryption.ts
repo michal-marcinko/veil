@@ -117,8 +117,29 @@ function storeMasterSig(walletAddress: string, signature: Uint8Array): void {
 }
 
 /**
+ * In-memory dedupe of concurrent in-flight signMessage calls per wallet.
+ *
+ * Without this, the dashboard's parallel effects (incoming invoices,
+ * pending claims, label decryption) can each call this function before
+ * the first signMessage resolves — and a wallet that's never signed
+ * before sees N popups stack at once. Phantom queues them gracefully;
+ * Solflare auto-cancels duplicates and surfaces all as `Cancelled`,
+ * blocking the recipient from ever loading.
+ *
+ * Fix: when a call is already in flight for a given wallet, return the
+ * SAME promise. All callers wait on the single popup. After it resolves,
+ * the signature is cached in localStorage and future sessions hit the
+ * fast path without ever entering this branch.
+ *
+ * Keyed by walletAddress so a wallet switch starts a fresh in-flight
+ * entry.
+ */
+const inFlightMasterSig = new Map<string, Promise<Uint8Array>>();
+
+/**
  * Returns the cached metadata master signature for this wallet, signing a
- * fixed message once if no cache exists. ONE popup per wallet, ever.
+ * fixed message once if no cache exists. ONE popup per wallet, ever —
+ * even when called concurrently from multiple effects.
  */
 export async function getOrCreateMetadataMasterSig(
   wallet: { signMessage?: (msg: Uint8Array) => Promise<Uint8Array> },
@@ -126,20 +147,39 @@ export async function getOrCreateMetadataMasterSig(
 ): Promise<Uint8Array> {
   const cached = loadCachedMasterSig(walletAddress);
   if (cached) return cached;
+
+  // Dedupe concurrent callers — share the same in-flight promise so
+  // N parallel callers yield 1 signMessage popup, not N.
+  const pending = inFlightMasterSig.get(walletAddress);
+  if (pending) return pending;
+
   if (typeof wallet?.signMessage !== "function") {
     throw new Error(
       "Wallet does not expose signMessage — cannot derive metadata master key.",
     );
   }
-  const message = new TextEncoder().encode(METADATA_MASTER_MESSAGE);
-  const signature = await wallet.signMessage(message);
-  if (signature.length !== METADATA_MASTER_SIG_BYTES) {
-    throw new Error(
-      `Unexpected signature length: ${signature.length} (expected ${METADATA_MASTER_SIG_BYTES})`,
-    );
-  }
-  storeMasterSig(walletAddress, signature);
-  return signature;
+
+  const promise = (async () => {
+    try {
+      const message = new TextEncoder().encode(METADATA_MASTER_MESSAGE);
+      const signature = await wallet.signMessage!(message);
+      if (signature.length !== METADATA_MASTER_SIG_BYTES) {
+        throw new Error(
+          `Unexpected signature length: ${signature.length} (expected ${METADATA_MASTER_SIG_BYTES})`,
+        );
+      }
+      storeMasterSig(walletAddress, signature);
+      return signature;
+    } finally {
+      // Always release the slot — success persists to localStorage, so
+      // subsequent calls hit the fast path; failures should allow a
+      // retry on the next call rather than permanently being stuck.
+      inFlightMasterSig.delete(walletAddress);
+    }
+  })();
+
+  inFlightMasterSig.set(walletAddress, promise);
+  return promise;
 }
 
 /**
