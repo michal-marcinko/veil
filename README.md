@@ -139,7 +139,7 @@ What's deliberately deferred and why: see [`docs/roadmap.md`](docs/roadmap.md). 
 
 - Mainnet launch (pending Blowfish review for Phantom support)
 - Shielded-pay wrapped inside VeilPay (today it's a 3-tx `signAllTransactions` batch; v2 wraps it in one ix)
-- Payroll-batch audit grants surfaced in the same compliance picker as invoices (shipped 2026-05-12)
+- Payroll-batch audit grants surfaced in the same compliance picker as invoices (shipped 2026-05-12). Each selected batch currently produces its own auditor URL since the signed packet is the disclosure unit. **v2**: bundle multiple batches under a single re-encrypted grant for accountants reviewing a quarter at once.
 - Settlement-side proofs replacing creator-attested `mark_paid` with an Umbra Merkle proof
 
 ## License
