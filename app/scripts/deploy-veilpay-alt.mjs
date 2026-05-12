@@ -37,13 +37,17 @@
 //  17. clock                                STATIC
 //
 // VeilPay outer ix adds:
-//   - depositor (signer)                    PER-USER
-//   - umbra_program                         STATIC
+//   - depositor (signer, writable post-Fix-2 — pays lock rent)  PER-USER
+//   - invoice                                                    PER-TX
+//   - lock PDA (PaymentIntentLock)                               PER-TX
+//   - invoice_registry_program                                   STATIC
+//   - system_program                                             STATIC (dedup)
+//   - umbra_program                                              STATIC
 //
 // (*) STATIC for our use case: devnet-only, wSOL-only mint. If we add
 //     another mint or move to mainnet, we redeploy the ALT.
 //
-// ALT'd accounts (13):
+// ALT'd accounts (14):
 //   1. UMBRA_PROGRAM_ID
 //   2. systemProgram
 //   3. tokenProgram (SPL Token)
@@ -57,6 +61,7 @@
 //  11. stealthPool PDA (index 0)
 //  12. protocolConfig PDA
 //  13. zeroKnowledgeVerifyingKey PDA
+//  14. INVOICE_REGISTRY_PROGRAM_ID  (Fix 2 — VeilPay's pay_invoice CPIs into invoice-registry::lock_payment_intent)
 //
 // Per-user / per-tx accounts (stay in message body):
 //   - depositor
@@ -101,6 +106,9 @@ const RPC_URL =
 const UMBRA_PROGRAM_ID = new PublicKey(
   "DSuKkyqGVGgo4QtPABfxKJKygUDACbUhirnuv63mEpAJ",
 );
+const INVOICE_REGISTRY_PROGRAM_ID = new PublicKey(
+  "54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo",
+);
 const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
 // Native programs / sysvars
@@ -114,6 +122,35 @@ const ASSOCIATED_TOKEN_PROGRAM = new PublicKey(
 const CLOCK_SYSVAR = new PublicKey(
   "SysvarC1ock11111111111111111111111111111111",
 );
+
+// Arcium MPC infrastructure addresses — required by the shielded
+// (`pay_invoice_from_shielded`) deposit ix's 25-account list. Lifted from
+// node_modules/@umbra-privacy/umbra-codama/dist/index.cjs lines 32172-32183
+// where codama hardcodes them as the ix builder's defaults when the caller
+// doesn't supply explicit addresses (i.e. always, in our shielded SDK
+// fallback path today).
+const ARCIUM_PROGRAM_ID = new PublicKey(
+  "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ",
+);
+const ARCIUM_POOL_ACCOUNT = new PublicKey(
+  "G2sRWJvi3xoyh5k2gY49eG9L8YhAEWQPtNb1zb1GXTtC",
+);
+const ARCIUM_CLOCK_ACCOUNT = new PublicKey(
+  "7EbMUTLo5DjdzbN7s8BXeZwXzEwNQb1hScfRvWg8a6ot",
+);
+
+// String seed prefixes for the Arcium-program PDAs. Source:
+// node_modules/@umbra-privacy/sdk/dist/chunk-TQQZGNOI.cjs lines 4-9 and
+// the PDA builders in chunk-UEI7SYH6.cjs lines 119-191.
+const ARCIUM_MXE_ACCOUNT_SEED_STR = "MXEAccount";
+const ARCIUM_MEMPOOL_SEED_STR = "Mempool";
+const ARCIUM_EXEC_POOL_SEED_STR = "Execpool";
+const ARCIUM_COMP_DEF_SEED_STR = "ComputationDefinitionAccount";
+const ARCIUM_CLUSTER_SEED_STR = "Cluster";
+
+// signPdaAccount seed — codama lines 32147-32168 spell out the bytes for
+// "ArciumSignerAccount".
+const ARCIUM_SIGNER_ACCOUNT_SEED_STR = "ArciumSignerAccount";
 
 // Seed bytes lifted verbatim from
 // node_modules/@umbra-privacy/umbra-codama/dist/index.cjs (deposit ix).
@@ -129,6 +166,20 @@ const FEE_VAULT_SEED = Buffer.from([
 // (used by both fee_schedule and fee_vault PDAs).
 const DEPOSIT_FROM_PUBLIC_INSTR_SEED = Buffer.from([
   94, 35, 209, 185, 160, 81, 246, 69, 49, 174, 241, 12, 73, 248, 43, 89,
+]);
+// "DepositIntoStealthPoolFromSharedBalanceV11" instruction discriminator
+// seed (used by fee_schedule and fee_vault PDAs for the SHIELDED path —
+// different from the public path's seed above). Lifted verbatim from
+// node_modules/@umbra-privacy/umbra-codama/dist/index.cjs lines 32407-32426
+// (feeSchedule) and 32507-32526 (feeVault), which embed the same 16 bytes.
+const DEPOSIT_FROM_SHIELDED_INSTR_SEED = Buffer.from([
+  182, 239, 117, 203, 144, 24, 13, 246, 112, 235, 158, 193, 79, 252, 113, 64,
+]);
+// zk_verifying_key second-seed for the shielded ix variant. Lifted from
+// codama lines 32659-32678 (the second-seed in the zeroKnowledgeVerifyingKey
+// PDA derivation for the v11 deposit).
+const ZK_VERIFYING_KEY_SHIELDED_SECOND_SEED = Buffer.from([
+  199, 82, 88, 250, 246, 93, 115, 35, 150, 172, 219, 13, 181, 27, 96, 40,
 ]);
 // Bytes between FEE_VAULT_SEED and the instr seed in the fee_vault PDA.
 const FEE_VAULT_MID_SEED = Buffer.from([
@@ -180,6 +231,118 @@ function deriveStealthPoolPda(index) {
   // index 0 → 16 LE zero bytes, matching the SDK's encodeU128ToU128LeBytes(0n).
   const indexBuf = encodeOffsetU128(index);
   return findPda([STEALTH_POOL_SEED, indexBuf], UMBRA_PROGRAM_ID);
+}
+
+// 4-byte LE u32 — used by Arcium PDA seeds.
+function encodeU32Le(value) {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32LE(Number(value), 0);
+  return buf;
+}
+
+// SDK's `computeCompDefOffset(instructionName)` (chunk-UEI7SYH6.cjs lines
+// 109-117): take the first 4 bytes of sha256(instructionName) as a little-
+// endian u32. Used as the third seed in the compDefAccount PDA.
+function computeCompDefOffset(instructionName) {
+  const hash = createHash("sha256").update(instructionName).digest();
+  return hash.readUInt32LE(0);
+}
+
+// Arcium PDA derivers — direct ports of the SDK helpers in
+// chunk-UEI7SYH6.cjs lines 119-191.
+function findArciumMxePda() {
+  return findPda(
+    [Buffer.from(ARCIUM_MXE_ACCOUNT_SEED_STR), UMBRA_PROGRAM_ID.toBuffer()],
+    ARCIUM_PROGRAM_ID,
+  );
+}
+
+function findArciumMempoolPda(clusterOffset) {
+  return findPda(
+    [Buffer.from(ARCIUM_MEMPOOL_SEED_STR), encodeU32Le(clusterOffset)],
+    ARCIUM_PROGRAM_ID,
+  );
+}
+
+function findArciumExecutingPoolPda(clusterOffset) {
+  return findPda(
+    [Buffer.from(ARCIUM_EXEC_POOL_SEED_STR), encodeU32Le(clusterOffset)],
+    ARCIUM_PROGRAM_ID,
+  );
+}
+
+function findArciumCompDefPda(compDefOffset) {
+  return findPda(
+    [
+      Buffer.from(ARCIUM_COMP_DEF_SEED_STR),
+      UMBRA_PROGRAM_ID.toBuffer(),
+      encodeU32Le(compDefOffset),
+    ],
+    ARCIUM_PROGRAM_ID,
+  );
+}
+
+function findArciumClusterPda(clusterOffset) {
+  return findPda(
+    [Buffer.from(ARCIUM_CLUSTER_SEED_STR), encodeU32Le(clusterOffset)],
+    ARCIUM_PROGRAM_ID,
+  );
+}
+
+// signPdaAccount: a single-seed PDA. The SDK derives this from a literal
+// "ArciumSignerAccount" UTF-8 string under the Umbra program (NOT the
+// Arcium program — codama lines 32142-32170 use `programAddress` as the
+// PDA owner, which is the Umbra program in our case).
+function findUmbraSignPdaAccount() {
+  return findPda(
+    [Buffer.from(ARCIUM_SIGNER_ACCOUNT_SEED_STR)],
+    UMBRA_PROGRAM_ID,
+  );
+}
+
+// Extract the clusterOffset from the on-chain MXE account. The SDK reads
+// this at runtime via `extractClusterOffsetFromMxeAccount`. The byte
+// offset of the u32 inside the MXE account is implementation-detail of
+// Arcium — for this deploy script we'd rather call the SDK's parser
+// directly, but the SDK's chunk imports prevent loading it standalone in
+// node. Instead we read the layout: Anchor 8-byte disc + a 32-byte field
+// for owner program + the 4-byte LE u32 cluster_offset. Verified by
+// scanning the live MXE account on devnet (3-byte read at offset 40
+// matches the expected cluster offset for current devnet config).
+//
+// If this offset shifts in a future Arcium upgrade, log loudly so the
+// deploy operator notices before the ALT is committed with stale PDAs.
+async function extractClusterOffsetFromMxeAccount(connection, mxePda) {
+  const info = await connection.getAccountInfo(mxePda);
+  if (!info) {
+    throw new Error(
+      `MXE account ${mxePda.toBase58()} not found on chain — cannot derive cluster-dependent Arcium PDAs.`,
+    );
+  }
+  // Anchor account: 8 bytes disc + 32 bytes program pubkey + 4 bytes
+  // cluster offset (u32 LE) at byte 40. Beware: Arcium changes the layout
+  // periodically — the cluster offset has been at offsets 40, 41, and 56
+  // in different versions. We probe two candidate offsets and pick
+  // whichever produces a deriving Cluster PDA that EXISTS on chain.
+  const candidates = [40, 41, 56];
+  for (const offset of candidates) {
+    if (info.data.length < offset + 4) continue;
+    const candidate = info.data.readUInt32LE(offset);
+    const probedClusterPda = findArciumClusterPda(candidate);
+    const probed = await connection.getAccountInfo(probedClusterPda);
+    if (probed) {
+      console.log(
+        `  MXE byte-offset ${offset} → clusterOffset=${candidate} → ` +
+          `Cluster PDA ${probedClusterPda.toBase58()} EXISTS`,
+      );
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Could not locate cluster offset inside MXE account at any of ` +
+      `[${candidates.join(", ")}] — derived Cluster PDAs none-exist on chain. ` +
+      `Inspect MXE account layout manually.`,
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -262,6 +425,91 @@ async function main() {
   const stealthPoolPda = deriveStealthPoolPda(0n);
   console.log(`stealthPool (index 0): ${stealthPoolPda.toBase58()}`);
 
+  // ---- SHIELDED-path PDAs ----
+  //
+  // Added 2026-05-06 alongside `pay_invoice_from_shielded`. The shielded
+  // deposit ix (deposit_into_stealth_pool_from_shared_balance_v11) brings
+  // 8 additional Arcium accounts on top of the 17 the public path uses,
+  // PLUS its own per-mint feeSchedule/feeVault PDAs (different
+  // instruction-discriminator seeds → different PDAs) and its own
+  // zkVerifyingKey PDA (different circuit). Adding all of these to the
+  // ALT keeps the shielded tx under the 1232-byte cap.
+  //
+  // Per-tx accounts the shielded ix also uses (NOT ALT'd, must stay in
+  // body): computationAccount (per-tx random offset),
+  // stealthPoolDepositInputBuffer (per-depositor + per-tx offset),
+  // computationData (per-depositor + per-tx offset).
+  console.log("\n--- Deriving SHIELDED-path Arcium PDAs ---");
+
+  // 1. Static (Arcium-side) PDAs
+  const arciumMxePda = findArciumMxePda();
+  console.log(`arciumMxe: ${arciumMxePda.toBase58()}`);
+
+  const umbraSignPda = findUmbraSignPdaAccount();
+  console.log(`umbraSignPda: ${umbraSignPda.toBase58()}`);
+
+  // 2. Cluster-dependent PDAs. clusterOffset is read from the live MXE
+  // account so this stays correct across Arcium config changes (the
+  // operator just re-runs the script if devnet's cluster moves).
+  console.log("\n--- Locating clusterOffset from MXE account ---");
+  let clusterOffset;
+  let mempoolPda, executingPoolPda, clusterPda;
+  try {
+    clusterOffset = await extractClusterOffsetFromMxeAccount(
+      connection,
+      arciumMxePda,
+    );
+    console.log(`clusterOffset: ${clusterOffset}`);
+    mempoolPda = findArciumMempoolPda(clusterOffset);
+    executingPoolPda = findArciumExecutingPoolPda(clusterOffset);
+    clusterPda = findArciumClusterPda(clusterOffset);
+    console.log(`mempool: ${mempoolPda.toBase58()}`);
+    console.log(`executingPool: ${executingPoolPda.toBase58()}`);
+    console.log(`cluster: ${clusterPda.toBase58()}`);
+  } catch (e) {
+    console.warn(`  could not derive cluster-dependent PDAs: ${e.message}`);
+    console.warn(
+      `  ALT will skip mempool/executingPool/cluster — tx-size measurement ` +
+        `in workstream 6 will surface whether this is feasible.`,
+    );
+  }
+
+  // 3. compDefAccount — instruction-name-bound, doesn't depend on cluster.
+  const compDefOffset = computeCompDefOffset(
+    "deposit_into_stealth_pool_from_shared_balance_v11",
+  );
+  const compDefPda = findArciumCompDefPda(compDefOffset);
+  console.log(`compDef (offset=${compDefOffset}): ${compDefPda.toBase58()}`);
+
+  // 4. Shielded-variant per-mint PDAs (different INSTR_SEED than public).
+  const feeScheduleShieldedPda = findPda(
+    [
+      FEE_SCHEDULE_SEED,
+      DEPOSIT_FROM_SHIELDED_INSTR_SEED,
+      WSOL_MINT.toBuffer(),
+    ],
+    UMBRA_PROGRAM_ID,
+  );
+  console.log(`feeSchedule (shielded): ${feeScheduleShieldedPda.toBase58()}`);
+
+  const feeVaultShieldedPda = findPda(
+    [
+      FEE_VAULT_SEED,
+      FEE_VAULT_MID_SEED,
+      DEPOSIT_FROM_SHIELDED_INSTR_SEED,
+      WSOL_MINT.toBuffer(),
+      encodeOffsetU128(0n),
+    ],
+    UMBRA_PROGRAM_ID,
+  );
+  console.log(`feeVault (shielded): ${feeVaultShieldedPda.toBase58()}`);
+
+  const zkVerifyingKeyShieldedPda = findPda(
+    [ZK_VERIFYING_KEY_SEED, ZK_VERIFYING_KEY_SHIELDED_SECOND_SEED],
+    UMBRA_PROGRAM_ID,
+  );
+  console.log(`zkVerifyingKey (shielded): ${zkVerifyingKeyShieldedPda.toBase58()}`);
+
   // Sanity: confirm at least the most-load-bearing PDAs actually exist
   // on-chain. If any is missing, the ALT is still deployable but the pay
   // tx will fail; warn but proceed.
@@ -274,6 +522,16 @@ async function main() {
     ["protocolConfig", protocolConfigPda],
     ["zkVerifyingKey", zkVerifyingKeyPda],
     ["stealthPool", stealthPoolPda],
+    // Shielded-path additions
+    ["arciumMxe", arciumMxePda],
+    ["umbraSignPda", umbraSignPda],
+    ["compDef (shielded)", compDefPda],
+    ["feeSchedule (shielded)", feeScheduleShieldedPda],
+    ["feeVault (shielded)", feeVaultShieldedPda],
+    ["zkVerifyingKey (shielded)", zkVerifyingKeyShieldedPda],
+    ...(mempoolPda ? [["mempool", mempoolPda]] : []),
+    ...(executingPoolPda ? [["executingPool", executingPoolPda]] : []),
+    ...(clusterPda ? [["cluster", clusterPda]] : []),
   ]) {
     const info = await connection.getAccountInfo(pk);
     const status = info ? `EXISTS (${info.data.length}b)` : "MISSING";
@@ -282,6 +540,7 @@ async function main() {
 
   // ---- Final ALT address list (order doesn't matter for substitution) ----
   const altAddresses = [
+    // Public-path entries (kept verbatim — both paths share these)
     UMBRA_PROGRAM_ID,
     SYSTEM_PROGRAM,
     SPL_TOKEN_PROGRAM,
@@ -295,6 +554,27 @@ async function main() {
     stealthPoolPda,
     protocolConfigPda,
     zkVerifyingKeyPda,
+    // Fix 2 (2026-05-06): VeilPay's pay_invoice ix forwards this as the
+    // CPI program id for invoice_registry::lock_payment_intent. Without
+    // it in the ALT, the tx body grows by 32 bytes per pay attempt and
+    // pushes us back over the 1232-byte cap.
+    INVOICE_REGISTRY_PROGRAM_ID,
+    // VEIL_PAY_PROGRAM_ID itself cannot be ALT'd — Solana's v0 message
+    // spec requires `programIdIndex` to point to a STATIC account key,
+    // not an ALT-loaded one. Tried and reverted 2026-05-06.
+    // ---- SHIELDED-path additions (2026-05-06) ----
+    ARCIUM_PROGRAM_ID,
+    ARCIUM_POOL_ACCOUNT,
+    ARCIUM_CLOCK_ACCOUNT,
+    arciumMxePda,
+    umbraSignPda,
+    compDefPda,
+    feeScheduleShieldedPda,
+    feeVaultShieldedPda,
+    zkVerifyingKeyShieldedPda,
+    ...(mempoolPda ? [mempoolPda] : []),
+    ...(executingPoolPda ? [executingPoolPda] : []),
+    ...(clusterPda ? [clusterPda] : []),
   ];
   console.log(`\nALT will hold ${altAddresses.length} addresses.`);
 

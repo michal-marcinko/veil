@@ -1,6 +1,12 @@
 [workspace]
 members = [
-    "programs/*"
+    "programs/*",
+    # mock-umbra is a test-only stand-in for the Umbra program. Kept under
+    # tests-rust/ rather than programs/ so anchor build does not enumerate it
+    # as a real Anchor workspace member (anchor expects an IDL output for each
+    # programs/* member, which the mock cannot produce because it uses a raw
+    # solana-program entrypoint by design — see tests-rust/mock-umbra/src/lib.rs).
+    "tests-rust/mock-umbra",
 ]
 resolver = "2"
 

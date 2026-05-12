@@ -1,6 +1,6 @@
 # Veil — Private Invoicing on Solana
 
-**Business-grade payment privacy for freelancers and teams, with selective compliance access for auditors.**
+**Private business records, verifiable accounting.** Invoice contents and amounts are encrypted by default. Payment-to-invoice correspondence is on-chain proof. Share a per-invoice receipt or a date-range compliance grant — auditors verify against chain without trusting Veil.
 
 Built for the [Colosseum Frontier Hackathon](https://arena.colosseum.org/), April–May 2026.
 
@@ -17,16 +17,22 @@ Crypto payments today are a privacy disaster for anyone running a business on-ch
 ## What Veil does
 
 - **Create** - Alice issues an invoice. Metadata (amounts, memo, line items) is AES-256-GCM encrypted client-side, uploaded to Arweave, and hash-anchored to an on-chain Anchor PDA.
-- **Pay** - Bob opens a shareable link, the UI wires his wallet, pays through Umbra's shielded pool in a single popup (via the VeilPay CPI wrapper), and signs a receipt intent tied to the invoice PDA. Amount is hidden on-chain; counterparty linkage is broken by the mixer.
-- **Reconcile** - Alice opens her dashboard "Inbox", sees pending UTXOs encrypted to her view key, and explicitly claims each one (claim → withdraw → payslip). The invoice itself stays `Pending` until Bob pastes the payer-signed receipt blob into Alice's apply-receipt panel; only then does she submit `mark_paid`. This recipient-controlled flow is intentional: it keeps the invoice creator as the on-chain settlement authority and avoids racing the auto-claimer with Phantom's popup blocker (see [Trust model](#trust-model)).
+- **Pay** - Bob opens a shareable link, the UI wires his wallet, pays through Umbra's shielded pool in a single popup (via the VeilPay CPI wrapper). The same outer transaction creates a `PaymentIntentLock` PDA recording `(invoice, payer, locked_at)` — that lock is the on-chain proof of payment.
+- **Reconcile (auto)** - Alice's dashboard scans lock PDAs every refresh. The moment a lock appears for a Pending invoice, the row flips to "Paid · settling" and a single-popup `mark_paid` auto-fires from her wallet. No receipt paste, no manual intervention. (The "More → Import receipt" recovery flow remains for off-channel payments.)
 - **Run private payroll** - An employer uploads `wallet,amount,memo`, sends Umbra payments to contractors, and signs one payroll packet for receipts, auditor review, and per-row selective disclosure.
-- **Audit / disclose** - Invoice compliance grants are wired through Umbra's x25519 grant primitives; payroll uses signed packets and one-row disclosure links so an accountant or recipient can verify exactly the data they were given.
+- **Audit / disclose** - Invoice compliance grants are wired through Umbra's x25519 grant primitives; payroll uses signed packets and one-row disclosure links so an accountant or recipient can verify exactly the data they were given. A public verifier at `/verify/<invoicePda>#k=<token>` attests on-chain status to anyone holding the capability link.
 
-## Live demo
+## Live URLs
 
 - App: **https://veil-app-production.up.railway.app**
 - Repo: **https://github.com/michal-marcinko/veil**
 - Demo video: *TBD before submission deadline (May 11, 2026)*
+
+**Devnet program IDs (stable):**
+- Invoice registry: `54ryi8hcihut8fDSVFSbN5NbArQ5GAd1xgmGCA3hqWoo`
+- VeilPay (CPI wrapper): `E2G6dN7yY8VQ2dFRgkvqskdAnPhJXkdorYP6BhKvfa8m`
+
+**Verifier link shape:** `https://veil-app-production.up.railway.app/verify/<invoicePda>#k=<token>` where `token = base58(metadataHash[0..6])`. Without the token, the verifier renders nothing — capability-URL gate per W3C TAG.
 
 Connect any Solana wallet on devnet with a small amount of wrapped SOL. The pay flow uses wSOL on devnet because Umbra hasn't initialized the USDC stealth pool there — see [`app/.env.example`](app/.env.example) for full notes. Mainnet supports USDC, USDT, wSOL, and UMBRA.
 
@@ -59,16 +65,20 @@ Veil is a Next.js 14 frontend over two minimal Anchor programs (an invoice regis
         |                                                          |
         |                                                          | 4. fetch+decrypt metadata
         |                                                          | 5. pay via VeilPay CPI
-        |                                                          |    (single popup → Umbra UTXO)
-        |                                                          | 6. signed receipt intent
-        | 7. Inbox shows pending UTXO; Alice clicks Claim          |
-        | 8. Bob shares the signed receipt blob with Alice         |
-        | 9. Alice pastes the receipt → mark_paid as creator       |
+        |                                                          |    (single popup → Umbra UTXO
+        |                                                          |     + PaymentIntentLock PDA)
+        |                                                          |
+        | 6. dashboard scans lock PDAs → row flips to "Paid · settling"
+        | 7. lazy mark_paid auto-fires from creator's wallet       |
         |                          ◄──── Invoice.status = Paid     |
         |                                                          |
-        | 10. issue compliance grant ─────► Auditor (Carol)        |
-        |     (mint + time scope)            decrypts Alice's      |
-        |                                    invoices in range     |
+        | 8. issue compliance grant ─────► Auditor (Carol)         |
+        |     (mint + time scope)             decrypts Alice's     |
+        |                                     invoices in range    |
+        |                          ─────► Public verifier (anyone) |
+        |                          /verify/<pda>#k=<token>         |
+        |                          renders green/yellow/red        |
+        |                          from chain alone                |
 ```
 
 ## VeilPay program — our technical differentiator
@@ -80,23 +90,38 @@ Veil is a Next.js 14 frontend over two minimal Anchor programs (an invoice regis
 - **One-popup-per-batch payroll.** The same CPI-bundling technique scales to payroll: the employer signs one popup per recipient row, not two, which is the difference between a demoable B2B flow and an unusable one when the batch is 20 contractors.
 - **Source.** The Anchor program lives at [`programs/veil-pay/programs/veil-pay/src/lib.rs`](programs/veil-pay/programs/veil-pay/src/lib.rs).
 
-## Privacy model: what we hide vs what's pseudonymous
+## Privacy model
 
-We are deliberately precise about Veil's privacy claims so a reviewer or auditor can verify them. **Don't use Veil if your threat model assumes "untraceable on devnet."** It does not.
+We are deliberately precise about Veil's privacy claims so a reviewer or auditor can verify them. **Don't say "anonymous", "fully private payments", or "untraceable" about Veil.** Those overclaim. The honest split:
 
-**Hidden (cryptographic guarantees):**
-- **Memos and invoice line items** — AES-256-GCM encrypted client-side under a key derived from the invoice creator's wallet signature. Stored on Arweave; only a content hash is on-chain.
-- **Encrypted-balance amounts on chain** — Umbra's encrypted-balance primitives keep account balances opaque to any observer.
-- **Recipient view-key identity at sender-deposit time** — the deposit tx posts a UTXO encrypted to the recipient's stealth view key. The recipient's wallet address is not in the deposit tx.
+| What                                   | Private                       | Public                                          |
+|----------------------------------------|-------------------------------|-------------------------------------------------|
+| Invoice line items / memo / amount     | Encrypted on Arweave          |                                                 |
+| Recipient's encrypted balance          | Umbra MXE                     |                                                 |
+| Payment from **shielded** balance      | Amount + source invisible     | (no public deposit tx)                          |
+| Payment from **public** balance        |                               | Umbra deposit tx visible — amount visible       |
+| Payer ↔ invoice link                   |                               | `PaymentIntentLock` PDA records both pubkeys    |
+| Recipient (creator) wallet             |                               | Always public (Invoice account `creator` field) |
 
-**Pseudonymous on chain (NOT hidden — visible to a determined chain analyst):**
-- **Depositor wallet address** — visible in the Umbra pool deposit tx as the `H1 Sender Address` event field. Anyone watching the pool sees who deposited.
-- **Withdraw amount** — when the recipient withdraws shielded funds back to their public ATA, the withdraw amount appears in their tx.
+**Pitch we use:** "Veil makes B2B payments private where it matters — amounts, balances, invoice contents, and payroll details stay encrypted. Payment-to-invoice reconciliation is on-chain proof, so auditors don't need to trust off-chain receipts."
 
 **Devnet caveat (important for reviewers):**
 On devnet the Umbra pool is low-volume — typically a handful of deposits per day. A determined chain analyst can map `Recipient withdraw → Pool → Specific sender deposit` in roughly 30 seconds via Solana Explorer because the anonymity set is too small to defeat timing + amount correlation. **This is a property of devnet's volume, not a Veil bug.** On mainnet, where the Umbra pool aggregates real volume across all of its users, this attack becomes practically infeasible — anonymity scales linearly with the size of the deposit set.
 
-**The honest claim we make:** Veil provides **off-chain metadata privacy + amount-hiding shielded-to-shielded sends + plausible deniability via batched receipts**. We do **not** claim "untraceable." That distinction matters for any business that wants to evaluate Veil against its actual threat model.
+## How reconciliation works
+
+Reconciliation is the question every business has after a payment lands: *did Bob's transfer correspond to my invoice #3201?* In banking it's resolved with a memo + bank statement. On Solana, we use a small on-chain primitive plus two opt-in disclosure surfaces.
+
+**`PaymentIntentLock` PDA — the on-chain proof primitive.** When Bob pays an invoice through the VeilPay CPI wrapper, the same outer transaction creates a tiny PDA at `seeds = [b"intent_lock", invoicePda]` recording `(invoice, payer, locked_at)`. The lock IS the proof — its existence on chain is a cryptographic statement that Bob's wallet paid the invoice represented by `invoicePda`. Alice's dashboard scans the lock PDAs for her pending invoices on every refresh and:
+
+- Renders the row as **"Paid · settling"** the moment the lock appears.
+- Lazily fires `mark_paid` from the creator's wallet (single popup, idempotent — replays revert with `InvalidStatus` and cost only ~5000 lamports). On-chain status flips to `Paid` shortly after.
+
+Settlement is the creator's act; the lock PDA is the canonical proof regardless of when the creator gets around to it. If Alice never opens her dashboard, the invoice account stays Pending — but the audit trail through the lock PDA is already complete.
+
+**Capability-URL receipts.** Each invoice can be downloaded as a Receipt PDF that includes a QR code linking to a public verifier at `/verify/<invoicePda>#k=<token>`. The token is `base58(metadataHash[0..6])` and lives in the URL fragment, so it never reaches our server logs (per W3C TAG capability-URL guidance). The verifier renders nothing without the token — try the bare PDA without `#k=` and you get a paste-the-link form. With the token, it shows a green/yellow/red verdict from the chain alone (lock+mark_paid → green, lock only → yellow, neither → red).
+
+**Compliance grants — the heavy-disclosure primitive.** Verifier attests on-chain state but never decrypts amounts or line items. For amount/line-item disclosure scoped to a date range or specific invoices, the creator issues a compliance grant — an Umbra-native x25519 viewing key with a time-and-mint scope. The auditor decrypts inside their browser; nothing about the grant goes through Veil's servers. Mirrors Zcash's two-tier model (full viewing key + per-payment disclosure).
 
 ## Quickstart
 
@@ -135,13 +160,14 @@ Open http://localhost:3000 with any Solana wallet on devnet (Solflare recommende
 
 ## Trust model
 
-Veil uses a recipient-only settlement model for invoice status. Bob's pay page only creates the Umbra receiver-claimable UTXO and, when his wallet supports `signMessage`, signs a receipt intent over the invoice PDA, wallet, metadata hash, timestamp, and payment UTXO signature. Bob does not call `mark_paid`.
+Veil's invoice registry now uses two complementary primitives for state:
 
-Alice's dashboard is the reconciliation authority. She claims the incoming UTXO from her **Inbox** (an explicit per-row click — auto-claim was removed on 2026-05-05 because it raced Phantom's popup blocker and the new section's manual claim button), then pastes Bob's signed receipt blob into the apply-receipt panel. The receipt verifier checks the ed25519 signature locally; the dashboard then submits `mark_paid` as the invoice creator. The `utxo_commitment` is derived from the stable claim signature when the SDK exposes one; if not, the app falls back to `sha256(invoicePda.toBuffer())` so the mark-paid call remains deterministic.
+1. **`PaymentIntentLock` PDA** (Fix 2, 2026-05-06) — the canonical, payer-signed proof that this wallet paid this invoice. Created in the same transaction as the VeilPay deposit ix. No creator action required.
+2. **`mark_paid` on the Invoice account** — bookkeeping. The creator can call this from their dashboard to flip on-chain `status` from Pending to Paid. With the lock PDA in place, this is now lazy: Alice's dashboard auto-fires `mark_paid` whenever it sees a lock for one of her Pending invoices on next load.
 
-The public receipt verifier checks two things only: the invoice PDA is currently `Paid` on-chain, and the receipt blob was signed by the claimed payer wallet. It does not require the payer wallet to match the on-chain `mark_paid` signer, because the signer is the recipient/creator who claimed the UTXO.
+Settlement is the creator's act; on-chain status flips when the creator next opens their dashboard. The lock PDA is the canonical proof of payment — settlement is bookkeeping. The receipt-import recovery flow ("More → Import receipt") is still available for off-channel payments or auto-detection failures, but is no longer the primary path.
 
-Veil's invoice registry deliberately does not attempt to verify private Umbra payment contents on-chain - that would either leak data or require Umbra-side primitives outside the hackathon window. Instead, the recipient confirms receipt: only the invoice creator's wallet can mark an invoice paid, and only after their dashboard has scanned and claimed the incoming UTXO and accepted Bob's signed receipt. This matches how every business invoice works - the seller acknowledges payment. Production roadmap: Umbra-side settlement Merkle proofs or a CPI hook from Umbra into our registry.
+The public verifier at `/verify/<invoicePda>#k=<token>` checks lock + mark_paid status from the chain alone. It does NOT decrypt invoice contents — amounts and line items remain encrypted on Arweave. Amount-level audit goes through compliance grants (see [How reconciliation works](#how-reconciliation-works) above).
 
 Outgoing payroll intentionally does not reuse the invoice PDA model. Payroll is payer-initiated: the employer sends Umbra receiver-claimable UTXOs directly to contractors, then signs a single packet covering the batch. `/payroll/packet` verifies the full packet for auditors; `/disclose/payroll` verifies one selected row for selective disclosure.
 

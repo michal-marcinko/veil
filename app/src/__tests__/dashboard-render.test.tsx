@@ -19,6 +19,15 @@ vi.mock("@/components/ClientWalletMultiButton", () => ({
   ClientWalletMultiButton: () => null,
 }));
 
+// Stubbed out for the dashboard tests — the real component pulls in
+// `useRouter` from `next/navigation` (no App-Router context in vitest)
+// plus an Arweave-backed loader. None of that is in scope for these
+// dashboard-render assertions; mock it to a no-op so the Inbox tab can
+// mount without throwing "invariant expected app router to be mounted".
+vi.mock("@/components/IncomingInvoicesSection", () => ({
+  IncomingInvoicesSection: () => null,
+}));
+
 vi.mock("@/lib/anchor", () => ({
   fetchInvoicesByCreator: vi.fn(async () => [
     {
@@ -41,6 +50,10 @@ vi.mock("@/lib/anchor", () => ({
     },
   ]),
   markPaidOnChain: vi.fn(async () => "mark-paid-sig"),
+  // Mocked for the lock-fetch effect added 2026-05-06: returning an
+  // empty Map keeps the dashboard in the Pending render path (no
+  // settling chip, no lazy mark_paid fire-and-forget).
+  fetchManyLocks: vi.fn(async () => new Map()),
 }));
 
 vi.mock("@/lib/umbra", () => ({
@@ -89,10 +102,17 @@ describe("Dashboard page", () => {
       expect(screen.getByText(/Read directly from Solana\./i)).toBeInTheDocument();
     });
 
+    // 2026-05-06 IA restructure: the dashboard now has tabs
+    // [Inbox | Sent | Balance] with Inbox as the default. The balance
+    // card lives on the Balance tab — switch to it before asserting
+    // the balance label.
+    fireEvent.click(screen.getByRole("button", { name: /^Balance/i }));
+
     await waitFor(() => {
-      // Mint-agnostic match — env default is wSOL on devnet (post-2026-05-04
-       // alignment), USDC on mainnet, possibly other tokens in the future.
-       expect(screen.getByText(/Private (USDC|SOL|wSOL) balance/i)).toBeInTheDocument();
+      // 2026-05-06 IA restructure split the token symbol off into a
+      // separate <span> beside the amount. The label itself is now
+      // mint-agnostic — just "Private balance".
+      expect(screen.getByText(/Private balance/i)).toBeInTheDocument();
     });
 
     // No red error banner — there should be no element containing the exact
@@ -109,6 +129,8 @@ describe("Dashboard page", () => {
 
   it("renders the row date without throwing when createdAt is an anchor BN", async () => {
     render(<DashboardPage />);
+    // Invoice rows live on the Sent tab post-2026-05-06 IA restructure.
+    fireEvent.click(screen.getByRole("button", { name: /^Sent/i }));
     await waitFor(() => {
       // The editorial redesign (2026-05-04) renders dates as "Apr 21"
       // (or "Apr 21 '25" for off-year). 1713657600 → 2024-04-21 UTC →
@@ -121,6 +143,7 @@ describe("Dashboard page", () => {
 
   it("renders each invoice row as a link to /invoice/[pda]", async () => {
     render(<DashboardPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^Sent/i }));
     await waitFor(() => {
       const link = screen.getByRole("link", {
         name: /Open invoice 11111111111111111111111111111113/i,
@@ -143,10 +166,16 @@ describe("Dashboard page", () => {
     const confirmButton = screen.queryByRole("button", { name: /^Confirm paid$/i });
     expect(confirmButton).toBeNull();
 
-    // Receipt-import UI replaces it. After the editorial-ledger redesign
-    // (2026-05-04) the apply-receipt UI lives in a slide-over panel —
-    // open it by clicking the toolbar "Bind receipt" trigger first.
-    const trigger = await screen.findByRole("button", {
+    // 2026-05-06 banking-grade reconciliation pass: the receipt-import
+    // affordance moved from a primary FilterBar pill into a "More ▾"
+    // overflow menu next to the type chips on the Sent tab. Open the
+    // More menu first, then click the Import-receipt entry.
+    fireEvent.click(screen.getByRole("button", { name: /^Sent/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^More actions$/i }),
+    );
+
+    const trigger = await screen.findByRole("menuitem", {
       name: /Open the apply-receipt panel/i,
     });
     fireEvent.click(trigger);
@@ -162,10 +191,17 @@ describe("Dashboard page", () => {
   it("Apply receipt button is disabled until the textarea has input", async () => {
     render(<DashboardPage />);
 
+    // The Import-receipt menuitem lives in the Sent tab's More overflow
+    // menu post-2026-05-06.
+    fireEvent.click(screen.getByRole("button", { name: /^Sent/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^More actions$/i }),
+    );
+
     // Open the slide-over so the inner Apply receipt button + textarea
     // become discoverable to RTL queries (closed panels set aria-hidden
     // on the wrapper which masks descendants from getByRole).
-    const trigger = await screen.findByRole("button", {
+    const trigger = await screen.findByRole("menuitem", {
       name: /Open the apply-receipt panel/i,
     });
     fireEvent.click(trigger);
@@ -187,7 +223,14 @@ describe("Dashboard page", () => {
     const anchor = await import("@/lib/anchor");
     render(<DashboardPage />);
 
-    const trigger = await screen.findByRole("button", {
+    // The Import-receipt menuitem lives in the Sent tab's More overflow
+    // menu post-2026-05-06.
+    fireEvent.click(screen.getByRole("button", { name: /^Sent/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^More actions$/i }),
+    );
+
+    const trigger = await screen.findByRole("menuitem", {
       name: /Open the apply-receipt panel/i,
     });
     fireEvent.click(trigger);

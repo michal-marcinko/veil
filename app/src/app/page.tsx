@@ -5,6 +5,55 @@ import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
 import { CipherAmount } from "@/components/CipherAmount";
 
+// ---------------------------------------------------------------------------
+// "Auditor exhibit" — the rows shown in the For-accountants section. Same
+// underlying payments rendered two ways: public chain view (redacted/cipher)
+// vs auditor-with-grant view (decrypted memo + amount + date). The pairs
+// are kept in lockstep order so a reader can scan across rows and see the
+// same payment translated.
+// ---------------------------------------------------------------------------
+const EXHIBIT_ROWS: ReadonlyArray<{
+  date: string;
+  payer: string;
+  memo: string;
+  amount: string;
+  cipher: string;
+  signature: string;
+}> = [
+  {
+    date: "2026-03-04",
+    payer: "Globex Corp.",
+    memo: "Q1 retainer · design system",
+    amount: "$8,400.00",
+    cipher: "a71e3f9c0d4b8e27",
+    signature: "5h3p…rT9k",
+  },
+  {
+    date: "2026-03-12",
+    payer: "Initech Holdings",
+    memo: "Invoice #0118 · audit support",
+    amount: "$2,150.00",
+    cipher: "f2a8b91c47e0d3a6",
+    signature: "9zXd…m4Vp",
+  },
+  {
+    date: "2026-03-19",
+    payer: "Hooli Cloud",
+    memo: "March payroll · 4 contractors",
+    amount: "$14,820.00",
+    cipher: "c08d4f6b21a973ee",
+    signature: "Q7tw…N2ek",
+  },
+  {
+    date: "2026-03-27",
+    payer: "Stark & Pym LLC",
+    memo: "Pen-test deliverable",
+    amount: "$3,600.00",
+    cipher: "1ed5a4c80fb237d9",
+    signature: "Lk6r…b1Yh",
+  },
+];
+
 const STEPS = [
   {
     k: "01",
@@ -112,6 +161,87 @@ export default function LandingPage() {
             style={{ animationDelay: "120ms" }}
           >
             <CipherAmount amount="$4,200.00" />
+          </div>
+        </div>
+      </section>
+
+      {/* For accountants — editorial "exhibit" comparing the public chain
+          view (redacted ciphertext, opaque signatures) against an auditor
+          opening a scoped grant URL (decrypted memos, dates, amounts).
+          Same four payments, two views. The hairline-bordered table reads
+          as a piece of forensic-accounting paper, not a fintech card.
+
+          Placement is deliberate: it sits after CipherAmount has already
+          taught the "two views" idea on a single payment, and lifts the
+          same metaphor up to ledger scale before the four-step explainer.
+          The strongest Umbra-track differentiator gets a dedicated band
+          on the marketing surface, not a buried dashboard link. */}
+      <section
+        id="for-accountants"
+        className="relative z-10 border-t border-line"
+      >
+        <div className="max-w-[1400px] mx-auto px-6 md:px-8 py-28 md:py-36">
+          <div className="grid grid-cols-12 gap-10 lg:gap-16 items-start">
+            {/* Left rail — eyebrow, headline, body, CTAs. Slightly narrower
+                than usual so the exhibit on the right gets visual weight. */}
+            <div className="col-span-12 lg:col-span-5 reveal">
+              <span className="eyebrow">For accountants</span>
+              <h2 className="mt-4 font-sans font-medium text-ink text-[28px] md:text-[36px] lg:text-[40px] leading-[1.08] tracking-[-0.025em]">
+                Selective disclosure
+                <br />
+                <span className="font-display italic text-muted">
+                  for the people who need it.
+                </span>
+              </h2>
+
+              <p className="mt-7 max-w-[460px] text-[15.5px] leading-[1.6] text-ink/80">
+                Issue a viewing key scoped to one auditor, one date range,
+                one mint. They open a single URL and see decrypted invoices
+                and payroll for exactly that slice.{" "}
+                <span className="text-ink">Nothing more. Revoke any time.</span>
+              </p>
+
+              <ul className="mt-7 space-y-2.5 text-[13.5px] text-ink/75">
+                {[
+                  "Per-grant ephemeral key — never your wallet master",
+                  "Mint + date scope, enforced at generation",
+                  "Out-of-scope invoices stay unreachable from the link",
+                ].map((item) => (
+                  <li key={item} className="flex items-start gap-3">
+                    <span
+                      aria-hidden
+                      className="mt-[8px] h-px w-3 bg-line-2 shrink-0"
+                    />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+
+              <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3">
+                <Link
+                  href="/dashboard/compliance"
+                  prefetch
+                  className="btn-primary"
+                >
+                  <span className="inline-flex items-center gap-2.5">
+                    Issue a grant
+                    <span aria-hidden>→</span>
+                  </span>
+                </Link>
+                <span className="text-[13px] text-dim">
+                  Sample auditor view{" "}
+                  <span className="text-muted">— coming with submission</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Right rail — the exhibit. */}
+            <div
+              className="col-span-12 lg:col-span-7 reveal"
+              style={{ animationDelay: "120ms" }}
+            >
+              <Exhibit />
+            </div>
           </div>
         </div>
       </section>
@@ -250,5 +380,146 @@ function Fact({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </div>
+  );
+}
+
+/**
+ * The auditor exhibit. Editorial newspaper-style two-column ledger:
+ * left column is what a public chain analyst sees (signature + redacted
+ * cipher amount + lock glyph); right column is what an auditor with a
+ * scoped grant URL sees (memo + date + amount). Rows are kept in
+ * lockstep so a reader can scan across.
+ *
+ * Visual notes:
+ *   - Sharp 0px corners on the outer frame to read as ledger paper, not
+ *     as a card. The rest of the app uses rounded-[3px–4px]; this is a
+ *     deliberate one-off for the exhibit.
+ *   - A typewritten "Re: 2026-Q1 audit · Acme Corp." header sits above
+ *     the right column to frame the auditor as the recipient, not Veil.
+ *   - The left column uses paper-3 fill (the "deeper paper" used for
+ *     CipherAmount's right pane) so the public-side reads as the colder
+ *     of the two surfaces. Right column stays on plain paper.
+ */
+function Exhibit() {
+  return (
+    <figure className="border border-line bg-paper rounded-[3px] overflow-hidden shadow-[0_1px_0_rgba(0,0,0,0.02),0_24px_70px_-40px_rgba(26,24,20,0.28)]">
+      {/* Paper-style top strip: case reference on the left, scope chip on
+          the right. Sets the "this is an exhibit, not a UI card" tone. */}
+      <header className="flex items-baseline justify-between gap-4 px-5 md:px-6 py-3.5 border-b border-line bg-paper-2/60">
+        <div className="flex items-baseline gap-3 min-w-0">
+          <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted shrink-0">
+            Exhibit A
+          </span>
+          <span className="text-line-2 shrink-0">·</span>
+          <span className="font-mono text-[11.5px] text-ink/80 truncate">
+            Re: 2026-Q1 audit, Acme Corp.
+          </span>
+        </div>
+        <span className="hidden sm:inline-flex items-center gap-2 font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted shrink-0">
+          <span className="h-1 w-1 rounded-full bg-sage" aria-hidden />
+          Scope · Mar 2026 · USDC
+        </span>
+      </header>
+
+      {/* Two column headers — keeps the parallel explicit before the rows. */}
+      <div className="grid grid-cols-2 border-b border-line">
+        <div className="px-5 md:px-6 py-3 border-r border-line">
+          <span className="eyebrow">Public ledger</span>
+        </div>
+        <div className="px-5 md:px-6 py-3">
+          <span className="eyebrow text-sage">Auditor with grant</span>
+        </div>
+      </div>
+
+      {/* Rows — divide-y for the hairline rules between, no rounded corners
+          inside so it reads as a printed ledger, not a list of cards. */}
+      <ul className="divide-y divide-line">
+        {EXHIBIT_ROWS.map((row, i) => (
+          <li key={row.signature} className="grid grid-cols-2">
+            {/* Public side — signature, redacted memo bar, cipher amount. */}
+            <div className="px-5 md:px-6 py-4 md:py-5 border-r border-line bg-paper-3/60 flex items-center gap-4">
+              <span
+                aria-hidden
+                className="font-mono tnum text-[10.5px] text-dim tracking-[0.04em] w-12 shrink-0"
+              >
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[11.5px] text-ink/70 truncate">
+                  tx · {row.signature}
+                </div>
+                <div className="mt-1.5 flex items-center gap-2.5">
+                  <span
+                    aria-hidden
+                    className="block h-[7px] w-24 bg-line rounded-[1px]"
+                  />
+                  <span
+                    aria-hidden
+                    className="block h-[7px] w-12 bg-line rounded-[1px]"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  aria-hidden
+                  className="text-line-2"
+                >
+                  <rect
+                    x="2.5"
+                    y="5.5"
+                    width="7"
+                    height="5"
+                    rx="0.5"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <path
+                    d="M4 5.5V4a2 2 0 014 0v1.5"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <span className="font-mono tnum text-[11.5px] text-muted tracking-[0.04em]">
+                  {row.cipher.slice(0, 8)}…
+                </span>
+              </div>
+            </div>
+
+            {/* Auditor side — date, payer, memo, decrypted amount. */}
+            <div className="px-5 md:px-6 py-4 md:py-5 flex items-center gap-4">
+              <span className="font-mono tnum text-[11px] text-muted tracking-[0.02em] w-[78px] shrink-0">
+                {row.date}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="font-sans text-[14px] text-ink truncate">
+                  {row.payer}
+                </div>
+                <div className="font-mono text-[11.5px] text-muted truncate mt-0.5">
+                  {row.memo}
+                </div>
+              </div>
+              <div className="font-sans tnum text-[15px] md:text-[16px] font-medium text-ink tracking-[-0.01em] shrink-0">
+                {row.amount}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {/* Footer caption — figcaption-style, mono small caps. */}
+      <figcaption className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 px-5 md:px-6 py-3.5 border-t border-line bg-paper-2/40 font-mono text-[10.5px] tracking-[0.12em] uppercase">
+        <span className="text-muted">
+          Same four payments, two views.
+        </span>
+        <span className="text-dim">
+          Out of scope · 47 invoices unreachable
+        </span>
+      </figcaption>
+    </figure>
   );
 }

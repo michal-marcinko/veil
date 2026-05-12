@@ -34,7 +34,7 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
@@ -108,6 +108,16 @@ const RECENT_BUCKETS: ReadonlyArray<string> = ["Today", "Yesterday"];
 export default function CompliancePage() {
   const wallet = useWallet();
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // ?seed=<invoicePda> — pre-fills the picker with a single-row
+  // selection on first mount. Wired from the row-overflow menu's
+  // "Send compliance grant" action so the operator lands on a
+  // ready-to-generate state instead of having to find the row.
+  // Payroll-batch seeds are intentionally NOT supported today: the
+  // compliance flow is invoice-scoped, and payroll runs don't have
+  // associated Invoice PDAs. v2 wires per-run grants natively.
+  const seedPda = searchParams?.get("seed") ?? null;
 
   // Outgoing-transition state. The "← Activity" back link sets this
   // before pushing the next route so the current surface fades out
@@ -140,6 +150,10 @@ export default function CompliancePage() {
   // operator's mental model is "preset = my starting set, uncheck to
   // exclude".
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Tracks whether the `?seed=` pre-fill has fired. We only apply once
+  // per page load: subsequent preset / mint changes use the normal
+  // "select all in scope" reset behaviour.
+  const [seedApplied, setSeedApplied] = useState(false);
 
   // Generation state.
   const [submitting, setSubmitting] = useState(false);
@@ -229,8 +243,24 @@ export default function CompliancePage() {
     [inScopeRows],
   );
   useEffect(() => {
+    // Seed pre-fill — runs ONCE after the invoices fetch lands and the
+    // seed PDA is in the in-scope set. After this, normal "select all
+    // in-scope" semantics apply for any further preset / mint changes.
+    if (seedPda && !seedApplied && inScopeRows.length > 0) {
+      const inScope = inScopeRows.find((r) => r.pda === seedPda);
+      if (inScope) {
+        setSelected(new Set([seedPda]));
+        setSeedApplied(true);
+        return;
+      }
+      // Seed not in current scope — could be a different mint or out
+      // of the active preset window. Fall through to the default
+      // "select all" behaviour and mark the seed handled so we don't
+      // keep re-trying on every scope change.
+      setSeedApplied(true);
+    }
     setSelected(new Set(inScopeRows.map((r) => r.pda)));
-  }, [inScopeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inScopeKey, seedPda, seedApplied]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------- Selection helpers ----------------
 

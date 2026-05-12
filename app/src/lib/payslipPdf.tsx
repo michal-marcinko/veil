@@ -14,6 +14,7 @@
 
 import { Document, Page, StyleSheet, Text, View } from "@react-pdf/renderer";
 import type { ReceivedPayment } from "./received-payments-storage";
+import { AuditFooter, buildVerifyUrl, type AuditFooterFact } from "./pdf/AuditFooter";
 
 const styles = StyleSheet.create({
   page: {
@@ -136,6 +137,20 @@ export interface PayslipPdfProps {
   /** Network the tx signatures belong to. Only used for the explorer
    *  links — defaults to devnet matching the rest of the app. */
   network?: "devnet" | "mainnet";
+  /** When true, append the AuditFooter (with QR + on-chain anchors) at
+   *  the bottom of the document. Off by default so legacy payslip
+   *  downloads (no audit context) keep the same one-page layout. */
+  auditMode?: boolean;
+  /** Required when `auditMode` is true. The invoice (or stub-invoice)
+   *  PDA the verifier QR should encode. Payroll runs don't always have
+   *  an Invoice account; in that case the caller can pass a synthetic
+   *  identifier and a verify-token derived from a hash of the payslip's
+   *  canonical fields — see `verifyTokenSeed` below. */
+  auditInvoicePda?: string;
+  /** Required with auditMode + auditInvoicePda. 32-byte input used to
+   *  derive the verify-URL capability token. Same role as the on-chain
+   *  Invoice's `metadataHash` for receipts. */
+  verifyTokenSeed?: Uint8Array;
 }
 
 function explorerUrl(sig: string, network: "devnet" | "mainnet"): string {
@@ -188,6 +203,9 @@ export function PayslipPdfDocument({
   recipientWallet,
   recipientName,
   network = "devnet",
+  auditMode = false,
+  auditInvoicePda,
+  verifyTokenSeed,
 }: PayslipPdfProps) {
   const trimmedRecipientName = recipientName?.trim();
   const senderDisplay = payment.senderDisplayName?.trim()
@@ -286,6 +304,38 @@ export function PayslipPdfDocument({
           Verify on chain by following the transaction links above to
           Solana Explorer ({network}).
         </Text>
+
+        {auditMode && auditInvoicePda && verifyTokenSeed
+          ? (() => {
+              // Defensive: don't crash the renderer if the seed is short.
+              try {
+                const verifyUrl = buildVerifyUrl({
+                  invoicePda: auditInvoicePda,
+                  metadataHash: verifyTokenSeed,
+                });
+                const facts: AuditFooterFact[] = [
+                  { label: "Payroll run", value: payment.batchId },
+                  { label: "Row", value: String(payment.rowIndex) },
+                  { label: "Network", value: network === "mainnet" ? "Mainnet" : "Devnet" },
+                  { label: "Claim tx", value: truncate(payment.claimSignature, 10, 8) },
+                  ...(payment.withdrawSignature
+                    ? [{ label: "Withdraw tx", value: truncate(payment.withdrawSignature, 10, 8) }]
+                    : []),
+                  { label: "Mode", value: modeLabel },
+                  { label: "Last verified", value: new Date().toISOString() },
+                ];
+                return (
+                  <AuditFooter
+                    verifyUrl={verifyUrl}
+                    facts={facts}
+                    eyebrow="Audit anchors"
+                  />
+                );
+              } catch {
+                return null;
+              }
+            })()
+          : null}
       </Page>
     </Document>
   );
@@ -308,6 +358,10 @@ export async function downloadPayslipPdf(
      *  pass it without reaching into the renderer's prop shape. */
     recipientName?: string;
     network?: "devnet" | "mainnet";
+    /** Audit-mode opt-in. Forwarded to PayslipPdfDocument. */
+    auditMode?: boolean;
+    auditInvoicePda?: string;
+    verifyTokenSeed?: Uint8Array;
   } = {},
 ): Promise<void> {
   const { pdf } = await import("@react-pdf/renderer");
@@ -317,6 +371,9 @@ export async function downloadPayslipPdf(
       recipientWallet: options.recipientWallet,
       recipientName: options.recipientName,
       network: options.network ?? "devnet",
+      auditMode: options.auditMode,
+      auditInvoicePda: options.auditInvoicePda,
+      verifyTokenSeed: options.verifyTokenSeed,
     }),
   ).toBlob();
   const filename = `${payment.batchId}-row${payment.rowIndex}-payslip.pdf`;

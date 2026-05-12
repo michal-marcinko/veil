@@ -204,6 +204,105 @@ export async function fetchInvoicePublic(pda: PublicKey) {
 }
 
 /**
+ * Decoded `PaymentIntentLock` account state.
+ *
+ * The on-chain layout is `{ invoice: Pubkey, payer: Pubkey, lockedAt: i64,
+ * bump: u8 }`; consumers only care about who locked it and when, so we
+ * surface those two fields in JS-friendly types. `lockedAt` is unix
+ * seconds, coerced from Anchor's BN.
+ */
+export type LockState = { payer: PublicKey; lockedAt: number };
+
+/**
+ * Fetch one PaymentIntentLock account.
+ *
+ * Anchor throws when the account does not exist (the `paymentIntentLock`
+ * coder rejects on AccountNotFound). We swallow that to a clean `null`
+ * so callers can render "no lock yet" without a try/catch at every
+ * call site. Other errors (RPC down, invalid PDA, decoder mismatch) still
+ * propagate.
+ */
+export async function fetchLockOptional(
+  wallet: any,
+  lockPda: PublicKey,
+): Promise<LockState | null> {
+  const program = getProgram(wallet);
+  try {
+    const raw: any = await (program.account as any).paymentIntentLock.fetch(lockPda);
+    return {
+      payer: raw.payer,
+      lockedAt: bnToNumber(raw.lockedAt),
+    };
+  } catch (err: any) {
+    const msg = (err?.message ?? String(err)).toLowerCase();
+    if (
+      msg.includes("account does not exist") ||
+      msg.includes("could not find") ||
+      msg.includes("accountnotfound")
+    ) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Batch-fetch many PaymentIntentLock accounts using a single
+ * `getMultipleAccountsInfo` RPC call per 100 PDAs.
+ *
+ * Returns a Map keyed by lockPda base58 → decoded LockState, or `null` if
+ * the account does not exist (i.e. the payer has not locked the invoice
+ * yet). The Map preserves insertion order for the input array, but
+ * callers should look up by base58 rather than index.
+ *
+ * Decode failures (corrupted data, wrong discriminator) are logged and
+ * mapped to `null`; we never throw on a single bad account because that
+ * would brick the dashboard for unrelated invoices.
+ */
+export async function fetchManyLocks(
+  wallet: any,
+  lockPdas: PublicKey[],
+): Promise<Map<string, LockState | null>> {
+  const result = new Map<string, LockState | null>();
+  if (lockPdas.length === 0) return result;
+
+  const program = getProgram(wallet);
+  const connection = program.provider.connection as Connection;
+  const coder: any = (program.account as any).paymentIntentLock.coder.accounts;
+
+  // getMultipleAccountsInfo caps at 100 keys per call. Walk in chunks.
+  const CHUNK = 100;
+  for (let i = 0; i < lockPdas.length; i += CHUNK) {
+    const slice = lockPdas.slice(i, i + CHUNK);
+    const infos = await connection.getMultipleAccountsInfo(slice as any, "confirmed");
+    for (let j = 0; j < slice.length; j += 1) {
+      const pda = slice[j];
+      const info = infos[j];
+      const key = pda.toBase58();
+      if (info == null || info.data == null) {
+        result.set(key, null);
+        continue;
+      }
+      try {
+        // Anchor 0.30 coders accept both Buffer and Uint8Array; pick the
+        // canonical decode method available on this build.
+        const data = Buffer.from(info.data as any);
+        const decoded: any = coder.decode("paymentIntentLock", data);
+        result.set(key, {
+          payer: decoded.payer,
+          lockedAt: bnToNumber(decoded.lockedAt),
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`[Veil anchor] failed to decode lock at ${key}:`, err);
+        result.set(key, null);
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * Fetch the block time of a confirmed Solana transaction signature.
  * Returns unix seconds, or null if the RPC can't find the tx.
  */

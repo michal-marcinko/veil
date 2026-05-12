@@ -49,6 +49,14 @@ interface InvoiceRowProps {
    */
   explorerBase?: string;
   /**
+   * Settlement-pending flag — true when the on-chain `PaymentIntentLock`
+   * PDA exists for this invoice but `mark_paid` has NOT yet flipped the
+   * Invoice account's status to Paid. The row renders "Paid · settling"
+   * to surface that the payment landed on chain even though bookkeeping
+   * is still in flight. Ignored when `status` is already "paid".
+   */
+  settling?: boolean;
+  /**
    * When true, the row renders a left-edge checkbox in place of the
    * Link wrapper — clicking the row toggles selection rather than
    * navigating to /invoice/<pda>. Used by the compliance page's
@@ -76,11 +84,32 @@ export function InvoiceRow({
   selectable = false,
   selected = false,
   onSelectChange,
+  settling = false,
 }: InvoiceRowProps) {
   const normalisedStatus = String(status).toLowerCase() as DotStatus;
+  // When a `PaymentIntentLock` is present but on-chain status hasn't
+  // flipped yet, present the row visually as "Paid · settling" — the dot
+  // is the paid color (ink) so the user sees the row as resolved, with a
+  // small settling tag to the right. Cancelled/expired invoices stay as
+  // their own state regardless.
+  const showSettling = settling && normalisedStatus === "pending";
+  const displayStatus: DotStatus = showSettling ? "paid" : normalisedStatus;
   const [flashing, setFlashing] = useState(false);
   const previousStatus = useRef<string>(normalisedStatus);
   const [copied, setCopied] = useState(false);
+
+  // Compose the per-row status suffix:
+  //   - paid           → "Paid · 2h ago"        (timestamp from on-chain createdAt)
+  //   - settling       → "Paid · settling"      (lock present, mark_paid pending)
+  //   - pending        → "Pending · sent 2h ago"
+  //   - other variants → just the label (cancelled/expired don't carry a time)
+  const relTime = formatRelativeTime(createdAt);
+  const statusSuffix = (() => {
+    if (showSettling) return "settling";
+    if (normalisedStatus === "paid") return relTime;
+    if (normalisedStatus === "pending") return relTime ? `sent ${relTime}` : null;
+    return null;
+  })();
 
   // Detect pending → paid transition. Fire the row + dot animation
   // exactly once per transition; clear after 600ms so a re-render
@@ -156,11 +185,23 @@ export function InvoiceRow({
           {label?.amount ?? <span className="text-ink/30">—</span>}
         </span>
 
-        {/* status dot + visible label */}
+        {/* status dot + visible label. Status text composes the base
+            label with an optional separator + suffix:
+              "Paid · 2h ago"        — paid, with relative time
+              "Paid · settling"      — lock present, mark_paid pending
+              "Pending · sent 2h ago" — pending, with relative time
+            The suffix uses lower-contrast ink so the primary label still
+            reads at-a-glance. */}
         <span className="inline-flex items-center gap-2 min-w-[68px]">
-          <StatusDot status={normalisedStatus} flashing={flashing} label="" />
-          <span className="font-sans text-[12px] tracking-tight text-ink/60 capitalize">
-            {statusLabel(normalisedStatus)}
+          <StatusDot status={displayStatus} flashing={flashing} label="" />
+          <span className="font-sans text-[12px] tracking-tight text-ink/60">
+            <span className="capitalize">{statusLabel(displayStatus)}</span>
+            {statusSuffix && (
+              <>
+                <span className="text-ink/35"> · </span>
+                <span className="text-ink/45">{statusSuffix}</span>
+              </>
+            )}
           </span>
         </span>
       </div>
@@ -194,9 +235,15 @@ export function InvoiceRow({
               {dateStr}
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <StatusDot status={normalisedStatus} flashing={flashing} label="" />
-              <span className="font-sans text-[11px] tracking-tight text-ink/55 capitalize">
-                {statusLabel(normalisedStatus)}
+              <StatusDot status={displayStatus} flashing={flashing} label="" />
+              <span className="font-sans text-[11px] tracking-tight text-ink/55">
+                <span className="capitalize">{statusLabel(displayStatus)}</span>
+                {statusSuffix && (
+                  <>
+                    <span className="text-ink/35"> · </span>
+                    <span className="text-ink/45">{statusSuffix}</span>
+                  </>
+                )}
               </span>
             </span>
           </div>
@@ -245,7 +292,9 @@ export function InvoiceRow({
       ) : (
         <Link
           href={`/invoice/${pda}`}
-          aria-label={`Open invoice ${pda}, ${statusLabel(normalisedStatus)}`}
+          aria-label={`Open invoice ${pda}, ${statusLabel(displayStatus)}${
+            showSettling ? " · settling" : ""
+          }`}
           className="block px-4 py-3 hover:bg-paper-2 transition-colors duration-150 cursor-pointer"
         >
           {body}
@@ -298,7 +347,7 @@ export function InvoiceRow({
           >
             <ArrowUpRightIcon />
           </a>
-          {onBindReceipt && normalisedStatus === "pending" && (
+          {onBindReceipt && normalisedStatus === "pending" && !showSettling && (
             <button
               type="button"
               aria-label="Bind receipt to this invoice"
@@ -379,4 +428,33 @@ function formatDateShort(unixSec: number): string {
   if (sameYear) return `${month} ${day}`;
   const yy = String(d.getUTCFullYear()).slice(-2);
   return `${month} ${day} '${yy}`;
+}
+
+/**
+ * Compact relative-time for status suffix ("2h ago", "yesterday", "3d ago").
+ *
+ * Returns null when the timestamp is invalid or zero so the caller can
+ * skip rendering the separator + suffix entirely. Mirrors the helper
+ * used by IncomingInvoicesSection but slightly tuned for the dashboard
+ * row register: we use "yesterday" instead of "1d ago" because that's
+ * how the spec's example reads ("Pending · sent yesterday").
+ */
+function formatRelativeTime(unixSec: number): string | null {
+  if (!unixSec || !Number.isFinite(unixSec)) return null;
+  const epochMs = unixSec * 1000;
+  const diff = Date.now() - epochMs;
+  if (diff < 0) return null;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return "yesterday";
+  if (day < 30) return `${day}d ago`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo ago`;
+  const yr = Math.floor(mo / 12);
+  return `${yr}y ago`;
 }

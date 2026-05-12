@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PublicKey } from "@solana/web3.js";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { ClientWalletMultiButton } from "@/components/ClientWalletMultiButton";
 import { VeilLogo } from "@/components/VeilLogo";
@@ -13,7 +14,13 @@ import {
 } from "@/components/DateGroupHeader";
 import { SlideOverPanel } from "@/components/SlideOverPanel";
 import { RefreshButton } from "@/components/RefreshButton";
-import { fetchInvoicesByCreator, markPaidOnChain } from "@/lib/anchor";
+import {
+  fetchInvoicesByCreator,
+  fetchManyLocks,
+  markPaidOnChain,
+  type LockState,
+} from "@/lib/anchor";
+import { deriveLockPda } from "@/lib/lock-derivation";
 import {
   sha256,
   decryptJson,
@@ -49,9 +56,24 @@ import {
   syncPayrollRunsFromArweave,
 } from "@/lib/payroll-runs-storage";
 import { IncomingPrivatePaymentsSection } from "@/components/IncomingPrivatePaymentsSection";
+// Inbound side of the invoice flow — invoices a payer has been ASKED
+// to settle. Owned by a parallel subagent; renders with no props
+// (internally wallet-aware via useWallet, mirroring
+// IncomingPrivatePaymentsSection). Lives in the Inbox tab next to the
+// private-payments section.
+import { IncomingInvoicesSection } from "@/components/IncomingInvoicesSection";
+import { RowOverflowMenu } from "@/components/RowOverflowMenu";
 import bs58 from "bs58";
 
-type DashboardTab = "invoices" | "payroll";
+type DashboardTab = "inbox" | "sent" | "balance";
+
+/**
+ * Type filter for the merged Sent feed (Task B). "All" interleaves
+ * invoices + payroll runs by createdAt; the other two narrow to a
+ * single source. Lifted to module scope so the chip strip + the feed
+ * row can share the union type.
+ */
+type SentTypeFilter = "all" | "invoice" | "payroll";
 
 // Status filter values — lifted to module scope so child components
 // (FilterBar, LedgerSection) can type their props against the same union
@@ -64,6 +86,14 @@ type StatusFilter = "all" | "pending" | "paid" | "cancelled";
 // when the user closes the panel mid-paste.
 const RECEIPT_DRAFT_STORAGE_PREFIX = "veil:receiptDraft:";
 
+// Recency window for the receipt-suggest banner (Task A). Only Pending
+// invoices created within this window are eligible matches; anything
+// older is treated as stale (the user has likely lost track of the
+// invoice <> payment correspondence and we don't want to nudge them
+// toward the wrong one). 7 days is the spec default — bump or shrink
+// in one place without grepping the section.
+const RECEIPT_SUGGEST_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 // Storage convention + cross-device sync for signed payroll packets
 // lives in `lib/payroll-runs-storage.ts`. The dashboard imports
 // `loadCachedSignedPackets` (instant fast-path read) and
@@ -75,6 +105,36 @@ const PAYROLL_RUNS_STORAGE_PREFIX = "veil:payrollRuns:";
 function payrollRunsStorageKey(walletBase58: string): string {
   return `${PAYROLL_RUNS_STORAGE_PREFIX}${walletBase58}`;
 }
+
+/**
+ * One entry in the merged Sent feed (Task B). Discriminated union so
+ * the renderer can pick between an invoice row and a payroll row
+ * without losing static type information at the call site.
+ */
+type SentFeedEntry =
+  | {
+      kind: "invoice";
+      /** Stable React key — invoice PDA. */
+      id: string;
+      createdAtMs: number;
+      invoice: SentInvoiceShape;
+    }
+  | {
+      kind: "payroll";
+      /** Stable React key — batch id. */
+      id: string;
+      createdAtMs: number;
+      run: PayrollRunSummary;
+    };
+
+/** Mirrors what `incoming` produces — see the useMemo for `incoming`. */
+type SentInvoiceShape = {
+  pda: string;
+  creator: string;
+  metadataUri: string;
+  status: string;
+  createdAt: number;
+};
 
 type PayrollRunSummary = {
   signed: SignedPayrollPacket;
@@ -183,14 +243,37 @@ export default function DashboardPage() {
   // instead of "9TjX77RP…9Yeh". Decrypt failures (legacy invoices with the
   // old per-PDA signMessage scheme) leave the entry absent — the list
   // falls back to the truncated PDA in that case.
-  const [labels, setLabels] = useState<Map<string, { payer: string; amount: string; description: string }>>(
-    new Map(),
-  );
+  // `amount` is the formatted display string ("4,200.00 USDC"); `totalRaw`
+  // is the same value as a base-unit string ("4200000000") so the
+  // receipt-suggest matcher in IncomingPrivatePaymentsSection can compare
+  // against a UTXO's bigint amount without having to re-parse the display.
+  // `createdAtMs` mirrors the metadata's ISO `created_at` — the on-chain
+  // `account.createdAt` is unix-seconds and good enough for the "last 7
+  // days" gate, so callers can use either.
+  const [labels, setLabels] = useState<
+    Map<
+      string,
+      {
+        payer: string;
+        amount: string;
+        description: string;
+        totalRaw: string;
+        invoiceId: string;
+      }
+    >
+  >(new Map());
   // One-time-per-session cache: skip the registered/aligned diagnostics
   // on subsequent refreshes once we've verified once. Saves ~800ms of
   // RPC + key-derivation work per refresh in steady state.
   const [keysVerified, setKeysVerified] = useState(false);
-  const [tab, setTab] = useState<DashboardTab>("invoices");
+  // Top-level tab. Defaults to Inbox so a user who's primarily a
+  // recipient (payroll worker, freelancer with no own invoices yet)
+  // sees their incoming activity first. Pure useState — no URL sync —
+  // since deep-linking specific tabs isn't a hackathon-week priority.
+  const [tab, setTab] = useState<DashboardTab>("inbox");
+  // Type filter for the merged Sent feed (Task B). "all" interleaves
+  // invoice + payroll rows by createdAt; the chip strip flips this.
+  const [sentTypeFilter, setSentTypeFilter] = useState<SentTypeFilter>("all");
   // Signed payroll packets read from localStorage. Loaded reactively
   // when the wallet changes; storage event listener keeps the count
   // current if a sibling tab signs a new batch.
@@ -242,6 +325,30 @@ export default function DashboardPage() {
   // scope so the FilterBar component can share the type.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Per-invoice on-chain `PaymentIntentLock` snapshot. Keyed by invoice
+  // PDA base58 → LockState if the lock account exists, null if it
+  // doesn't, undefined if we haven't fetched yet. The lock IS the
+  // on-chain proof of payment; rendering "Paid · settling" is purely a
+  // function of this Map and on-chain status. Refresh writes a new Map
+  // so a status flip causes a re-render.
+  const [locksByInvoice, setLocksByInvoice] = useState<
+    Map<string, LockState | null>
+  >(new Map());
+  // Per-load dedupe: invoice PDAs we've already fired a lazy mark_paid
+  // for in this React session. Prevents duplicate sends when the 30s
+  // refresh interval re-runs over the same lock-present row before the
+  // next on-chain fetch reflects the flip. Held in a ref so updates
+  // don't trigger renders.
+  const lazyMarkPaidFired = useRef<Set<string>>(new Set());
+  // Toast state for the auto-flip success banner. Set by the lazy
+  // mark_paid handler; auto-clears after 4 seconds.
+  const [autoFlipToast, setAutoFlipToast] = useState<string | null>(null);
+  // Sent-tab "More ▾" overflow dropdown state. Encloses the
+  // import-receipt entry that used to live as a primary chip in the
+  // FilterBar — now demoted to a recovery affordance per the
+  // banking-grade UX plan.
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
 
   async function refresh() {
     if (!wallet.publicKey) return;
@@ -414,7 +521,16 @@ export default function DashboardPage() {
       // User declined the one-time signature — skip labels entirely.
       return;
     }
-    const next = new Map<string, { payer: string; amount: string; description: string }>();
+    const next = new Map<
+      string,
+      {
+        payer: string;
+        amount: string;
+        description: string;
+        totalRaw: string;
+        invoiceId: string;
+      }
+    >();
     await Promise.all(
       invoices.map(async (inv: any) => {
         try {
@@ -439,6 +555,8 @@ export default function DashboardPage() {
             payer: md.payer?.display_name || "Unknown payer",
             amount: `${formatBigintAmount(total, decimals)} ${symbol}`,
             description,
+            totalRaw: total.toString(),
+            invoiceId: md.invoice_id,
           });
         } catch {
           // Legacy invoice (per-PDA signMessage key) or fetch/parse error.
@@ -756,6 +874,56 @@ export default function DashboardPage() {
       .sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [payrollRuns]);
 
+  /**
+   * Receipt-suggest matcher (Task A). Resolves a claimed UTXO amount to
+   * exactly one Pending invoice the connected wallet has SENT, created
+   * within the recency window. Returns null when zero or multiple
+   * invoices match — the section is intentionally conservative because
+   * a wrong suggestion would steer the user toward binding the wrong
+   * receipt.
+   *
+   * Closes over `invoices` + `labels`, so it gets re-derived whenever
+   * either changes. We hand it to IncomingPrivatePaymentsSection as a
+   * plain function rather than a precomputed candidate because the
+   * section doesn't know the claimed amount until the SDK call returns.
+   */
+  const findReceiptCandidate = useMemo(() => {
+    return (claimedAmount: bigint) => {
+      // Compute the cutoff at call time, not at memo creation, so a
+      // dashboard left open across the day-boundary still uses an
+      // accurate "last 7 days" window.
+      const cutoffMs = Date.now() - RECEIPT_SUGGEST_WINDOW_MS;
+      const matches: Array<{ pda: string; shortId: string }> = [];
+      for (const inv of invoices) {
+        if (!isPendingInvoice(inv)) continue;
+        // on-chain createdAt is unix-seconds
+        const createdMs = Number(inv.account.createdAt) * 1000;
+        if (!Number.isFinite(createdMs) || createdMs < cutoffMs) continue;
+        const pda = inv.pda.toBase58();
+        const label = labels.get(pda);
+        if (!label || !label.totalRaw) continue;
+        let total: bigint;
+        try {
+          total = BigInt(label.totalRaw);
+        } catch {
+          continue;
+        }
+        if (total !== claimedAmount) continue;
+        matches.push({
+          pda,
+          // Prefer the human invoice_id from metadata; fall back to a
+          // truncated PDA so the banner copy still reads naturally for
+          // legacy invoices that didn't capture an invoice_id.
+          shortId: label.invoiceId || `${pda.slice(0, 6)}…${pda.slice(-4)}`,
+        });
+        // Short-circuit on the second match — we already know we'll
+        // return null, no need to keep walking.
+        if (matches.length > 1) return null;
+      }
+      return matches.length === 1 ? matches[0] : null;
+    };
+  }, [invoices, labels]);
+
   // NOTE: All `useMemo` calls below MUST stay above the `if (!wallet.connected)`
   // early return. Moving them below violates Rules of Hooks (different render
   // paths call different numbers of hooks → "Rendered more hooks than during
@@ -788,6 +956,176 @@ export default function DashboardPage() {
     () => incoming.filter((invoice) => invoice.status === "pending"),
     [incoming],
   );
+
+  // Batch-fetch `PaymentIntentLock` PDAs for every Pending invoice once
+  // per `incoming` change. Paid rows already settled don't need a lock
+  // probe (the on-chain status is already the canonical truth);
+  // cancelled/expired rows obviously don't pay either. We fetch everything
+  // in a single `getMultipleAccountsInfo` call (chunked to 100 by the
+  // helper) — for typical dashboards (≤50 invoices) that's exactly one
+  // RPC call per refresh.
+  //
+  // After the lock fetch resolves, AND the connected wallet is the
+  // creator of a row with status==Pending and lock!=null, we fire-and-
+  // forget `markPaidOnChain` to flip on-chain status. We dedupe by PDA
+  // in `lazyMarkPaidFired` so the 30s refresh interval doesn't
+  // re-trigger before the next fetch reflects the flip; the on-chain
+  // program rejects duplicates with `InvalidStatus` anyway, but skipping
+  // them client-side saves SOL fees and Phantom popup noise.
+  useEffect(() => {
+    if (!wallet.publicKey) return;
+    const pendingPdaList = incoming
+      .filter((inv) => inv.status === "pending")
+      .map((inv) => inv.pda);
+    if (pendingPdaList.length === 0) {
+      // Clear stale lock state when there's nothing pending — keeps
+      // the Map small as paid invoices accumulate.
+      if (locksByInvoice.size > 0) setLocksByInvoice(new Map());
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        // Defensive try/catch around deriveLockPda — `findProgramAddressSync`
+        // can throw "Unable to find a viable program address nonce" for
+        // synthetic PDAs (notably in tests). Real on-chain invoice PDAs
+        // always admit a valid bump, so in production this never fires.
+        const lockPdas: PublicKey[] = [];
+        const lockSourcePdas: string[] = [];
+        for (const pda of pendingPdaList) {
+          try {
+            lockPdas.push(deriveLockPda(new PublicKey(pda)));
+            lockSourcePdas.push(pda);
+          } catch {
+            // Skip — the row will render without a settling chip.
+          }
+        }
+        if (lockPdas.length === 0) {
+          if (locksByInvoice.size > 0) setLocksByInvoice(new Map());
+          return;
+        }
+        const lockMap = await fetchManyLocks(wallet as any, lockPdas);
+        if (cancelled) return;
+        // Re-key by invoice PDA for the renderer (the renderer doesn't
+        // care about the lock's own PDA — it just wants "does this
+        // invoice have a lock?").
+        const next = new Map<string, LockState | null>();
+        for (let i = 0; i < lockSourcePdas.length; i += 1) {
+          const invoicePda = lockSourcePdas[i];
+          const lockPda = lockPdas[i].toBase58();
+          next.set(invoicePda, lockMap.get(lockPda) ?? null);
+        }
+        setLocksByInvoice(next);
+
+        // Lazy mark_paid: fire-and-forget once per session per PDA.
+        // utxo_commitment uses zeros — the lock PDA is the canonical
+        // proof of payment, the utxo_commitment is informational-only
+        // for receipts older than the lock-PDA design (pre-Fix 2).
+        // Documented in the README + this comment block.
+        const creatorBase58 = wallet.publicKey?.toBase58();
+        if (!creatorBase58) return;
+        for (const inv of incoming) {
+          if (inv.status !== "pending") continue;
+          if (inv.creator !== creatorBase58) continue;
+          if (lazyMarkPaidFired.current.has(inv.pda)) continue;
+          const lock = next.get(inv.pda);
+          if (!lock) continue;
+          lazyMarkPaidFired.current.add(inv.pda);
+          (async () => {
+            try {
+              await markPaidOnChain(
+                wallet as any,
+                new PublicKey(inv.pda),
+                new Uint8Array(32),
+              );
+              if (cancelled) return;
+              setAutoFlipToast("Invoice marked paid — verified on-chain");
+              // Trigger one short refresh so the on-chain status flip
+              // shows up immediately instead of after the next 30s tick.
+              await refresh();
+            } catch (err: any) {
+              const msg = String(err?.message ?? err);
+              const alreadyPaid =
+                /InvalidStatus/i.test(msg) ||
+                /0x1771/i.test(msg) ||
+                /Error Number: 6001/i.test(msg);
+              if (alreadyPaid) {
+                // Another tab beat us to it — silently fine.
+                return;
+              }
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[Veil dashboard] lazy mark_paid for ${inv.pda} failed:`,
+                err,
+              );
+            }
+          })();
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[Veil dashboard] fetchManyLocks failed:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // We intentionally don't depend on `locksByInvoice` (it's the output)
+    // or on `refresh` (stable closure over wallet).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incoming, wallet.publicKey]);
+
+  // Auto-clear the toast 4 seconds after it appears. Uses a small
+  // stable-key effect so consecutive auto-flips reset the timer rather
+  // than stack timers. Non-blocking — toast doesn't trap focus or
+  // require user interaction.
+  useEffect(() => {
+    if (!autoFlipToast) return;
+    const t = setTimeout(() => setAutoFlipToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [autoFlipToast]);
+
+  // Merged Sent feed (Task B). Invoices + payroll runs interleaved by
+  // createdAt DESC. Each entry carries a `kind` discriminator so the
+  // row component can pick the right rendering. We DON'T refetch
+  // anything — both sources are already in state above.
+  //
+  // Tiebreaker on equal timestamps: invoices first then payroll, so
+  // when a single payroll batch creates a swarm of invoices in the
+  // same second the per-invoice rows still appear above the run
+  // summary (matches the user's mental model — they signed the run,
+  // then it produced these invoices).
+  const sentFeed = useMemo<SentFeedEntry[]>(() => {
+    const entries: SentFeedEntry[] = [];
+    for (const inv of incoming) {
+      entries.push({
+        kind: "invoice",
+        id: inv.pda,
+        createdAtMs: inv.createdAt * 1000,
+        invoice: inv,
+      });
+    }
+    for (const run of payrollRunSummaries) {
+      entries.push({
+        kind: "payroll",
+        id: run.signed.packet.batchId,
+        createdAtMs: run.createdAtMs,
+        run,
+      });
+    }
+    entries.sort((a, b) => {
+      if (b.createdAtMs !== a.createdAtMs) return b.createdAtMs - a.createdAtMs;
+      // Stable secondary: invoice before payroll.
+      if (a.kind !== b.kind) return a.kind === "invoice" ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    return entries;
+  }, [incoming, payrollRunSummaries]);
+
+  const filteredSentFeed = useMemo(() => {
+    if (sentTypeFilter === "all") return sentFeed;
+    return sentFeed.filter((e) => e.kind === sentTypeFilter);
+  }, [sentFeed, sentTypeFilter]);
 
   // Filter + search applied to the displayed list. ~30 invoices is
   // small enough that filtering on every keystroke is essentially free
@@ -916,10 +1254,22 @@ export default function DashboardPage() {
       <SlideOverPanel
         open={receiptPanelOpen}
         onClose={() => setReceiptPanelOpen(false)}
-        title="Apply payer receipt"
+        title="Import receipt"
         subtitle="Paste the signed receipt URL or blob your payer generated. We verify the ed25519 signature locally before submitting on-chain."
       >
         <div className="flex flex-col gap-4">
+          {/* Recovery-flow note — surfaces this panel's role as a
+              fallback. The primary flow is now lock-PDA auto-settle;
+              this is the manual override for off-channel payments or
+              auto-detection failures. */}
+          <div className="border-l-2 border-line pl-3 py-1">
+            <p className="text-[12.5px] text-ink/65 leading-[1.55]">
+              Recovery flow. Most invoices auto-settle when the on-chain
+              payment lock is detected — no manual import needed. Use this
+              if you received a payment outside the invoice link or if
+              auto-detection failed.
+            </p>
+          </div>
           <div className="flex items-center justify-between gap-3">
             <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
               Receipt
@@ -1004,154 +1354,100 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Recipient-side activity (Phase B). Lives above the invoices /
-          payroll tab bar so a user who is purely on the receiving side
-          (no invoices, no payroll runs) sees their own activity at the
-          top instead of empty tabs. The section is internally
-          wallet-aware and renders nothing when disconnected. */}
-      <IncomingPrivatePaymentsSection wallet={wallet} />
-
-      {/* Tab bar — austere mono, hairline rule, 2px ink underline on active */}
+      {/* Top-level tab bar — Inbox / Sent / Balance. Mercury/Linear
+          register: hairline underline on the row, 2px ink underline on
+          the active tab. No chunky pills. Counts are quietly tabular
+          right after the label so a fresh user with empty state sees
+          structure rather than three identical chrome stubs. */}
       <div className="border-b border-line mb-10">
         <div className="flex gap-8">
-          <button
-            type="button"
-            onClick={() => setTab("invoices")}
-            className={`pb-3 text-[13px] font-mono tracking-[0.1em] uppercase border-b-2 -mb-[2px] transition-colors ${
-              tab === "invoices"
-                ? "border-ink text-ink"
-                : "border-transparent text-muted hover:text-ink"
-            }`}
-            aria-pressed={tab === "invoices"}
-          >
-            Invoices · {invoiceCount}
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("payroll")}
-            className={`pb-3 text-[13px] font-mono tracking-[0.1em] uppercase border-b-2 -mb-[2px] transition-colors ${
-              tab === "payroll"
-                ? "border-ink text-ink"
-                : "border-transparent text-muted hover:text-ink"
-            }`}
-            aria-pressed={tab === "payroll"}
-          >
-            Payroll runs · {payrollRunCount}
-          </button>
+          <DashboardTabButton
+            label="Inbox"
+            active={tab === "inbox"}
+            onClick={() => setTab("inbox")}
+          />
+          <DashboardTabButton
+            label="Sent"
+            count={invoiceCount + payrollRunCount}
+            active={tab === "sent"}
+            onClick={() => setTab("sent")}
+          />
+          <DashboardTabButton
+            label="Balance"
+            active={tab === "balance"}
+            onClick={() => setTab("balance")}
+          />
         </div>
       </div>
 
-      {tab === "invoices" && (
-        <>
-          {balance !== null && (
-            <div className="mb-10 border border-line bg-paper-3 rounded-[4px] p-6 md:p-8 reveal">
-              <div className="flex items-start justify-between gap-6 flex-wrap">
-                {/* Left: status + eyebrow + amount. Mercury-style hierarchy. */}
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2.5 mb-1">
-                    <span
-                      aria-hidden
-                      className="h-1.5 w-1.5 rounded-full bg-sage"
-                    />
-                    <span className="font-mono text-[10.5px] tracking-[0.18em] uppercase text-ink/55">
-                      Private balance
-                    </span>
-                  </div>
-                  <div className="mt-3 flex items-baseline gap-3">
-                    <span className="font-sans tabular-nums tracking-tight text-ink text-[40px] md:text-[52px] font-medium leading-none">
-                      {formatBigintAmount(balance, PAYMENT_DECIMALS)}
-                    </span>
-                    <span className="font-mono text-[12px] tracking-[0.14em] text-ink/45 uppercase">
-                      {PAYMENT_SYMBOL}
-                    </span>
-                  </div>
-                  <p className="mt-2.5 text-[12px] text-ink/45 leading-relaxed">
-                    Encrypted at rest. Decryptable only by your wallet.
-                  </p>
-                </div>
-
-                {/* Right: paired primary actions, Coinbase-style. */}
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setDepositOpen((v) => !v)}
-                    disabled={depositing}
-                    aria-expanded={depositOpen}
-                    className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-50 transition-colors"
-                  >
-                    <span aria-hidden className="text-ink/55">↓</span>
-                    <span>{depositing ? "Depositing…" : "Deposit"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleWithdrawAll}
-                    disabled={withdrawing || balance <= 0n}
-                    className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-40 transition-colors"
-                  >
-                    <span aria-hidden className="text-ink/55">↑</span>
-                    <span>{withdrawing ? "Withdrawing…" : "Withdraw"}</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Deposit form — inline expansion. Hairline border separator
-                  matches the visual language of the receipt-paste panel. */}
-              {depositOpen && (
-                <div className="mt-6 pt-6 border-t border-line">
-                  <div className="flex flex-wrap items-end gap-4">
-                    <label className="flex flex-col gap-2">
-                      <span className="font-mono text-[10.5px] tracking-[0.16em] uppercase text-ink/55">
-                        Amount to shield
-                      </span>
-                      <div className="relative">
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          placeholder="1.0"
-                          value={depositAmount}
-                          onChange={(e) => setDepositAmount(e.target.value)}
-                          disabled={depositing}
-                          autoFocus
-                          className="font-sans tabular-nums text-[20px] bg-paper-2 border border-line rounded-[3px] pl-3 pr-12 py-2.5 w-44 focus:outline-none focus:border-ink/40 transition-colors"
-                        />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/45 pointer-events-none">
-                          {PAYMENT_SYMBOL}
-                        </span>
-                      </div>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={handleDepositToShielded}
-                      disabled={depositing || !depositAmount}
-                      className="btn-primary text-[12.5px] px-5 py-2.5 disabled:opacity-40"
-                    >
-                      {depositing ? "Depositing…" : "Shield privately"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDepositOpen(false);
-                        setDepositAmount("");
-                      }}
-                      disabled={depositing}
-                      className="text-[12.5px] text-ink/55 hover:text-ink underline-offset-4 hover:underline transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  <p className="mt-4 text-[12px] text-ink/50 leading-[1.55] max-w-xl">
-                    Moves SOL from your public wallet into your encrypted
-                    balance through Umbra&apos;s mixer. This deposit tx is
-                    publicly visible — every payment system has to anchor to
-                    real money somewhere. But every subsequent payroll run
-                    sourced from this balance hides the amount on chain.
-                    Settles in ~10–30 s through Arcium MPC.
-                  </p>
-                </div>
-              )}
-            </div>
+      {/* Errors + notices live above the tab content so they aren't
+          hidden behind a tab switch. The receiver-key repair affordance
+          rides along with the error block since it's strictly an Umbra-
+          channel issue surfaced during refresh. */}
+      {error && (
+        <div className="mb-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-2xl">
+          <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
+          <span className="text-[13.5px] text-ink leading-relaxed flex-1">{error}</span>
+          {receiverKeyMismatch && (
+            <button
+              type="button"
+              onClick={handleRepairReceiverKey}
+              disabled={repairingReceiverKey}
+              className="btn-ghost text-[12px] px-3 py-1.5 shrink-0"
+            >
+              {repairingReceiverKey ? "Repairing..." : "Repair Umbra key"}
+            </button>
           )}
+        </div>
+      )}
 
+      {notice && (
+        <div className="mb-8 flex items-start gap-4 border-l-2 border-sage pl-4 py-2 max-w-2xl">
+          <span className="mono-chip text-sage shrink-0 pt-0.5">Note</span>
+          <span className="text-[13.5px] text-ink leading-relaxed flex-1">{notice}</span>
+        </div>
+      )}
+
+      {/* Auto-flip toast — surfaces the lazy mark_paid that fires when
+          the dashboard detects a `PaymentIntentLock` on a Pending row.
+          Non-blocking, dismisses on its own after 4s. Same visual
+          register as the persistent notice above so the styling stays
+          consistent. */}
+      {autoFlipToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-8 flex items-start gap-4 border-l-2 border-sage pl-4 py-2 max-w-2xl"
+        >
+          <span className="mono-chip text-sage shrink-0 pt-0.5">Settled</span>
+          <span className="text-[13.5px] text-ink leading-relaxed flex-1">
+            {autoFlipToast}
+          </span>
+        </div>
+      )}
+
+      {tab === "inbox" && (
+        <>
+          {/* Recipient-side private payments — pending claims + history.
+              Now passes the receipt-suggest matcher so the section can
+              surface a "matches invoice X — bind receipt?" banner after
+              a successful claim. */}
+          <IncomingPrivatePaymentsSection
+            wallet={wallet}
+            findReceiptCandidate={findReceiptCandidate}
+            onBindReceipt={(pda) => openReceiptPanel(pda)}
+          />
+          {/* Inbound invoices — invoices a payer has been asked to settle.
+              Component lives in a parallel subagent's PR; we render it
+              with no props (integration assumption: internally wallet-
+              aware via useWallet, mirrors the IncomingPrivatePaymentsSection
+              pattern). */}
+          <IncomingInvoicesSection />
+        </>
+      )}
+
+      {tab === "sent" && (
+        <>
           {unmatchedClaims > 0 && (
             <div className="mb-6 flex items-start gap-4 border-l-2 border-gold pl-4 py-2 max-w-2xl">
               <span className="mono-chip text-gold shrink-0 pt-0.5">Unmatched</span>
@@ -1164,72 +1460,68 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {error && (
-            <div className="mb-8 flex items-start gap-4 border-l-2 border-brick pl-4 py-2 max-w-2xl">
-              <span className="mono-chip text-brick shrink-0 pt-0.5">Error</span>
-              <span className="text-[13.5px] text-ink leading-relaxed flex-1">{error}</span>
-              {receiverKeyMismatch && (
-                <button
-                  type="button"
-                  onClick={handleRepairReceiverKey}
-                  disabled={repairingReceiverKey}
-                  className="btn-ghost text-[12px] px-3 py-1.5 shrink-0"
-                >
-                  {repairingReceiverKey ? "Repairing..." : "Repair Umbra key"}
-                </button>
-              )}
-            </div>
-          )}
+          {/* Type chip strip — All / Invoices / Payroll. Sits above the
+              merged feed; identical visual register to the FilterBar
+              status pills below for invoice-status filtering. The
+              "More ▾" dropdown sits to its right and gates the
+              recovery-flow receipt-import affordance (per the
+              banking-grade reconciliation UX plan: most invoices now
+              auto-settle, so manual import is no longer primary). */}
+          <div className="mb-6 flex items-center justify-between gap-4 flex-wrap">
+            <SentTypeChips
+              value={sentTypeFilter}
+              setValue={setSentTypeFilter}
+              invoiceCount={invoiceCount}
+              payrollCount={payrollRunCount}
+            />
+            <SentMoreMenu
+              open={moreMenuOpen}
+              setOpen={setMoreMenuOpen}
+              onImportReceipt={() => {
+                setMoreMenuOpen(false);
+                openReceiptPanel();
+              }}
+            />
+          </div>
 
-          {notice && (
-            <div className="mb-8 flex items-start gap-4 border-l-2 border-sage pl-4 py-2 max-w-2xl">
-              <span className="mono-chip text-sage shrink-0 pt-0.5">Note</span>
-              <span className="text-[13.5px] text-ink leading-relaxed flex-1">{notice}</span>
-            </div>
-          )}
-
-          {/* Filter + search controls — modern command-bar feel.
-              2026-05-04 refinement: replaced the chunky <select> with
-              inline pill segments (Linear / Phantom inspired); search
-              shed its border for an icon + bottom-rule underline that
-              deepens to gold on focus; "Bind receipt" demoted from a
-              boxed btn-ghost to a quiet text link with arrow. The whole
-              row reads airy now — typography carries the structure, not
-              borders. */}
-          {incoming.length > 0 && (
+          {/* Status filter + search applies to invoice-typed rows in the
+              feed. Hidden when the active type filter is "payroll" (no
+              invoices to filter) and when the underlying invoice list
+              is empty. */}
+          {sentTypeFilter !== "payroll" && incoming.length > 0 && (
             <FilterBar
               statusFilter={statusFilter}
               setStatusFilter={setStatusFilter}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
-              pendingCount={pendingInvoices.length}
-              onBindReceipt={() => openReceiptPanel()}
             />
           )}
 
-          {/* List body. */}
+          {/* Merged feed body. Empty/skeleton states branch on whether
+              we've fetched yet AND whether either source has data. */}
           {(() => {
-            // Initial-fetch skeleton (NN/G recommends skeleton over
-            // spinner for content lists). Renders ~3 placeholder rows
-            // matching the editorial-row layout while invoices load.
-            if (loading && !hasFetchedOnce) {
-              return <LedgerSkeleton />;
+            if (loading && !hasFetchedOnce) return <LedgerSkeleton />;
+
+            if (sentFeed.length === 0) {
+              return <SentEmptyState />;
             }
 
-            // Single chronological list. Date-group sticky headers carry
-            // the structure; per-row status dot+label differentiates pending
-            // vs paid. No pending/paid subsection split — the list reads as
-            // one continuous ledger, not categorical buckets. (Status filter
-            // dropdown above lets the user narrow by state when they want.)
-            if (incoming.length === 0) {
-              return <LedgerEmptyState kind="zero" />;
-            }
+            // Pre-filter the feed by:
+            //  - the type chip ("all" | "invoice" | "payroll")
+            //  - status + search ONLY for invoice rows (payroll runs
+            //    are surfaced as-is regardless of those controls —
+            //    they have their own state model)
+            const visible = filteredSentFeed.filter((entry) => {
+              if (entry.kind !== "invoice") return true;
+              return filteredInvoices.some((fi) => fi.pda === entry.invoice.pda);
+            });
 
-            if (filteredInvoices.length === 0) {
+            if (visible.length === 0) {
               return (
                 <LedgerEmptyState
                   kind="filtered"
                   onClear={() => {
+                    setSentTypeFilter("all");
                     setStatusFilter("all");
                     setSearchQuery("");
                   }}
@@ -1237,21 +1529,17 @@ export default function DashboardPage() {
               );
             }
 
-            // 2026-05-04 redesign: dropped the section title — the
-            // FilterBar above already shows which status is active and
-            // the date-group headers carry the structure inside the
-            // list. Adding a "Pending invoices" caption right above
-            // them was redundant noise.
             return (
-              <LedgerSection
-                invoices={filteredInvoices}
+              <SentFeed
+                entries={visible}
                 labels={labels}
+                locksByInvoice={locksByInvoice}
                 onBindReceipt={(pda) => openReceiptPanel(pda)}
               />
             );
           })()}
 
-          {batchList.length > 0 && (
+          {batchList.length > 0 && sentTypeFilter !== "payroll" && (
             <div className="mt-14">
               <div className="flex items-baseline justify-between mb-6 border-b border-line pb-3">
                 <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
@@ -1298,8 +1586,18 @@ export default function DashboardPage() {
         </>
       )}
 
-      {tab === "payroll" && (
-        <PayrollRunsView runs={payrollRunSummaries} />
+      {tab === "balance" && (
+        <BalanceTab
+          balance={balance}
+          depositOpen={depositOpen}
+          setDepositOpen={setDepositOpen}
+          depositAmount={depositAmount}
+          setDepositAmount={setDepositAmount}
+          depositing={depositing}
+          withdrawing={withdrawing}
+          onDeposit={handleDepositToShielded}
+          onWithdrawAll={handleWithdrawAll}
+        />
       )}
     </Shell>
   );
@@ -1334,7 +1632,16 @@ function LedgerSection({
   onBindReceipt,
 }: {
   invoices: Array<LedgerInvoice>;
-  labels: Map<string, { payer: string; amount: string; description: string }>;
+  labels: Map<
+    string,
+    {
+      payer: string;
+      amount: string;
+      description: string;
+      totalRaw: string;
+      invoiceId: string;
+    }
+  >;
   onBindReceipt: (pda: string) => void;
 }) {
   // Bucket the (already sorted DESC by createdAt) list. Empty buckets
@@ -1487,15 +1794,11 @@ function FilterBar({
   setStatusFilter,
   searchQuery,
   setSearchQuery,
-  pendingCount,
-  onBindReceipt,
 }: {
   statusFilter: StatusFilter;
   setStatusFilter: (v: StatusFilter) => void;
   searchQuery: string;
   setSearchQuery: (v: string) => void;
-  pendingCount: number;
-  onBindReceipt: () => void;
 }) {
   const segments: ReadonlyArray<{ value: StatusFilter; label: string }> = [
     { value: "all", label: "All" },
@@ -1560,19 +1863,11 @@ function FilterBar({
         )}
       </label>
 
-      {/* Bind receipt — quiet text link with arrow, not a boxed
-          button. Hidden when there are no pending invoices to bind. */}
-      {pendingCount > 0 && (
-        <button
-          type="button"
-          onClick={onBindReceipt}
-          aria-label="Open the apply-receipt panel"
-          className="self-start sm:self-auto font-mono text-[11px] tracking-[0.14em] uppercase text-gold hover:text-ink transition-colors inline-flex items-center gap-1.5 shrink-0"
-        >
-          <span>bind receipt</span>
-          <span aria-hidden>&rarr;</span>
-        </button>
-      )}
+      {/* Import-receipt button used to live here. Moved 2026-05-06 to a
+          "More ▾" overflow menu in the Sent tab header — most invoices
+          now auto-settle from the on-chain `PaymentIntentLock`, so
+          manual receipt import is a recovery flow, not a primary
+          affordance. */}
     </div>
   );
 }
@@ -1701,52 +1996,471 @@ function LedgerSkeleton() {
   );
 }
 
-function PayrollRunsView({ runs }: { runs: PayrollRunSummary[] }) {
-  if (runs.length === 0) {
-    return (
-      <div className="reveal">
-        <div className="flex items-baseline justify-between mb-4">
-          <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-            Outgoing payroll runs
-          </span>
-          <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
-            00
-          </span>
-        </div>
-        <div className="border border-dashed border-line rounded-[4px] py-16 px-8 text-center max-w-2xl mx-auto">
-          <p className="font-display italic text-ink/80 text-[22px] leading-[1.3]">
-            No payroll runs yet.
-          </p>
-          <p className="mt-3 text-[13.5px] text-ink/55 leading-relaxed max-w-md mx-auto">
-            Sign your first batch in Create &rarr; Payroll. Once signed, every
-            run shows up here with its disclosure links and settlement status.
-          </p>
-          <a href="/create" className="mt-6 inline-block btn-ghost text-[13px] px-5 py-2.5">
-            Go to Create &rarr;
-          </a>
-        </div>
-      </div>
-    );
-  }
+/**
+ * Top-level dashboard tab button — Mercury/Linear register.
+ * Hairline base + 2px ink underline on active. Mono small-caps. The
+ * active tab gets `text-ink`, inactive gets `text-muted` with hover
+ * fading toward `text-ink`. `count` is rendered as a quiet tabular
+ * suffix when present (used by Sent so the user sees how much "stuff"
+ * is queued without opening the tab).
+ */
+function DashboardTabButton({
+  label,
+  active,
+  count,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  count?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={[
+        "pb-3 -mb-[2px] border-b-2",
+        "text-[13px] font-mono tracking-[0.1em] uppercase",
+        "transition-colors",
+        active
+          ? "border-ink text-ink"
+          : "border-transparent text-muted hover:text-ink",
+      ].join(" ")}
+    >
+      <span>{label}</span>
+      {typeof count === "number" && (
+        <span
+          className={`ml-2 tabular-nums ${
+            active ? "text-ink/55" : "text-ink/30"
+          }`}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/**
+ * Type chip strip for the Sent feed. All / Invoices / Payroll. Same
+ * pill register as the FilterBar status chips below — keeps the visual
+ * vocabulary tight (one chip style across the page).
+ */
+function SentTypeChips({
+  value,
+  setValue,
+  invoiceCount,
+  payrollCount,
+}: {
+  value: SentTypeFilter;
+  setValue: (v: SentTypeFilter) => void;
+  invoiceCount: number;
+  payrollCount: number;
+}) {
+  const segments: ReadonlyArray<{
+    value: SentTypeFilter;
+    label: string;
+    count?: number;
+  }> = [
+    { value: "all", label: "All", count: invoiceCount + payrollCount },
+    { value: "invoice", label: "Invoices", count: invoiceCount },
+    { value: "payroll", label: "Payroll", count: payrollCount },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Filter sent items by type"
+      className="inline-flex items-center gap-1"
+    >
+      {segments.map((seg) => {
+        const active = value === seg.value;
+        return (
+          <button
+            key={seg.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => setValue(seg.value)}
+            className={[
+              "px-3 py-1.5 rounded-full",
+              "font-mono text-[10.5px] tracking-[0.14em] uppercase",
+              "transition-colors duration-150 inline-flex items-center gap-2",
+              active
+                ? "bg-paper-2 text-ink"
+                : "text-ink/45 hover:text-ink hover:bg-paper-2/40",
+            ].join(" ")}
+          >
+            <span>{seg.label}</span>
+            {typeof seg.count === "number" && (
+              <span className="tabular-nums text-ink/35">{seg.count}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Sent-tab "More ▾" overflow dropdown.
+ *
+ * Demoted home for the receipt-import affordance — pre-2026-05-06 it
+ * lived as a primary chip in the FilterBar toolbar, but most invoices
+ * now auto-settle from the on-chain `PaymentIntentLock`, so manual
+ * import has been moved to a recovery-only surface here.
+ *
+ * Click-toggle dropdown — no portal, no new dependency. Closes on
+ * outside click via a body-level listener that reads
+ * `event.composedPath()` so the menu's own buttons don't dismiss it
+ * before the click handler fires.
+ */
+function SentMoreMenu({
+  open,
+  setOpen,
+  onImportReceipt,
+}: {
+  open: boolean;
+  setOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
+  onImportReceipt: () => void;
+}) {
+  // Outside-click + Escape close. Listeners only mount while the menu
+  // is open so they don't compete with other body-level handlers in the
+  // happy path. We test `instanceof Element` before calling `.closest`
+  // because `ev.target` can be a Document or Window in edge cases (e.g.
+  // clicks dispatched via DevTools).
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(ev: MouseEvent) {
+      const t = ev.target;
+      if (t instanceof Element && !t.closest("[data-sent-more-menu]")) {
+        setOpen(false);
+      }
+    }
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, setOpen]);
 
   return (
-    <div className="reveal">
-      <div className="flex items-baseline justify-between mb-4">
-        <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/50">
-          Outgoing payroll runs
+    <div className="relative" data-sent-more-menu>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More actions"
+        className={[
+          "inline-flex items-center gap-1.5",
+          "font-mono text-[11px] tracking-[0.14em] uppercase",
+          "text-ink/55 hover:text-ink transition-colors",
+          "px-2 py-1.5 rounded-[3px]",
+          open ? "bg-paper-2/60 text-ink" : "",
+        ].join(" ")}
+      >
+        <span>More</span>
+        <span aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`}>
+          ▾
         </span>
-        <span className="font-sans text-[10.5px] tabular-nums tracking-[0.12em] text-ink/40">
-          {String(runs.length).padStart(2, "0")}
-        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className={[
+            "absolute right-0 top-full mt-1 z-30 min-w-[200px]",
+            "border border-line bg-paper rounded-[3px]",
+            "shadow-[0_2px_12px_-4px_rgba(28,23,18,0.18)]",
+            "py-1",
+          ].join(" ")}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onImportReceipt}
+            aria-label="Open the apply-receipt panel"
+            className="w-full text-left px-3 py-2 font-sans text-[13px] text-ink/75 hover:bg-paper-2 hover:text-ink transition-colors"
+          >
+            Import receipt
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Type badge for Sent feed rows — small mono chip indicating whether
+ * the row is an Invoice or a Payroll run. Uses the existing accent
+ * tokens (gold for invoices, sage for payroll) so the badge sits in
+ * the established visual language without adding new design tokens.
+ */
+function SentTypeBadge({ kind }: { kind: "invoice" | "payroll" }) {
+  const cls =
+    kind === "invoice"
+      ? "border-ink/15 text-ink/65 bg-paper-2/60"
+      : "border-sage/40 text-sage bg-sage/5";
+  const label = kind === "invoice" ? "Invoice" : "Payroll";
+  return (
+    <span
+      className={`shrink-0 inline-block px-2 py-[3px] border rounded-[2px] font-mono text-[9.5px] tracking-[0.14em] uppercase ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Merged Sent feed body. Walks the discriminated union of entries and
+ * renders the right row component per kind. Both row variants live
+ * inside the same hairline-bordered container so the eye sees one
+ * continuous ledger rather than two stacked sections.
+ */
+function SentFeed({
+  entries,
+  labels,
+  locksByInvoice,
+  onBindReceipt,
+}: {
+  entries: SentFeedEntry[];
+  labels: Map<
+    string,
+    {
+      payer: string;
+      amount: string;
+      description: string;
+      totalRaw: string;
+      invoiceId: string;
+    }
+  >;
+  locksByInvoice: Map<string, LockState | null>;
+  onBindReceipt: (pda: string) => void;
+}) {
+  // Outer container is a <div>, not a <ul>: InvoiceRow and
+  // PayrollRunRow each render their own <li> internally, so each entry
+  // gets its own single-item <ul> wrapper to keep the <li> validly
+  // parented. Previously this was <ul><li><InvoiceRow/></li></ul> which
+  // produced <li> directly inside <li> (React DOM-nesting warning).
+  // Divide-y on the outer <div> keeps the visual register identical.
+  return (
+    <div className="border border-line rounded-[4px] bg-paper-3 divide-y divide-line">
+      {entries.map((entry, idx) => {
+        if (entry.kind === "invoice") {
+          const inv = entry.invoice;
+          // settling = on-chain lock present but invoice status still
+          // Pending. The lock is the canonical proof of payment; the
+          // invoice account hasn't been mark_paid'd yet (creator hasn't
+          // settled it, or the lazy mark_paid is in-flight).
+          const settling =
+            inv.status === "pending" && !!locksByInvoice.get(inv.pda);
+          const invoiceHasLock = settling || inv.status === "paid";
+          return (
+            <div
+              key={`inv:${entry.id}`}
+              className="px-2 sm:px-3 py-1 flex items-center gap-3"
+            >
+              <SentTypeBadge kind="invoice" />
+              <ul className="flex-1 min-w-0 m-0 p-0 list-none">
+                <InvoiceRow
+                  pda={inv.pda}
+                  status={inv.status}
+                  createdAt={inv.createdAt}
+                  label={labels.get(inv.pda)}
+                  settling={settling}
+                  animationDelayMs={Math.min(idx * 40, 400)}
+                  onBindReceipt={onBindReceipt}
+                />
+              </ul>
+              {/* Row-level reconciliation actions. PDF downloads live on
+                  the invoice detail page (/invoice/[pda]) where the full
+                  decrypted metadata is in scope; from the Sent feed the
+                  menu surfaces compliance + explorer, which only need the
+                  PDA. Stops propagation so clicking the menu doesn't bubble
+                  up to the row-level navigation. */}
+              <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+                <RowOverflowMenu
+                  invoicePda={inv.pda}
+                  invoiceHasLock={invoiceHasLock}
+                />
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div
+            key={`run:${entry.id}`}
+            className="flex items-stretch gap-3 px-2 sm:px-3"
+          >
+            <span className="self-center">
+              <SentTypeBadge kind="payroll" />
+            </span>
+            <ul className="flex-1 min-w-0 m-0 p-0 list-none">
+              <PayrollRunRow run={entry.run} />
+            </ul>
+            <div onClick={(e) => e.stopPropagation()} className="shrink-0 self-center">
+              <RowOverflowMenu payrollBatchId={entry.run.signed.packet.batchId} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Sent-feed empty state. Single page, no per-source split — the user
+ * sees one prompt covering both invoices and payroll runs.
+ */
+function SentEmptyState() {
+  return (
+    <div className="border border-dashed border-line rounded-[4px] py-16 px-8 text-center max-w-2xl mx-auto">
+      <p className="font-display italic text-ink/80 text-[24px] leading-[1.3]">
+        Nothing sent yet.
+      </p>
+      <p className="mt-3 text-[14px] text-ink/55 leading-relaxed max-w-md mx-auto">
+        Invoices and payroll runs you create show up here in chronological
+        order. Start with a single invoice or a payroll batch.
+      </p>
+      <a href="/create" className="mt-6 inline-block btn-quiet text-[13px]">
+        Go to Create →
+      </a>
+    </div>
+  );
+}
+
+/**
+ * Balance tab — Mercury-style card with Deposit / Withdraw. Lifted
+ * verbatim from the previous in-tab placement; the wrapper props let
+ * the dashboard keep its state at the page level so cross-tab refresh
+ * loops keep updating it even when the tab isn't visible.
+ */
+function BalanceTab({
+  balance,
+  depositOpen,
+  setDepositOpen,
+  depositAmount,
+  setDepositAmount,
+  depositing,
+  withdrawing,
+  onDeposit,
+  onWithdrawAll,
+}: {
+  balance: bigint | null;
+  depositOpen: boolean;
+  setDepositOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
+  depositAmount: string;
+  setDepositAmount: (next: string) => void;
+  depositing: boolean;
+  withdrawing: boolean;
+  onDeposit: () => void;
+  onWithdrawAll: () => void;
+}) {
+  return (
+    <div className="border border-line bg-paper-3 rounded-[4px] p-6 md:p-8 reveal">
+      <div className="flex items-start justify-between gap-6 flex-wrap">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5 mb-1">
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-sage" />
+            <span className="font-mono text-[10.5px] tracking-[0.18em] uppercase text-ink/55">
+              Private balance
+            </span>
+          </div>
+          <div className="mt-3 flex items-baseline gap-3">
+            <span className="font-sans tabular-nums tracking-tight text-ink text-[40px] md:text-[52px] font-medium leading-none">
+              {formatBigintAmount(balance, PAYMENT_DECIMALS)}
+            </span>
+            <span className="font-mono text-[12px] tracking-[0.14em] text-ink/45 uppercase">
+              {PAYMENT_SYMBOL}
+            </span>
+          </div>
+          <p className="mt-2.5 text-[12px] text-ink/45 leading-relaxed">
+            Encrypted at rest. Decryptable only by your wallet.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() =>
+              setDepositOpen((v: boolean) => !v)
+            }
+            disabled={depositing}
+            aria-expanded={depositOpen}
+            className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-50 transition-colors"
+          >
+            <span aria-hidden className="text-ink/55">↓</span>
+            <span>{depositing ? "Depositing…" : "Deposit"}</span>
+          </button>
+          <button
+            type="button"
+            onClick={onWithdrawAll}
+            disabled={withdrawing || balance == null || balance <= 0n}
+            className="inline-flex items-center gap-2 border border-line rounded-[3px] px-4 py-2.5 text-[12.5px] tracking-[0.04em] text-ink hover:bg-paper-2 disabled:opacity-40 transition-colors"
+          >
+            <span aria-hidden className="text-ink/55">↑</span>
+            <span>{withdrawing ? "Withdrawing…" : "Withdraw"}</span>
+          </button>
+        </div>
       </div>
-      <ul className="border border-line rounded-[4px] bg-paper-3 divide-y divide-line">
-        {runs.map((run) => (
-          <PayrollRunRow key={run.signed.packet.batchId} run={run} />
-        ))}
-      </ul>
-      <div className="mt-8">
-        <a href="/create" className="btn-quiet">+ New payroll batch</a>
-      </div>
+
+      {depositOpen && (
+        <div className="mt-6 pt-6 border-t border-line">
+          <div className="flex flex-wrap items-end gap-4">
+            <label className="flex flex-col gap-2">
+              <span className="font-mono text-[10.5px] tracking-[0.16em] uppercase text-ink/55">
+                Amount to shield
+              </span>
+              <div className="relative">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="1.0"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  disabled={depositing}
+                  autoFocus
+                  className="font-sans tabular-nums text-[20px] bg-paper-2 border border-line rounded-[3px] pl-3 pr-12 py-2.5 w-44 focus:outline-none focus:border-ink/40 transition-colors"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/45 pointer-events-none">
+                  {PAYMENT_SYMBOL}
+                </span>
+              </div>
+            </label>
+            <button
+              type="button"
+              onClick={onDeposit}
+              disabled={depositing || !depositAmount}
+              className="btn-primary text-[12.5px] px-5 py-2.5 disabled:opacity-40"
+            >
+              {depositing ? "Depositing…" : "Shield privately"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDepositOpen(false);
+                setDepositAmount("");
+              }}
+              disabled={depositing}
+              className="text-[12.5px] text-ink/55 hover:text-ink underline-offset-4 hover:underline transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="mt-4 text-[12px] text-ink/50 leading-[1.55] max-w-xl">
+            Moves SOL from your public wallet into your encrypted balance
+            through Umbra&apos;s mixer. This deposit tx is publicly visible
+            — every payment system has to anchor to real money somewhere.
+            But every subsequent payroll run sourced from this balance hides
+            the amount on chain. Settles in ~10–30 s through Arcium MPC.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

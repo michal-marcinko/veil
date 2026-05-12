@@ -24,6 +24,7 @@ import {
   getTransactionDecoder,
   getSignatureFromTransaction,
 } from "@solana/transactions";
+import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { NETWORK, RPC_URL, RPC_WSS_URL, UMBRA_INDEXER_API } from "./constants";
 
@@ -608,11 +609,48 @@ import {
   getCreateReceiverClaimableUtxoFromEncryptedBalanceProver,
 } from "@umbra-privacy/web-zk-prover";
 
+/**
+ * Detect Solana's "transaction too large" error so the public-pay path
+ * can gracefully fall back to the SDK's 2-popup flow when the bundled
+ * VeilPay CPI tx exceeds the 1232-byte cap. Solana surfaces this as a
+ * `SendTransactionError` with a message containing the literal string
+ * "VersionedTransaction too large" — match on the substring rather
+ * than the class so we don't have to import the SDK type here.
+ */
+function isTxTooLargeError(err: unknown): boolean {
+  if (!err) return false;
+  const msg =
+    typeof err === "string"
+      ? err
+      : ((err as any)?.message ?? String(err));
+  return /VersionedTransaction too large|encoded\/raw 1644\/1232/i.test(msg);
+}
+
 export interface PayInvoiceArgs {
   client: UmbraClient;
   recipientAddress: string;   // Alice's wallet (payee)
   mint: string;               // USDC mint
   amount: bigint;             // in native units
+  /**
+   * Invoice PDA (`invoice-registry::Invoice`). When provided, the
+   * single-popup CPI path (`payInvoiceCpi`) will CPI into
+   * `invoice-registry::lock_payment_intent` BEFORE the Umbra deposit
+   * CPIs — closing the double-pay race. Required when calling via
+   * `payInvoiceCpi`. The `payInvoiceFromShielded` (SDK fallback) path
+   * does not currently use it.
+   */
+  invoicePda?: PublicKey;
+  /**
+   * The wallet-adapter wallet (web3.js style — `useWallet()` output).
+   * Required by the shielded-batched path (`payInvoiceFromShieldedBatched`)
+   * which uses `wallet.signAllTransactions(txArray)` directly. The kit
+   * signer route (going through `client.signer.signTransactions(kitObjects)`)
+   * mis-serialises v0 messages and produces signatures that fail
+   * `VersionedTransaction` signature verification — so we bypass it
+   * and call the wallet adapter directly, mirroring the working pattern
+   * in `PayrollFlow.tsx`.
+   */
+  wallet?: any;
 }
 
 export interface PayInvoiceResult {
@@ -632,28 +670,51 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
   // the VeilPay program ID isn't configured (VeilPayNotConfiguredError) or
   // if the feature flag is explicitly off.
   if (USE_VEIL_PAY_CPI) {
+    let payInvoiceCpi: any;
+    let VeilPayNotConfiguredError: any;
     try {
-      const { payInvoiceCpi, VeilPayNotConfiguredError } = await import(
-        "./payInvoiceCpi"
+      const mod = await import("./payInvoiceCpi");
+      payInvoiceCpi = mod.payInvoiceCpi;
+      VeilPayNotConfiguredError = mod.VeilPayNotConfiguredError;
+    } catch (importErr) {
+      // Genuine module-load failure (SSR, missing dep). Fall through.
+      debugLog(
+        "[payInvoice] payInvoiceCpi module import failed, using SDK fallback",
+        importErr,
       );
+    }
+
+    if (payInvoiceCpi) {
       try {
         return await payInvoiceCpi(args);
       } catch (err) {
         if (err instanceof VeilPayNotConfiguredError) {
+          // Soft fall-through — feature flag set but program id missing.
           debugLog(
             "[payInvoice] VEIL_PAY_PROGRAM_ID not set, using SDK fallback",
           );
+        } else if (isTxTooLargeError(err)) {
+          // The CPI path's bundled tx exceeds Solana's 1232-byte cap.
+          // Post-Fix-2 the public-path tx is ~13 bytes over (verified
+          // 2026-05-06: 1660 encoded vs 1644 cap with the 14-entry ALT).
+          // Falling back to the SDK's 2-popup flow so the user can still
+          // pay — the trade-off is loss of auto-flip on this payment
+          // (no `PaymentIntentLock` acquired). Recipient flips the
+          // invoice manually via the receipt-paste recovery path.
+          //
+          // For shielded payments we use the batched signAllTransactions
+          // path instead, which keeps the lock + 1 popup; only public
+          // pay falls into this branch today.
+          debugLog(
+            "[payInvoice] CPI tx exceeds 1232b cap — falling back to legacy SDK 2-popup flow. Auto-flip will not fire for this payment; recipient must use receipt-paste recovery.",
+            err,
+          );
         } else {
+          // Real runtime error from the CPI path (simulation revert,
+          // RPC error, wallet rejection, etc). Surface to caller.
           throw err;
         }
       }
-    } catch (importErr) {
-      // Bare import failure (e.g. constructed under SSR without env). Treat
-      // as unconfigured and fall through.
-      debugLog(
-        "[payInvoice] payInvoiceCpi import failed, using SDK fallback",
-        importErr,
-      );
     }
   }
 
@@ -715,6 +776,60 @@ export async function payInvoice(args: PayInvoiceArgs): Promise<PayInvoiceResult
  * `markPaidOnChain(wallet, pda, utxoCommitment)`.
  */
 export async function payInvoiceFromShielded(args: PayInvoiceArgs): Promise<PayInvoiceResult> {
+  // Single-popup BATCHED-SIGNING path (replaces the dead bundled-CPI
+  // path which blew the 1232-byte tx cap by 234 bytes). The batched
+  // path builds 3 small txs (lock + createBuffer + deposit), signs
+  // them with `signAllTransactions` in ONE popup, and submits
+  // sequentially.
+  //
+  // Error semantics:
+  //   - VeilPayNotConfiguredError → soft fall-through to SDK fallback
+  //   - PaymentIntentLockError → tx 1/3 failed; nothing on chain;
+  //     re-throw so the UI can show standard "payment failed" UX.
+  //   - StuckLockError → tx 1 confirmed but tx 2 or tx 3 failed;
+  //     re-throw so the UI prompts for dashboard recovery.
+  //   - any other error → surface (do not silently fall back to a
+  //     lock-less 2-popup flow that breaks reconciliation).
+  if (USE_VEIL_PAY_CPI) {
+    let payInvoiceFromShieldedBatched: any;
+    let VeilPayNotConfiguredError: any;
+    try {
+      const mod = await import("./payInvoiceCpi");
+      payInvoiceFromShieldedBatched = mod.payInvoiceFromShieldedBatched;
+      VeilPayNotConfiguredError = mod.VeilPayNotConfiguredError;
+    } catch (importErr) {
+      // Genuine module-load failure (SSR, missing dep). Fall through.
+      debugLog(
+        "[payInvoiceFromShielded] payInvoiceFromShieldedBatched module import failed, using SDK fallback",
+        importErr,
+      );
+    }
+
+    if (payInvoiceFromShieldedBatched) {
+      try {
+        return await payInvoiceFromShieldedBatched(args);
+      } catch (err) {
+        if (err instanceof VeilPayNotConfiguredError) {
+          // Soft fall-through — feature flag set but program id missing,
+          // OR the captured-message-extraction concluded the SDK shape
+          // changed (ShieldedCpiNotConfiguredError → re-thrown as
+          // VeilPayNotConfiguredError by the wrapper).
+          debugLog(
+            "[payInvoiceFromShielded] VEIL_PAY_PROGRAM_ID not set or capture-shape drift, using SDK fallback",
+          );
+        } else {
+          // Real runtime error from the batched path — including
+          // PaymentIntentLockError (tx 1 failed) and StuckLockError
+          // (tx 2 or 3 failed after lock). Surface to caller; the UI
+          // distinguishes via `instanceof StuckLockError` to show the
+          // recovery prompt.
+          throw err;
+        }
+      }
+    }
+  }
+
+  // SDK orchestration fallback (legacy 2-popup path).
   const zkProver = getCreateReceiverClaimableUtxoFromEncryptedBalanceProver({
     assetProvider: proxiedAssetProvider(),
     ...zkAssetCache,

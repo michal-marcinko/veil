@@ -32,6 +32,7 @@ import { downloadInvoicePdf } from "@/lib/pdfDownload";
 import type { InvoiceMetadata } from "@/lib/types";
 import { buildReceipt, signReceipt, encodeReceipt, type SignedReceipt } from "@/lib/receipt";
 import { fetchTxBlockTime } from "@/lib/anchor";
+import { recordIncomingInvoice } from "@/lib/incoming-invoices-storage";
 import bs58 from "bs58";
 
 export default function PayPage({ params }: { params: { id: string } }) {
@@ -64,6 +65,11 @@ export default function PayPage({ params }: { params: { id: string } }) {
     "sign-deposit": "pending",
     confirm: "pending",
   });
+  // Set to true on the first successful record of this invoice in the
+  // payer's inbox (cross-device Arweave index). Suppressed on re-visits
+  // because recordIncomingInvoice is idempotent and returns early without
+  // uploading when the PDA is already known.
+  const [savedToInbox, setSavedToInbox] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -93,6 +99,30 @@ export default function PayPage({ params }: { params: { id: string } }) {
           return;
         }
 
+        // Restricted-payer gate (Fix 1, soft).
+        //
+        // If the creator selected "Restrict who can pay" at invoice
+        // creation, the on-chain account stores a non-null
+        // `invoice.payer`. Today the program does NOT enforce this
+        // (`NotPayer` is defined but never `require!`-checked), so a
+        // forwarded URL still lets anyone pay if they obtain the
+        // fragment key. This frontend check closes the casual case —
+        // someone clicking the link with the wrong wallet sees a clear
+        // refusal instead of being asked for funds. The trustless
+        // version is shipping in `veil-pay` as part of Fix 2 (CPI into
+        // `invoice-registry::lock_payment_intent`); this gate stays
+        // useful as the first failure surface even after Fix 2 lands.
+        // `invoice.payer` is already typed as `PublicKey | null` after
+        // `normalizeInvoice` — no cast needed.
+        if (invoice.payer && !invoice.payer.equals(wallet.publicKey)) {
+          setError(
+            "This invoice is restricted to a specific payer wallet. " +
+              "Connect with the wallet that received this link or ask the " +
+              "creator to issue an open invoice instead.",
+          );
+          return;
+        }
+
         const ciphertext = await fetchCiphertext(invoice.metadataUri);
         const computedHash = await sha256(ciphertext);
         const onChainHash = new Uint8Array(invoice.metadataHash as any);
@@ -104,6 +134,27 @@ export default function PayPage({ params }: { params: { id: string } }) {
 
         const md = (await decryptJson(ciphertext, key)) as InvoiceMetadata;
         setMetadata(md);
+
+        // Invoice successfully decrypted — record it in the payer's inbox.
+        // Fire-and-forget: idempotent (dedupe by PDA) so re-visits are cheap.
+        // We show a non-blocking "Saved to your inbox" confirmation only the
+        // first time (when the local cache doesn't yet have this PDA).
+        const walletBase58 = wallet.publicKey.toBase58();
+        const { loadCachedIncomingInvoices } = await import("@/lib/incoming-invoices-storage");
+        const alreadySaved = loadCachedIncomingInvoices(walletBase58).some(
+          (e) => e.invoicePda === params.id,
+        );
+        void recordIncomingInvoice({
+          wallet: wallet as any,
+          walletBase58,
+          entry: {
+            invoicePda: params.id,
+            urlFragmentKey: window.location.hash.replace(/^#/, ""),
+            openedAt: Date.now(),
+            metadataUri: invoice.metadataUri,
+          },
+        });
+        if (!alreadySaved) setSavedToInbox(true);
       } catch (err: any) {
         setError(err.message ?? String(err));
       }
@@ -229,6 +280,17 @@ export default function PayPage({ params }: { params: { id: string } }) {
         recipientAddress: metadata.creator.wallet,
         mint: USDC_MINT.toBase58(),
         amount: BigInt(metadata.total),
+        // Required by the single-popup CPI path (Fix 2): the on-chain
+        // VeilPay program now CPIs into invoice-registry::lock_payment_intent
+        // before the Umbra deposit, so it needs this PDA to derive the
+        // single-use lock account.
+        invoicePda,
+        // Required by the shielded batched path — it calls
+        // `wallet.signAllTransactions(txArray)` directly (the kit signer
+        // route mis-serialises v0 messages and produces sigs that fail
+        // verification). The public CPI path doesn't read this field
+        // but it's harmless to pass.
+        wallet,
       };
 
       const shouldUseShielded =
@@ -488,6 +550,11 @@ export default function PayPage({ params }: { params: { id: string } }) {
           recipientLabel={metadata?.creator?.display_name || metadata?.creator?.wallet?.slice(0, 8) || "recipient"}
           isShielded={useShielded && shielded?.kind === "available"}
         />
+        {savedToInbox && (
+          <div className="mt-4 text-[12px] font-mono tracking-[0.08em] text-sage/80">
+            Saved to your inbox
+          </div>
+        )}
         {status && <div className="mt-4 text-[13px] text-muted">{status}</div>}
       </div>
     </Shell>

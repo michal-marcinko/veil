@@ -176,7 +176,28 @@ export default function ScopedAuditGrantPage() {
               </>
             ) : null}
           </p>
+
+          {/* First-time intro — surfaces the two things a cold accountant
+              needs to know in 10 seconds: (1) the URL itself is the
+              credential, no wallet required to read; (2) what's actually
+              in scope is enforced by the granter, not displayed to them
+              by Veil. The fragment-key model is described in plain prose
+              rather than crypto jargon. */}
+          <p className="mt-4 text-[13.5px] leading-[1.65] text-muted max-w-2xl">
+            You&apos;re reading a private invoice ledger that was shared with
+            you by the issuer. Decryption happens locally in your browser
+            using a key carried in this URL —{" "}
+            <span className="text-ink">no wallet connection is required</span>.
+            Connecting one is optional and doesn&apos;t change what you can
+            see.
+          </p>
         </div>
+
+        {/* "Your scope" banner — derived from the decrypted invoices once
+            we have them, since the URL fragment intentionally doesn't
+            carry mint/date scope (it carries the per-grant key + the
+            URI list). Until rows are ready, render a quiet placeholder. */}
+        <ScopeBanner rows={rows} status={status} />
 
         <StatusBanner
           status={status}
@@ -270,6 +291,85 @@ function csvCell(s: string): string {
 // ---------------------------------------------------------------------------
 // UI components
 // ---------------------------------------------------------------------------
+
+function ScopeBanner({
+  rows,
+  status,
+}: {
+  rows: AuditRow[];
+  status: LoadStatus;
+}) {
+  // Only render once we've successfully decrypted at least one row. Before
+  // that the eyebrow + intro paragraph already orients the reader; the
+  // scope banner would only mislead with placeholder dashes.
+  if (status !== "ready") return null;
+  const ok = rows.filter((r) => r.ok);
+  if (ok.length === 0) return null;
+
+  // Date range — min/max of ISO created_at strings (lexicographic
+  // comparison is correct for ISO 8601 dates).
+  const dates = ok.map((r) => r.date.slice(0, 10)).sort();
+  const fromDate = dates[0];
+  const toDate = dates[dates.length - 1];
+
+  // Distinct currency symbols. Most grants will be a single mint; we
+  // surface up to two by name and collapse the rest into "+N more".
+  const symbols = Array.from(
+    new Set(ok.map((r) => r.symbol).filter((s) => s && s.length > 0)),
+  );
+  const symbolsLabel =
+    symbols.length === 0
+      ? "—"
+      : symbols.length <= 2
+        ? symbols.join(" · ")
+        : `${symbols.slice(0, 2).join(" · ")} +${symbols.length - 2}`;
+
+  return (
+    <div className="mb-8 border border-line rounded-[3px] bg-paper-3/60 max-w-2xl">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-line">
+        <span className="h-1 w-1 rounded-full bg-sage" aria-hidden />
+        <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-muted">
+          Your scope
+        </span>
+      </div>
+      <dl className="grid grid-cols-3 divide-x divide-line">
+        <ScopeCell label="Date range" value={`${fromDate} → ${toDate}`} mono />
+        <ScopeCell
+          label="Invoices"
+          value={`${ok.length} of ${rows.length}`}
+          mono
+        />
+        <ScopeCell label="Currency" value={symbolsLabel} mono />
+      </dl>
+    </div>
+  );
+}
+
+function ScopeCell({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5 px-4 py-3">
+      <span className="font-mono text-[10px] tracking-[0.14em] uppercase text-muted">
+        {label}
+      </span>
+      <span
+        className={`text-[13px] text-ink truncate ${
+          mono ? "font-mono tnum" : "font-sans"
+        }`}
+        title={value}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
 
 function StatusBanner({
   status,

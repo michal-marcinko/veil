@@ -31,7 +31,6 @@ import {
   commitScanWatermark,
   getOrCreateClient,
   scanClaimableUtxos,
-  withdrawShielded,
 } from "@/lib/umbra";
 import { PAYMENT_DECIMALS, PAYMENT_SYMBOL, USDC_MINT } from "@/lib/constants";
 import {
@@ -116,15 +115,48 @@ function utxoAmountBigint(raw: any): bigint {
   return 0n;
 }
 
+/**
+ * Receipt-bind candidate surfaced after a successful claim.
+ *
+ * The dashboard owns the (decrypted) invoice list, so it's the only
+ * surface that can resolve "did the user just receive payment for an
+ * invoice they sent?". The section delegates that match logic upward
+ * via `findReceiptCandidate`, then renders an inline banner with a
+ * primary button that calls `onBindReceipt(pda)` — wired in the parent
+ * to open the existing apply-receipt slide-over with the PDA prefilled.
+ */
+export type ReceiptBindCandidate = {
+  /** On-chain invoice PDA — what the bind flow ultimately needs. */
+  pda: string;
+  /** Short human id surfaced in the banner copy. */
+  shortId: string;
+};
+
 export interface IncomingPrivatePaymentsSectionProps {
   /** The connected wallet from `useWallet()`. The section internally
    *  guards on `wallet.connected`/`wallet.publicKey` so the parent
    *  doesn't have to re-derive the gate. */
   wallet: WalletContextState;
+  /**
+   * Called after a successful claim with the claimed UTXO's amount in
+   * base units. Returns the single matching pending-and-recent invoice
+   * the user has SENT, or null when there are zero or multiple matches
+   * (in which case the section shows nothing). Resolved in the parent
+   * because that's where the decrypted invoice metadata lives.
+   */
+  findReceiptCandidate?: (claimedAmount: bigint) => ReceiptBindCandidate | null;
+  /**
+   * Called when the user clicks the banner's primary button. Wired in
+   * the parent to open the apply-receipt slide-over with the matched
+   * invoice's PDA prefilled.
+   */
+  onBindReceipt?: (pda: string) => void;
 }
 
 export function IncomingPrivatePaymentsSection({
   wallet,
+  findReceiptCandidate,
+  onBindReceipt,
 }: IncomingPrivatePaymentsSectionProps) {
   const walletBase58 = wallet.publicKey?.toBase58() ?? null;
 
@@ -158,6 +190,12 @@ export function IncomingPrivatePaymentsSection({
   // for users with long histories.
   const [pendingOpen, setPendingOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
+
+  // Receipt-suggest banner. Set by `handleClaimPending` after a
+  // successful claim when `findReceiptCandidate` returns a unique match.
+  // Null otherwise — the banner only renders for the unambiguous case.
+  const [receiptSuggestion, setReceiptSuggestion] =
+    useState<ReceiptBindCandidate | null>(null);
 
   /* ───────── history hydration + storage-event subscription ───────── */
 
@@ -274,21 +312,30 @@ export function IncomingPrivatePaymentsSection({
     if (!walletBase58 || !wallet.publicKey) return;
     setClaimingKey(utxo.key);
     setClaimError(null);
+    // A new claim starts — drop any stale match suggestion from a
+    // previous claim so the banner doesn't carry over to the next one.
+    setReceiptSuggestion(null);
     setClaimSubStep("Claiming UTXO into your encrypted balance…");
     try {
       const client = await getOrCreateClient(wallet as any);
       // 1. Claim the single UTXO into the recipient's encrypted balance.
-      await claimUtxos({ client, utxos: [utxo.raw] });
-      setClaimSubStep("Withdrawing to your wallet…");
-      // 2. Withdraw the freshly-claimed amount to the connected wallet.
-      //    `withdrawShielded` routes to the signer's address per the
-      //    SDK's withdraw helper (see lib/umbra.ts).
+      //    The funds stay private — the user can spend them on Veil
+      //    via shielded sends, or click "Withdraw" on the balance
+      //    card to move them to their public wallet.
+      //
+      //    Earlier versions auto-withdrew here, which silently moved
+      //    funds out of encrypted balance and onto the public chain
+      //    without the user's consent. That defeated the privacy
+      //    property the user is buying into. Now claim and withdraw
+      //    are two distinct, explicit user actions.
+      const claimResult = await claimUtxos({ client, utxos: [utxo.raw] });
       const mint = USDC_MINT.toBase58();
-      const withdrawResult = await withdrawShielded(client, mint, utxo.amount);
       const finalSig =
-        withdrawResult.callbackSignature ?? withdrawResult.queueSignature;
+        (claimResult as any)?.callbackSignature ??
+        (claimResult as any)?.queueSignature ??
+        "";
 
-      // 3. Persist a ReceivedPayment so the row joins history.
+      // 2. Persist a ReceivedPayment so the row joins history.
       const now = new Date().toISOString();
       const payment: ReceivedPayment = {
         // Pending UTXOs may not have a batchId in their metadata. The
@@ -306,7 +353,10 @@ export function IncomingPrivatePaymentsSection({
         mint,
         memo: null,
         claimSignature: finalSig,
-        withdrawSignature: finalSig,
+        // No withdraw happened — funds stay in the recipient's
+        // encrypted balance until they explicitly click Withdraw
+        // on the balance card.
+        withdrawSignature: undefined,
         // Pending-pool UTXOs that the recipient claims directly via the
         // mixer-protected path are by definition mixer-routed: someone
         // posted a re-encrypted UTXO to the pool, the recipient just
@@ -332,6 +382,20 @@ export function IncomingPrivatePaymentsSection({
       // without waiting for a full re-scan.
       setPending((prev) => prev.filter((p) => p.key !== utxo.key));
       setHistory(loadCachedReceivedPaymentsFlat(walletBase58));
+
+      // Receipt auto-suggest. If the parent can resolve this claimed
+      // amount to exactly one recent invoice the user has SENT, surface
+      // a banner offering to bind the receipt. Zero or multiple matches
+      // → no banner (we don't want to nudge the user toward a guess).
+      if (findReceiptCandidate) {
+        try {
+          const candidate = findReceiptCandidate(utxo.amount);
+          if (candidate) setReceiptSuggestion(candidate);
+        } catch {
+          // Defensive: a throw in the parent shouldn't break the claim
+          // success path. Silently skip the suggestion.
+        }
+      }
     } catch (err: any) {
       // eslint-disable-next-line no-console
       console.error("[Veil dashboard] pending claim failed:", err);
@@ -359,7 +423,7 @@ export function IncomingPrivatePaymentsSection({
       <div className="flex items-baseline justify-between mb-6 border-b border-line pb-3">
         <div className="flex items-baseline gap-3">
           <span className="font-sans text-xs uppercase tracking-[0.18em] text-ink/55">
-            Inbox
+            Private payments
           </span>
           {pending.length > 0 && (
             <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-gold">
@@ -381,7 +445,7 @@ export function IncomingPrivatePaymentsSection({
           aria-expanded={pendingOpen}
         >
           <span className="font-sans text-[11.5px] uppercase tracking-[0.16em] text-ink/55">
-            Pending claims
+            Payments to claim
             <span className="ml-2 text-ink/35 font-mono tabular-nums">
               {String(pending.length).padStart(2, "0")}
             </span>
@@ -431,6 +495,42 @@ export function IncomingPrivatePaymentsSection({
                 <span className="text-[12.5px] text-ink leading-relaxed flex-1">
                   {claimError}
                 </span>
+              </div>
+            )}
+            {receiptSuggestion && (
+              <div className="mb-3 flex items-start gap-3 border-l-2 border-gold pl-3 py-2 pr-3">
+                <span className="mono-chip text-gold shrink-0 pt-0.5">
+                  Match
+                </span>
+                <span className="text-[12.5px] text-ink leading-relaxed flex-1">
+                  Looks like this matches invoice{" "}
+                  <span className="font-mono text-ink/85">
+                    {receiptSuggestion.shortId}
+                  </span>{" "}
+                  — bind receipt?
+                </span>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = receiptSuggestion;
+                      setReceiptSuggestion(null);
+                      if (onBindReceipt && target) onBindReceipt(target.pda);
+                    }}
+                    className="font-mono text-[11px] tracking-[0.14em] uppercase text-gold hover:text-ink transition-colors inline-flex items-center gap-1.5"
+                  >
+                    <span>Bind receipt</span>
+                    <span aria-hidden>→</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReceiptSuggestion(null)}
+                    aria-label="Dismiss receipt suggestion"
+                    className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-ink/40 hover:text-ink transition-colors"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
             {pending.length === 0 ? (
