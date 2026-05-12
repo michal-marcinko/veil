@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "npm --workspace app run dev",
     "build": "npm --workspace app run build",
+    "start": "npm --workspace app run start",
     "test": "npm --workspace app run test",
     "anchor:build": "cd programs/invoice-registry && anchor build",
     "anchor:test": "cd programs/invoice-registry && anchor test",
