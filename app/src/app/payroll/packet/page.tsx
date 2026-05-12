@@ -11,6 +11,74 @@ import {
 } from "@/lib/private-payroll";
 import { NETWORK } from "@/lib/constants";
 
+/**
+ * Build a CSV of all rows in a signed packet for the auditor to import
+ * into their accounting system. Header is a self-documenting superset of
+ * what auditors typically want — id, name, wallet, amount, memo, status,
+ * tx signature, funding mode. Cell values are quoted when they contain
+ * commas / quotes / newlines per RFC 4180.
+ */
+function buildPacketCsv(signed: SignedPayrollPacket): string {
+  const p = signed.packet;
+  const header = [
+    "row",
+    "recipient_name",
+    "recipient_wallet",
+    "amount_raw",
+    "amount_display",
+    "symbol",
+    "mint",
+    "memo",
+    "status",
+    "mode",
+    "umbra_tx_signature",
+    "batch_id",
+    "payer_wallet",
+    "created_at",
+  ].join(",");
+  const lines = p.rows.map((row, idx) => {
+    const cells = [
+      String(idx + 1),
+      csvCell(row.recipientName?.trim() ?? ""),
+      row.recipient,
+      row.amount,
+      `${formatPayrollAmount(row.amount, p.decimals)} ${p.symbol}`,
+      p.symbol,
+      p.mint,
+      csvCell(row.memo ?? ""),
+      row.status,
+      row.mode,
+      row.txSignature ?? "",
+      p.batchId,
+      p.payer,
+      p.createdAt,
+    ];
+    return cells.join(",");
+  });
+  return `${header}\n${lines.join("\n")}\n`;
+}
+
+function csvCell(value: string): string {
+  if (value === "") return "";
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+function downloadCsv(signed: SignedPayrollPacket): void {
+  const csv = buildPacketCsv(signed);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `veil-payroll-${signed.packet.batchId}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 type State =
   | { kind: "loading" }
   | { kind: "error"; reason: string }
@@ -74,6 +142,24 @@ export default function PayrollPacketPage() {
               <Stat label="Rows" value={state.signed.packet.rows.length.toString()} />
               <Stat label="Paid" value={state.signed.packet.rows.filter((r) => r.status === "paid").length.toString()} />
               <Stat label="Mint" value={state.signed.packet.symbol} />
+            </div>
+
+            {/* Auditor export — single click downloads the full batch as
+                a CSV the accountant can import into their ledger. RFC-4180
+                quoted so names / memos with commas survive intact. Done
+                purely client-side from the already-decoded packet — no
+                second network round-trip. */}
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => downloadCsv(state.signed)}
+                className="btn-ghost text-[12.5px] tracking-[0.04em]"
+              >
+                Download CSV
+              </button>
+              <span className="font-mono text-[10.5px] tracking-[0.14em] uppercase text-dim">
+                Full batch · {state.signed.packet.rows.length} row{state.signed.packet.rows.length === 1 ? "" : "s"}
+              </span>
             </div>
 
             <ul className="mt-10 border border-line bg-paper-3 rounded-[4px] divide-y divide-line">
